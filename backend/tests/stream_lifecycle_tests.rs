@@ -43,6 +43,9 @@ async fn start_test_server() -> TestServer {
             max_bitrate: None,
             audio_bitrate: "192k".to_string(),
             threads: None,
+            gpu: false,
+            hls_downscale: true,
+            hls_max_height: 1080,
         },
         auth: streamx::config::AuthConfig {
             jwt_secret: "test-secret-key-for-integration-tests".to_string(),
@@ -51,8 +54,11 @@ async fn start_test_server() -> TestServer {
         ui: streamx::config::UiConfig {
             default_theme: "dark".to_string(),
         },
+        providers: vec![],
+        vpn: None,
         data_dir: data_dir.clone(),
         log_level: "warn".to_string(),
+        log_dir: None,
         open_browser: false,
         admin_user: None,
         admin_password: None,
@@ -64,21 +70,25 @@ async fn start_test_server() -> TestServer {
 
     database.set_downloading_to_paused().await.unwrap();
     let torrent_engine =
-        streamx::torrent::TorrentEngine::create(&config.torrent, &data_dir, database.clone())
+        streamx::torrent::TorrentEngine::create(&config.torrent, &data_dir, database.clone(), None)
             .await
             .unwrap();
-    let search_provider = streamx::torrent::SearchProvider::new();
+    let search_provider = streamx::torrent::SearchProvider::new(vec![], None);
     let cache_dir = data_dir.join("cache");
     let hls_pipeline = streamx::transcode::HlsManager::new(&config.transcode, cache_dir)
         .await
         .unwrap();
 
+    let (log_tx, _) = tokio::sync::broadcast::channel::<String>(1000);
+    let (_, log_history) = streamx::logging::BroadcastLayer::new(log_tx.clone());
     let app = streamx::server::build_router(
         database,
         config,
         torrent_engine,
         search_provider,
         hls_pipeline,
+        log_tx,
+        log_history,
     );
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();

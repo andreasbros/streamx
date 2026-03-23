@@ -25,6 +25,10 @@ export default defineConfig({
         changeOrigin: true,
         ws: true,
       },
+      "/proxy": {
+        target: "http://localhost:8998",
+        changeOrigin: true,
+      },
     },
   },
   preview: {

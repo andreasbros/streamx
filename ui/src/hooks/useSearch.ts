@@ -1,9 +1,20 @@
 import { useState, useRef, useCallback } from "react";
 import { api } from "../api/client";
-import type { SearchResult } from "../api/types";
+import type { SearchResultGroup } from "../api/types";
+
+const CACHE_KEY = "streamx_search_results";
+
+function getCachedResults(): SearchResultGroup[] {
+  try {
+    const cached = sessionStorage.getItem(CACHE_KEY);
+    return cached ? JSON.parse(cached) : [];
+  } catch {
+    return [];
+  }
+}
 
 export function useSearch() {
-  const [results, setResults] = useState<SearchResult[]>([]);
+  const [results, setResults] = useState<SearchResultGroup[]>(getCachedResults);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -21,6 +32,7 @@ export function useSearch() {
       setResults([]);
       setError(null);
       setIsLoading(false);
+      sessionStorage.removeItem(CACHE_KEY);
       return;
     }
 
@@ -35,6 +47,7 @@ export function useSearch() {
         if (!controller.signal.aborted) {
           setResults(data.results);
           setError(null);
+          sessionStorage.setItem(CACHE_KEY, JSON.stringify(data.results));
         }
       } catch (err) {
         if (!controller.signal.aborted) {

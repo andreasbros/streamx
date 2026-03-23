@@ -1,5 +1,8 @@
+use crate::db::favourites::AddFavouriteRequest;
+use crate::db::metadata::MediaMetadata;
 use crate::error::Error;
 use crate::server::auth::Claims;
+use crate::server::proxy;
 use crate::server::AppState;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
@@ -13,13 +16,33 @@ pub struct SearchRequest {
 
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
-    pub results: Vec<crate::torrent::SearchResult>,
+    pub results: Vec<crate::torrent::SearchResultGroup>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateStreamRequest {
     pub magnet_uri: String,
     pub file_index: Option<usize>,
+    pub poster_url: Option<String>,
+    // Rich metadata from search results
+    pub title: Option<String>,
+    pub year: Option<u32>,
+    pub rating: Option<f64>,
+    pub runtime: Option<u32>,
+    pub genres: Option<Vec<String>>,
+    pub language: Option<String>,
+    pub video_codec: Option<String>,
+    pub audio_channels: Option<String>,
+    pub source_type: Option<String>,
+    pub summary: Option<String>,
+    pub imdb_code: Option<String>,
+    pub mpa_rating: Option<String>,
+    pub bit_depth: Option<String>,
+    pub trailer_code: Option<String>,
+    pub poster_small: Option<String>,
+    pub poster_medium: Option<String>,
+    pub poster_large: Option<String>,
+    pub backdrop: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,6 +78,35 @@ pub async fn search(
     Ok(Json(SearchResponse { results }))
 }
 
+pub async fn browse(
+    State(state): State<AppState>,
+    _claims: Claims,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let sort_by = params
+        .get("sort_by")
+        .map(|s| s.as_str())
+        .unwrap_or("date_added");
+    let genre = params.get("genre").map(|s| s.as_str());
+    let minimum_rating = params.get("minimum_rating").and_then(|s| s.parse().ok());
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10u32)
+        .min(20);
+    let page = params
+        .get("page")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1u32);
+
+    let results = state
+        .search_provider
+        .browse(sort_by, genre, minimum_rating, limit, page)
+        .await?;
+
+    Ok(Json(serde_json::json!({ "results": results })))
+}
+
 pub async fn search_history(
     State(state): State<AppState>,
     claims: Claims,
@@ -87,8 +139,79 @@ pub async fn create_stream(
     };
     let _ = state
         .db
-        .add_watch(&claims.user_id, magnet_uri, title, None)
+        .add_watch(
+            &claims.user_id,
+            magnet_uri,
+            title,
+            None,
+            body.poster_url.as_deref(),
+        )
         .await;
+
+    // Store rich metadata if we have any
+    let info_hash = download.info_hash.clone();
+    let has_metadata = body.title.is_some() || body.poster_url.is_some();
+    if has_metadata {
+        let meta = MediaMetadata {
+            info_hash: info_hash.clone(),
+            title: body.title.clone().unwrap_or_else(|| download.title.clone()),
+            year: body.year.map(|y| y as i32),
+            rating: body.rating,
+            runtime: body.runtime.map(|r| r as i32),
+            genres: body.genres.as_ref().map(|g| g.join(",")),
+            language: body.language.clone(),
+            mpa_rating: body.mpa_rating.clone(),
+            summary: body.summary.clone(),
+            imdb_code: body.imdb_code.clone(),
+            trailer_code: body.trailer_code.clone(),
+            video_codec: body.video_codec.clone(),
+            audio_channels: body.audio_channels.clone(),
+            bit_depth: body.bit_depth.clone(),
+            source_type: body.source_type.clone(),
+            poster_small: body.poster_small.clone(),
+            poster_medium: body.poster_medium.clone(),
+            poster_large: body.poster_large.clone(),
+            backdrop: body.backdrop.clone(),
+            local_poster: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let _ = state.db.upsert_metadata(&meta).await;
+    }
+
+    // Spawn background poster download
+    let poster_url = body.poster_large.or(body.poster_medium).or(body.poster_url);
+    if let Some(url) = poster_url {
+        // Resolve proxy URLs back to absolute upstream URLs for downloading
+        let download_url = proxy::resolve_proxy_url(&url, &state.config.providers);
+        let db = state.db.clone();
+        let data_dir = state.config.data_dir.clone();
+        let hash = info_hash.clone();
+        tokio::spawn(async move {
+            let posters_dir = data_dir.join("downloads").join("posters");
+            if let Err(e) = tokio::fs::create_dir_all(&posters_dir).await {
+                tracing::warn!(info_hash = %hash, "Failed to create posters dir: {e}");
+                return;
+            }
+            let dest = posters_dir.join(format!("{hash}.jpg"));
+            if dest.exists() {
+                let _ = db
+                    .update_local_poster(&hash, &format!("/api/posters/{hash}.jpg"))
+                    .await;
+                return;
+            }
+            match download_poster(&download_url, &dest).await {
+                Ok(()) => {
+                    tracing::info!(info_hash = %hash, "Poster downloaded");
+                    let _ = db
+                        .update_local_poster(&hash, &format!("/api/posters/{hash}.jpg"))
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!(info_hash = %hash, "Failed to download poster: {e}");
+                }
+            }
+        });
+    }
 
     Ok(Json(serde_json::json!({
         "stream_id": download.info_hash,
@@ -96,6 +219,16 @@ pub async fn create_stream(
         "title": download.title,
         "file_name": download.file_name,
     })))
+}
+
+async fn download_poster(
+    url: &str,
+    dest: &std::path::Path,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let resp = reqwest::get(url).await?;
+    let bytes = resp.bytes().await?;
+    tokio::fs::write(dest, &bytes).await?;
+    Ok(())
 }
 
 pub async fn get_stream(
@@ -150,15 +283,44 @@ pub async fn delete_stream(
     _claims: Claims,
     Path(id): Path<String>,
 ) -> std::result::Result<impl IntoResponse, Error> {
+    // Stop torrent
+    let _ = state.torrent_engine.pause(&id).await;
+
+    // Delete files on disk
+    if let Ok(Some(dl)) = state.torrent_engine.get_download(&id).await {
+        if let Some(ref p) = dl.partial_path {
+            let path = std::path::PathBuf::from(p);
+            if path.exists() {
+                let parent = path.parent().map(|p| p.to_path_buf());
+                let _ = tokio::fs::remove_file(&path).await;
+                if let Some(dir) = parent {
+                    let _ = tokio::fs::remove_dir(&dir).await;
+                }
+            }
+        }
+        if let Some(ref p) = dl.complete_path {
+            let path = std::path::PathBuf::from(p);
+            if path.exists() {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+    }
+
+    // Clean HLS cache
     state.hls_pipeline.cleanup(&id).await?;
-    Ok(Json(serde_json::json!({ "status": "stopped" })))
+
+    // Delete DB records
+    state.db.delete_download(&id).await?;
+
+    tracing::info!(stream_id = %id, "Stream deleted");
+    Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
 
 pub async fn get_history(
     State(state): State<AppState>,
     claims: Claims,
 ) -> std::result::Result<impl IntoResponse, Error> {
-    let items = state.db.get_watch_history(&claims.user_id).await?;
+    let items = state.db.get_watch_history_enriched(&claims.user_id).await?;
     Ok(Json(serde_json::json!({ "items": items })))
 }
 
@@ -254,4 +416,310 @@ pub async fn get_demo_stream() -> impl IntoResponse {
 
 pub async fn demo_playlist() -> impl IntoResponse {
     axum::response::Redirect::temporary(DEMO_HLS_URL)
+}
+
+static TRAILER_SEARCH_CACHE: std::sync::LazyLock<dashmap::DashMap<String, String>> =
+    std::sync::LazyLock::new(dashmap::DashMap::new);
+
+pub async fn trailer_search(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> std::result::Result<Json<serde_json::Value>, Error> {
+    let query = params.get("q").ok_or_else(|| Error::BadRequest {
+        message: "Missing query parameter 'q'".to_string(),
+    })?;
+
+    if let Some(cached) = TRAILER_SEARCH_CACHE.get(query) {
+        return Ok(Json(serde_json::json!({ "youtube_id": cached.value() })));
+    }
+
+    let search_url = format!(
+        "https://www.youtube.com/results?search_query={}",
+        urlencoding::encode(query)
+    );
+
+    let html = state
+        .http_client
+        .get(&search_url)
+        .header("Accept-Language", "en")
+        .send()
+        .await
+        .map_err(|e| Error::Internal {
+            message: format!("YouTube search failed: {e}"),
+        })?
+        .text()
+        .await
+        .map_err(|e| Error::Internal {
+            message: format!("Failed to read YouTube response: {e}"),
+        })?;
+
+    // Extract unique video IDs from YouTube's embedded JSON ("videoId":"XXXXXXXXXXX")
+    let mut seen = std::collections::HashSet::new();
+    let candidates: Vec<String> = html
+        .split("\"videoId\":\"")
+        .skip(1)
+        .filter_map(|s| {
+            let id = s.split('"').next()?;
+            if id.len() == 11
+                && id
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                && seen.insert(id.to_string())
+            {
+                Some(id.to_string())
+            } else {
+                None
+            }
+        })
+        .take(10)
+        .collect();
+
+    // Also extract video titles for fuzzy matching ("title":{"runs":[{"text":"..."}]})
+    let titles: Vec<String> = html
+        .split("\"title\":{\"runs\":[{\"text\":\"")
+        .skip(1)
+        .filter_map(|s| s.split('"').next().map(String::from))
+        .take(10)
+        .collect();
+
+    // Find best match: prefer results whose title contains the original search terms
+    let query_lower = query.to_lowercase();
+    let query_words: Vec<&str> = query_lower
+        .split_whitespace()
+        .filter(|w| w.len() > 2 && *w != "official" && *w != "trailer")
+        .collect();
+
+    let best_id = candidates
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, _)| {
+            let title = titles.get(*i).map(|t| t.to_lowercase()).unwrap_or_default();
+            let word_hits = query_words.iter().filter(|w| title.contains(**w)).count();
+            let has_trailer = title.contains("trailer") || title.contains("official");
+            // Score: word matches * 10 + trailer keyword bonus + position penalty
+            (word_hits * 10) + if has_trailer { 5 } else { 0 } + (10_usize.saturating_sub(*i))
+        })
+        .map(|(_, id)| id.as_str());
+
+    match best_id {
+        Some(id) => {
+            tracing::info!(query, youtube_id = id, "Trailer search matched");
+            TRAILER_SEARCH_CACHE.insert(query.clone(), id.to_string());
+            Ok(Json(serde_json::json!({ "youtube_id": id })))
+        }
+        None => Err(Error::NotFound {
+            message: "No video found".to_string(),
+        }),
+    }
+}
+
+pub async fn add_favourite(
+    State(state): State<AppState>,
+    claims: Claims,
+    Json(body): Json<AddFavouriteRequest>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    if body.title.trim().is_empty() || body.title.len() > 500 {
+        return Err(Error::BadRequest {
+            message: "Title must be between 1 and 500 characters".to_string(),
+        });
+    }
+    let item = state.db.add_favourite(&claims.user_id, &body).await?;
+    Ok(Json(item))
+}
+
+pub async fn get_favourites(
+    State(state): State<AppState>,
+    claims: Claims,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let content_type = params.get("type").map(|s| s.as_str());
+    let items = state
+        .db
+        .get_favourites(&claims.user_id, content_type)
+        .await?;
+    Ok(Json(serde_json::json!({ "items": items })))
+}
+
+pub async fn delete_favourite(
+    State(state): State<AppState>,
+    claims: Claims,
+    Path(id): Path<String>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let deleted = state.db.delete_favourite(&id, &claims.user_id).await?;
+    if !deleted {
+        return Err(Error::NotFound {
+            message: "Favourite not found".to_string(),
+        });
+    }
+    Ok(Json(serde_json::json!({ "status": "deleted" })))
+}
+
+pub async fn search_tv(
+    State(state): State<AppState>,
+    _claims: Claims,
+    Json(body): Json<SearchRequest>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let query = body.query.trim();
+    if query.is_empty() || query.len() > 500 {
+        return Err(Error::BadRequest {
+            message: "Query must be between 1 and 500 characters".to_string(),
+        });
+    }
+    let results = state.search_provider.search_tv(query).await?;
+    Ok(Json(serde_json::json!({ "results": results })))
+}
+
+pub async fn browse_tv(
+    State(state): State<AppState>,
+    _claims: Claims,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let page = params
+        .get("page")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1u32);
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20u32)
+        .min(100);
+    let results = state.search_provider.browse_tv(page, limit).await?;
+    Ok(Json(serde_json::json!({ "results": results })))
+}
+
+pub async fn get_tv_show(
+    State(state): State<AppState>,
+    _claims: Claims,
+    axum::extract::Path(imdb_id): axum::extract::Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    if !imdb_id.starts_with("tt") || imdb_id.len() < 4 {
+        return Err(Error::BadRequest {
+            message: "Invalid IMDB ID".to_string(),
+        });
+    }
+    let season = params.get("season").and_then(|s| s.parse::<u32>().ok());
+    if season.is_some() {
+        let seasons = state
+            .search_provider
+            .fetch_show_episodes(&imdb_id, season)
+            .await?;
+        Ok(Json(serde_json::json!({ "seasons": seasons })))
+    } else {
+        let season_numbers = state.search_provider.discover_seasons(&imdb_id).await?;
+        Ok(Json(serde_json::json!({ "seasons": season_numbers })))
+    }
+}
+
+pub async fn search_music_videos(
+    State(state): State<AppState>,
+    _claims: Claims,
+    Json(body): Json<SearchRequest>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let query = body.query.trim();
+    if query.is_empty() || query.len() > 500 {
+        return Err(Error::BadRequest {
+            message: "Query must be between 1 and 500 characters".to_string(),
+        });
+    }
+    let results = state.search_provider.search_music_videos(query).await?;
+    Ok(Json(serde_json::json!({ "results": results })))
+}
+
+pub async fn browse_music_videos(
+    State(state): State<AppState>,
+    _claims: Claims,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let page = params
+        .get("page")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1u32);
+    let results = state.search_provider.browse_music_videos(page).await?;
+    Ok(Json(serde_json::json!({ "results": results })))
+}
+
+pub async fn search_music(
+    State(state): State<AppState>,
+    _claims: Claims,
+    Json(body): Json<SearchRequest>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let query = body.query.trim();
+    if query.is_empty() || query.len() > 500 {
+        return Err(Error::BadRequest {
+            message: "Query must be between 1 and 500 characters".to_string(),
+        });
+    }
+    let results = state.search_provider.search_music(query).await?;
+    Ok(Json(serde_json::json!({ "results": results })))
+}
+
+pub async fn browse_music(
+    State(state): State<AppState>,
+    _claims: Claims,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let page = params
+        .get("page")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1u32);
+    let results = state.search_provider.browse_music(page).await?;
+    Ok(Json(serde_json::json!({ "results": results })))
+}
+
+pub async fn resolve_magnet(
+    State(state): State<AppState>,
+    _claims: Claims,
+    Json(body): Json<std::collections::HashMap<String, String>>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let detail_url = body.get("detail_url").ok_or_else(|| Error::BadRequest {
+        message: "detail_url is required".to_string(),
+    })?;
+    let magnet = state.search_provider.get_magnet(detail_url).await?;
+    match magnet {
+        Some(m) => Ok(Json(serde_json::json!({ "magnet": m }))),
+        None => Err(Error::NotFound {
+            message: "Could not resolve magnet link".to_string(),
+        }),
+    }
+}
+
+pub async fn serve_poster(
+    State(state): State<AppState>,
+    Path(filename): Path<String>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    // Sanitize filename to prevent path traversal
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err(Error::BadRequest {
+            message: "Invalid filename".to_string(),
+        });
+    }
+
+    let poster_path = state
+        .config
+        .data_dir
+        .join("downloads")
+        .join("posters")
+        .join(&filename);
+
+    if !poster_path.exists() {
+        return Err(Error::NotFound {
+            message: "Poster not found".to_string(),
+        });
+    }
+
+    let bytes = tokio::fs::read(&poster_path)
+        .await
+        .map_err(|e| Error::Io { source: e })?;
+
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "image/jpeg".to_string()),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable".to_string(),
+            ),
+        ],
+        bytes,
+    ))
 }

@@ -40,3 +40,11 @@ export function detectQuality(title: string): string | null {
 export function isMagnetLink(text: string): boolean {
   return text.trim().startsWith("magnet:");
 }
+
+export function formatRuntime(minutes: number): string {
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h > 0 && m > 0) return `${h}h ${m}m`;
+  if (h > 0) return `${h}h`;
+  return `${m}m`;
+}

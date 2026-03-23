@@ -17,17 +17,33 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     #[serde(default = "default_ui")]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub providers: Vec<ProviderConfig>,
+    #[serde(default)]
+    pub vpn: Option<VpnConfig>,
 
     #[serde(skip)]
     pub data_dir: PathBuf,
     #[serde(skip)]
     pub log_level: String,
     #[serde(skip)]
+    pub log_dir: Option<PathBuf>,
+    #[serde(skip)]
     pub open_browser: bool,
     #[serde(skip)]
     pub admin_user: Option<String>,
     #[serde(skip)]
     pub admin_password: Option<String>,
+}
+
+impl AppConfig {
+    pub fn provider_by_kind(&self, kind: &str) -> Option<&ProviderConfig> {
+        self.providers.iter().find(|p| p.kind == kind)
+    }
+
+    pub fn provider_by_id(&self, id: u32) -> Option<&ProviderConfig> {
+        self.providers.iter().find(|p| p.id == id)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +90,12 @@ pub struct TranscodeConfig {
     pub audio_bitrate: String,
     #[serde(default)]
     pub threads: Option<u32>,
+    #[serde(default)]
+    pub gpu: bool,
+    #[serde(default = "default_true")]
+    pub hls_downscale: bool,
+    #[serde(default = "default_hls_max_height")]
+    pub hls_max_height: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,6 +104,76 @@ pub struct AuthConfig {
     pub jwt_secret: String,
     #[serde(default = "default_session_duration")]
     pub session_duration: String,
+}
+
+/// A content provider (movies, tv, music, etc).
+/// Users supply the URL; we never hardcode external domains.
+/// `format`: "yts", "eztv", "apibay", "scrape" (default based on kind)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    pub id: u32,
+    pub kind: String,
+    pub url: String,
+    #[serde(default)]
+    pub api_url: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VpnConfig {
+    pub socks5: String,
+}
+
+impl VpnConfig {
+    /// Resolve the SOCKS5 URL, expanding `${ENV_VAR}` patterns and
+    /// injecting credentials from `STREAMX_SOCKS5_PROXY_USERNAME` /
+    /// `STREAMX_SOCKS5_PROXY_PASSWORD` env vars if the URL has no auth.
+    pub fn resolved_url(&self) -> String {
+        let mut url = expand_env_vars(&self.socks5);
+
+        // If URL has no credentials, inject from env vars
+        if !url.contains('@') {
+            let user = std::env::var("STREAMX_SOCKS5_PROXY_USERNAME").unwrap_or_default();
+            let pass = std::env::var("STREAMX_SOCKS5_PROXY_PASSWORD").unwrap_or_default();
+            if !user.is_empty() {
+                let auth = if pass.is_empty() {
+                    user
+                } else {
+                    format!("{}:{}", user, pass)
+                };
+                // socks5://host:port -> socks5://user:pass@host:port
+                if let Some(idx) = url.find("://") {
+                    url = format!("{}://{}@{}", &url[..idx], auth, &url[idx + 3..]);
+                }
+            }
+        }
+
+        url
+    }
+}
+
+fn expand_env_vars(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '$' && chars.peek() == Some(&'{') {
+            chars.next(); // consume '{'
+            let mut var_name = String::new();
+            for ch in chars.by_ref() {
+                if ch == '}' {
+                    break;
+                }
+                var_name.push(ch);
+            }
+            result.push_str(&std::env::var(&var_name).unwrap_or_default());
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +211,9 @@ fn default_transcode() -> TranscodeConfig {
         max_bitrate: None,
         audio_bitrate: default_audio_bitrate(),
         threads: None,
+        gpu: false,
+        hls_downscale: true,
+        hls_max_height: default_hls_max_height(),
     }
 }
 
@@ -172,7 +267,7 @@ fn default_preset() -> String {
 }
 
 fn default_max_concurrent_transcodes() -> u32 {
-    2
+    4
 }
 
 fn default_crf() -> u32 {
@@ -185,6 +280,10 @@ fn default_audio_bitrate() -> String {
 
 fn default_session_duration() -> String {
     "7d".to_string()
+}
+
+fn default_hls_max_height() -> u32 {
+    1080
 }
 
 fn default_theme() -> String {
@@ -226,6 +325,9 @@ preset = "ultrafast"
 max_concurrent_transcodes = 2
 crf = 23
 audio_bitrate = "192k"
+gpu = false
+hls_downscale = true
+hls_max_height = 1080
 
 [auth]
 jwt_secret = ""
@@ -264,8 +366,13 @@ pub fn load_config(cli: &Cli) -> Result<AppConfig> {
         config.server.bind = bind.clone();
     }
 
-    config.data_dir = data_dir;
+    config.data_dir = data_dir.clone();
     config.log_level = cli.log_level.clone().unwrap_or_else(|| "info".to_string());
+    config.log_dir = cli
+        .log_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| Some(data_dir.join("logs")));
     config.open_browser = cli.open || config.server.open_browser;
     config.admin_user = cli.admin_user.clone();
     config.admin_password = cli.admin_password.clone();
@@ -312,6 +419,9 @@ fn ensure_directories(config: &AppConfig) -> Result<()> {
 
     let complete_dir = config.data_dir.join("downloads").join("complete");
     std::fs::create_dir_all(&complete_dir).context(error::IoSnafu)?;
+
+    let posters_dir = config.data_dir.join("downloads").join("posters");
+    std::fs::create_dir_all(&posters_dir).context(error::IoSnafu)?;
 
     let dht_dir = config.data_dir.join("dht");
     std::fs::create_dir_all(&dht_dir).context(error::IoSnafu)?;

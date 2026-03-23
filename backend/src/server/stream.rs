@@ -19,7 +19,40 @@ pub async fn stream_ws(
 }
 
 async fn handle_stream_ws(mut socket: WebSocket, state: AppState, id: String) {
+    state
+        .ws_connections
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _ = state.torrent_engine.resume(&id).await;
+
+    let metadata = state.db.get_metadata(&id).await.ok().flatten();
+    let video_codec = metadata.as_ref().and_then(|m| m.video_codec.clone());
+
+    // Send metadata once on connection
+    if let Some(ref meta) = metadata {
+        let meta_msg = serde_json::json!({
+            "type": "metadata",
+            "data": {
+                "title": meta.title,
+                "year": meta.year,
+                "rating": meta.rating,
+                "runtime": meta.runtime,
+                "genres": meta.genres,
+                "language": meta.language,
+                "mpa_rating": meta.mpa_rating,
+                "summary": meta.summary,
+                "imdb_code": meta.imdb_code,
+                "video_codec": meta.video_codec,
+                "audio_channels": meta.audio_channels,
+                "bit_depth": meta.bit_depth,
+                "source_type": meta.source_type,
+                "poster_large": meta.poster_large,
+                "local_poster": meta.local_poster,
+            }
+        });
+        let _ = socket
+            .send(Message::Text(meta_msg.to_string().into()))
+            .await;
+    }
 
     if let Ok(Some(dl)) = state.torrent_engine.get_download(&id).await {
         let (peers, speed) = state.torrent_engine.get_live_stats(&id).await;
@@ -33,6 +66,7 @@ async fn handle_stream_ws(mut socket: WebSocket, state: AppState, id: String) {
                 "file_size": dl.file_size,
                 "title": dl.title,
                 "file_name": dl.file_name,
+                "video_codec": video_codec,
             }
         });
         if socket
@@ -76,6 +110,8 @@ async fn handle_stream_ws(mut socket: WebSocket, state: AppState, id: String) {
                         "speed": speed,
                         "file_size": dl.file_size,
                         "title": dl.title,
+                        "file_name": dl.file_name,
+                        "video_codec": video_codec,
                     }
                 });
                 if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
@@ -115,15 +151,64 @@ async fn handle_stream_ws(mut socket: WebSocket, state: AppState, id: String) {
         }
     }
 
+    state
+        .ws_connections
+        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     let _ = state.torrent_engine.pause(&id).await;
+}
+
+pub async fn url_playlist(
+    State(state): State<AppState>,
+    _claims: Claims,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> std::result::Result<axum::response::Response, Error> {
+    let url = params.get("url").ok_or_else(|| Error::BadRequest {
+        message: "Missing 'url' parameter".to_string(),
+    })?;
+    let quality = params.get("quality").map(|s| s.as_str()).unwrap_or("source");
+
+    // Use a hash of the URL as stream_id
+    let stream_id = format!("url-{:x}", md5_hash(url));
+
+    if let Err(e) = state
+        .hls_pipeline
+        .start_stream_url(&stream_id, url, quality)
+        .await
+    {
+        tracing::warn!(stream_id = %stream_id, "Failed to start URL transcode: {e}");
+    }
+
+    let response = state.hls_pipeline.generate_playlist(&stream_id, quality).await?;
+
+    match response {
+        PlaylistResponse::Redirect(redir_url) => Ok(Redirect::temporary(&redir_url).into_response()),
+        PlaylistResponse::Content(content) => Ok((
+            [
+                (header::CONTENT_TYPE, "application/vnd.apple.mpegurl"),
+                (header::CACHE_CONTROL, "no-cache, no-store"),
+            ],
+            content,
+        )
+            .into_response()),
+    }
+}
+
+fn md5_hash(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
 }
 
 pub async fn playlist(
     State(state): State<AppState>,
     _claims: Claims,
     Path(id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> std::result::Result<axum::response::Response, Error> {
-    let _download = state
+    let quality = params.get("quality").map(|s| s.as_str()).unwrap_or("source");
+
+    let download = state
         .torrent_engine
         .get_download(&id)
         .await?
@@ -131,7 +216,76 @@ pub async fn playlist(
             message: format!("Stream {id} not found"),
         })?;
 
-    let response = state.hls_pipeline.generate_playlist(&id, true).await?;
+    let file_path = download
+        .complete_path
+        .as_deref()
+        .or(download.partial_path.as_deref());
+
+    // Always try file-based transcode first (works for both complete and partial/sequential downloads)
+    // FFmpeg handles growing files naturally - it reads what's available and waits for more
+    let mut started = false;
+    if let Some(path) = file_path {
+        if tokio::fs::metadata(path).await.is_ok() {
+            if let Err(e) = state.hls_pipeline.start_stream(&id, path, quality).await {
+                tracing::warn!(stream_id = %id, quality, "Failed to start HLS transcode: {e}");
+            } else {
+                started = true;
+            }
+        }
+    }
+    if !started {
+        if let Ok(Some(path)) = state.torrent_engine.get_file_path(&id).await {
+            if let Err(e) = state
+                .hls_pipeline
+                .start_stream(&id, path.to_str().unwrap_or_default(), quality)
+                .await
+            {
+                tracing::warn!(stream_id = %id, quality, "Failed to start HLS transcode: {e}");
+            } else {
+                started = true;
+            }
+        }
+    }
+
+    // Fallback to piped transcode only if file-based didn't work
+    if !started && download.status != "complete" {
+        if download.status == "paused" {
+            let _ = state.torrent_engine.resume(&id).await;
+        } else {
+            let _ = state.torrent_engine.ensure_active(&id).await;
+        }
+
+        let probe_path = file_path.map(String::from).or_else(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async { state.torrent_engine.get_file_path(&id).await.ok().flatten() })
+                .map(|p| p.to_string_lossy().to_string())
+        });
+
+        if let Some(ref probe_path) = probe_path {
+            if let Ok(Some((torrent_id, file_index))) =
+                state.torrent_engine.get_stream_file_info(&id).await
+            {
+                let api = librqbit::Api::new(state.torrent_engine.session().clone(), None);
+                if let Ok(file_stream) =
+                    api.api_stream(librqbit::api::TorrentIdOrHash::Id(torrent_id), file_index)
+                {
+                    if let Err(e) = state
+                        .hls_pipeline
+                        .start_stream_piped(&id, probe_path, file_stream, quality)
+                        .await
+                    {
+                        tracing::warn!(stream_id = %id, "Failed to start piped HLS transcode: {e}");
+                    }
+                } else if let Err(e) = state.hls_pipeline.start_stream(&id, probe_path, quality).await {
+                    tracing::warn!(stream_id = %id, "Failed to start HLS transcode (fallback): {e}");
+                }
+            } else if let Err(e) = state.hls_pipeline.start_stream(&id, probe_path, quality).await {
+                tracing::warn!(stream_id = %id, "Failed to start HLS transcode: {e}");
+            }
+        }
+    }
+
+    let response = state.hls_pipeline.generate_playlist(&id, quality).await?;
 
     match response {
         PlaylistResponse::Redirect(url) => Ok(Redirect::temporary(&url).into_response()),
@@ -156,6 +310,49 @@ pub async fn segment(
         .await?
         .ok_or_else(|| Error::NotFound {
             message: format!("Segment {segment_name} not found"),
+        })?;
+
+    let content_type = if segment_name.ends_with(".m4s") || segment_name.ends_with(".mp4") {
+        "video/mp4"
+    } else {
+        "video/mp2t"
+    };
+
+    Ok(([(header::CONTENT_TYPE, content_type)], data))
+}
+
+pub async fn variant_playlist(
+    State(state): State<AppState>,
+    Path((id, variant)): Path<(String, String)>,
+) -> std::result::Result<axum::response::Response, Error> {
+    let content = state
+        .hls_pipeline
+        .get_variant_playlist(&id, &variant)
+        .await?
+        .ok_or_else(|| Error::NotFound {
+            message: format!("Variant playlist {variant} not found for stream {id}"),
+        })?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/vnd.apple.mpegurl"),
+            (header::CACHE_CONTROL, "no-cache, no-store"),
+        ],
+        content,
+    )
+        .into_response())
+}
+
+pub async fn variant_segment(
+    State(state): State<AppState>,
+    Path((id, variant, segment_name)): Path<(String, String, String)>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let data: Bytes = state
+        .hls_pipeline
+        .get_variant_segment(&id, &variant, &segment_name)
+        .await?
+        .ok_or_else(|| Error::NotFound {
+            message: format!("Variant segment {variant}/{segment_name} not found"),
         })?;
 
     let content_type = if segment_name.ends_with(".m4s") || segment_name.ends_with(".mp4") {
@@ -219,13 +416,13 @@ pub async fn stream_file(
                         .and_then(|s| parse_range(s, file_size));
 
                     return match range {
-                        Some((start, _)) => {
+                        Some((start, end)) => {
                             file_stream
                                 .seek(std::io::SeekFrom::Start(start))
                                 .await
                                 .map_err(|e| Error::Io { source: e })?;
-                            let remaining = file_size - file_stream.position();
-                            let end = file_size.saturating_sub(1);
+                            let length = end - start + 1;
+                            let remaining = length;
                             let stream =
                                 tokio_util::io::ReaderStream::with_capacity(file_stream, 65536);
                             let body = axum::body::Body::from_stream(stream);

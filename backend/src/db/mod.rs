@@ -1,5 +1,7 @@
 pub mod downloads;
+pub mod favourites;
 pub mod history;
+pub mod metadata;
 pub mod migrations;
 pub mod settings;
 pub mod users;

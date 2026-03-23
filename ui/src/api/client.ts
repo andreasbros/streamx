@@ -2,9 +2,13 @@ import { getToken } from "../lib/auth";
 import { debugLog } from "../lib/debug-log";
 import type {
   ApiError,
+  FavouriteItem,
+  FavouritesResponse,
   LoginRequest,
   LoginResponse,
+  MusicVideoSearchResponse,
   RegisterRequest,
+  ResolveMagnetResponse,
   SearchRequest,
   SearchResponse,
   SearchHistoryResponse,
@@ -12,6 +16,8 @@ import type {
   StreamRequest,
   StreamResponse,
   StreamStatus,
+  TvSeason,
+  TvSearchResponse,
   User,
   WatchHistoryResponse,
 } from "./types";
@@ -101,6 +107,16 @@ class ApiClient {
     });
   }
 
+  async browse(params: { sort_by?: string; genre?: string; minimum_rating?: number; limit?: number; page?: number }): Promise<SearchResponse> {
+    const q = new URLSearchParams();
+    if (params.sort_by) q.set("sort_by", params.sort_by);
+    if (params.genre) q.set("genre", params.genre);
+    if (params.minimum_rating) q.set("minimum_rating", String(params.minimum_rating));
+    if (params.limit) q.set("limit", String(params.limit));
+    if (params.page) q.set("page", String(params.page));
+    return this.request<SearchResponse>(`/api/search/browse?${q.toString()}`);
+  }
+
   async searchHistory(): Promise<SearchHistoryResponse> {
     return this.request<SearchHistoryResponse>("/api/search/history");
   }
@@ -140,7 +156,7 @@ class ApiClient {
   ): Promise<void> {
     return this.request<void>(`/api/history/${id}`, {
       method: "PUT",
-      body: JSON.stringify({ watched_seconds: watchedSeconds }),
+      body: JSON.stringify({ watched_seconds: Math.floor(watchedSeconds) }),
     });
   }
 
@@ -161,14 +177,105 @@ class ApiClient {
     });
   }
 
-  getPlaylistUrl(streamId: string): string {
+  async searchTv(data: SearchRequest): Promise<TvSearchResponse> {
+    return this.request<TvSearchResponse>("/api/tv/search", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async browseTv(params: { page?: number; limit?: number }): Promise<TvSearchResponse> {
+    const q = new URLSearchParams();
+    if (params.page) q.set("page", String(params.page));
+    if (params.limit) q.set("limit", String(params.limit));
+    return this.request<TvSearchResponse>(`/api/tv/browse?${q.toString()}`);
+  }
+
+  async getTvShowSeasons(imdbId: string): Promise<{ seasons: number[] }> {
+    return this.request<{ seasons: number[] }>(`/api/tv/show/${imdbId}`);
+  }
+
+  async getTvShowEpisodes(imdbId: string, season: number): Promise<{ seasons: TvSeason[] }> {
+    return this.request<{ seasons: TvSeason[] }>(`/api/tv/show/${imdbId}?season=${season}`);
+  }
+
+  async searchMusicVideos(data: SearchRequest): Promise<MusicVideoSearchResponse> {
+    return this.request<MusicVideoSearchResponse>("/api/music-videos/search", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async browseMusicVideos(params: { page?: number }): Promise<MusicVideoSearchResponse> {
+    const q = new URLSearchParams();
+    if (params.page) q.set("page", String(params.page));
+    return this.request<MusicVideoSearchResponse>(`/api/music-videos/browse?${q.toString()}`);
+  }
+
+  async searchMusic(data: SearchRequest): Promise<MusicVideoSearchResponse> {
+    return this.request<MusicVideoSearchResponse>("/api/music/search", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async browseMusic(params: { page?: number }): Promise<MusicVideoSearchResponse> {
+    const q = new URLSearchParams();
+    if (params.page) q.set("page", String(params.page));
+    return this.request<MusicVideoSearchResponse>(`/api/music/browse?${q.toString()}`);
+  }
+
+  async resolveMagnet(detailUrl: string, apiBase: string): Promise<ResolveMagnetResponse> {
+    return this.request<ResolveMagnetResponse>(`/api/${apiBase}/resolve-magnet`, {
+      method: "POST",
+      body: JSON.stringify({ detail_url: detailUrl }),
+    });
+  }
+
+  async getFavourites(type?: string): Promise<FavouritesResponse> {
+    const q = new URLSearchParams();
+    if (type) q.set("type", type);
+    const qs = q.toString();
+    return this.request<FavouritesResponse>(`/api/favourites${qs ? `?${qs}` : ""}`);
+  }
+
+  async addFavourite(data: Omit<FavouriteItem, "id" | "user_id" | "created_at">): Promise<FavouriteItem> {
+    return this.request<FavouriteItem>("/api/favourites", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteFavourite(id: string): Promise<void> {
+    return this.request<void>(`/api/favourites/${id}`, {
+      method: "DELETE",
+    });
+  }
+
+  getPlaylistUrl(streamId: string, quality?: string): string {
     const token = getToken();
-    const base = `/api/stream/${streamId}/playlist.m3u8`;
-    return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+    const params = new URLSearchParams();
+    if (token) params.set("token", token);
+    if (quality) params.set("quality", quality);
+    const qs = params.toString();
+    return `/api/stream/${streamId}/playlist.m3u8${qs ? `?${qs}` : ""}`;
+  }
+
+  getUrlPlaylistUrl(url: string, quality?: string): string {
+    const token = getToken();
+    const params = new URLSearchParams();
+    params.set("url", url);
+    if (token) params.set("token", token);
+    if (quality) params.set("quality", quality);
+    return `/api/stream/url/playlist.m3u8?${params.toString()}`;
   }
 
   getFileUrl(streamId: string): string {
     return `/api/stream/${streamId}/file`;
+  }
+
+  async deleteStream(streamId: string): Promise<void> {
+    await this.request(`/api/stream/${streamId}`, { method: "DELETE" });
   }
 }
 

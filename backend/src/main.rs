@@ -4,10 +4,13 @@ use streamx::cli;
 use streamx::config;
 use streamx::db;
 use streamx::error::{self, Result};
+use streamx::logging::BroadcastLayer;
 use streamx::server;
 use streamx::torrent;
 use streamx::transcode;
 use tracing::info;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,10 +24,35 @@ async fn main() -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_new(&config.log_level)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(true)
-        .init();
+    let (log_tx, _) = tokio::sync::broadcast::channel::<String>(1000);
+    let (broadcast_layer, log_history) = BroadcastLayer::new(log_tx.clone());
+
+    let _log_guard: Option<tracing_appender::non_blocking::WorkerGuard>;
+    if let Some(ref log_dir) = config.log_dir {
+        std::fs::create_dir_all(log_dir).map_err(|e| error::Error::Config {
+            message: format!("Failed to create log directory: {e}"),
+        })?;
+        let file_appender = tracing_appender::rolling::daily(log_dir, "streamx.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        _log_guard = Some(guard);
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_target(true)
+                    .with_ansi(false)
+                    .with_writer(non_blocking),
+            )
+            .with(broadcast_layer)
+            .init();
+    } else {
+        _log_guard = None;
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer().with_target(true))
+            .with(broadcast_layer)
+            .init();
+    }
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -57,9 +85,25 @@ async fn main() -> Result<()> {
     database.set_downloading_to_paused().await?;
     info!("Reset in-flight downloads to paused state");
 
-    let torrent_engine =
-        torrent::TorrentEngine::create(&config.torrent, &config.data_dir, database.clone()).await?;
-    let search_provider = torrent::SearchProvider::new();
+    let socks5 = config.vpn.as_ref().map(|v| v.resolved_url());
+    if let Some(ref url) = socks5 {
+        // Log without credentials
+        let safe = if let Some(at) = url.find('@') {
+            let proto_end = url.find("://").unwrap_or(0) + 3;
+            format!("{}***@{}", &url[..proto_end], &url[at + 1..])
+        } else {
+            url.clone()
+        };
+        info!(proxy = %safe, "VPN SOCKS5 proxy configured");
+    }
+    let torrent_engine = torrent::TorrentEngine::create(
+        &config.torrent,
+        &config.data_dir,
+        database.clone(),
+        socks5.clone(),
+    )
+    .await?;
+    let search_provider = torrent::SearchProvider::new(config.providers.clone(), socks5);
     let cache_dir = config.data_dir.join("cache");
     let hls_pipeline = transcode::HlsManager::new(&config.transcode, cache_dir).await?;
 
@@ -73,6 +117,8 @@ async fn main() -> Result<()> {
         torrent_engine,
         search_provider,
         hls_pipeline,
+        log_tx,
+        log_history,
     );
 
     let addr: SocketAddr =
@@ -81,6 +127,9 @@ async fn main() -> Result<()> {
             .map_err(|_| error::Error::Config {
                 message: format!("Invalid bind address: {bind_addr}:{port}"),
             })?;
+
+    // Kill orphaned FFmpeg processes from previous server instances
+    kill_orphaned_ffmpeg();
 
     info!(%addr, "Server listening");
 
@@ -96,10 +145,27 @@ async fn main() -> Result<()> {
             source,
         })?;
 
+    // Graceful shutdown: catch SIGTERM/SIGINT, kill FFmpeg children
+    let shutdown = async {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler");
+        let mut sigint =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .expect("failed to install SIGINT handler");
+        tokio::select! {
+            _ = sigterm.recv() => info!("Received SIGTERM"),
+            _ = sigint.recv() => info!("Received SIGINT"),
+        }
+        info!("Shutting down, killing FFmpeg children...");
+        kill_all_streamx_ffmpeg();
+    };
+
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown)
     .await
     .map_err(|source| error::Error::ServerBind {
         address: addr.to_string(),
@@ -107,6 +173,63 @@ async fn main() -> Result<()> {
     })?;
 
     Ok(())
+}
+
+fn kill_orphaned_ffmpeg() {
+    let our_pid = std::process::id().to_string();
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let pid: u32 = match name_str.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let cmdline = match std::fs::read_to_string(entry.path().join("cmdline")) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if !cmdline.contains("ffmpeg") || !cmdline.contains(".streamx/cache") {
+                continue;
+            }
+            // Check if it's our child (skip those)
+            if let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) {
+                let ppid = stat.split_whitespace().nth(3).unwrap_or("");
+                if ppid == our_pid {
+                    continue;
+                }
+            }
+            tracing::warn!(pid, "Killing orphaned FFmpeg process");
+            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+        }
+    }
+}
+
+fn kill_all_streamx_ffmpeg() {
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            let pid: i32 = match name_str.parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let cmdline = match std::fs::read_to_string(entry.path().join("cmdline")) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if cmdline.contains("ffmpeg") && cmdline.contains(".streamx/cache") {
+                tracing::info!(pid, "Sending SIGTERM to FFmpeg process");
+                unsafe { libc::kill(pid, libc::SIGTERM); }
+            }
+        }
+    }
 }
 
 fn run_command(cmd: &cli::Command, config: &config::AppConfig) -> Result<()> {

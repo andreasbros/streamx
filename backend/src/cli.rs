@@ -30,6 +30,13 @@ pub struct Cli {
     )]
     pub log_level: Option<String>,
 
+    #[arg(
+        long,
+        help = "Log directory (enables file logging with daily rotation)",
+        env = "STREAMX_LOG_DIR"
+    )]
+    pub log_dir: Option<String>,
+
     #[arg(long, help = "Open browser on start", env = "STREAMX_OPEN")]
     pub open: bool,
 

@@ -6,7 +6,7 @@ use crate::torrent::types::TorrentFile;
 use chrono::Utc;
 use librqbit::{
     dht::PersistentDhtConfig, AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent,
-    Session, SessionOptions, TorrentStatsState,
+    PeerConnectionOptions, Session, SessionOptions, TorrentStatsState,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -29,7 +29,12 @@ pub struct TorrentEngine {
 }
 
 impl TorrentEngine {
-    pub async fn create(config: &TorrentConfig, data_dir: &Path, db: Database) -> Result<Self> {
+    pub async fn create(
+        config: &TorrentConfig,
+        data_dir: &Path,
+        db: Database,
+        socks5: Option<String>,
+    ) -> Result<Self> {
         let partial_dir = data_dir.join("downloads").join("partial");
         let complete_dir = data_dir.join("downloads").join("complete");
         let dht_dir = data_dir.join("dht");
@@ -49,12 +54,21 @@ impl TorrentEngine {
             ..Default::default()
         };
 
+        let peer_opts = PeerConnectionOptions {
+            connect_timeout: Some(std::time::Duration::from_secs(5)),
+            read_write_timeout: Some(std::time::Duration::from_secs(10)),
+            ..Default::default()
+        };
+
         let opts = SessionOptions {
             disable_dht: !config.dht,
             disable_dht_persistence: false,
             dht_config: Some(dht_config),
-            listen_port_range: Some(4240..4260),
+            listen_port_range: Some(4240..4300),
             enable_upnp_port_forwarding: true,
+            socks_proxy_url: socks5,
+            peer_opts: Some(peer_opts),
+            fastresume: true,
             ..Default::default()
         };
 
@@ -333,30 +347,55 @@ impl TorrentEngine {
         let complete_dir = self.complete_dir.clone();
 
         tokio::spawn(async move {
-            let opts = AddTorrentOptions {
-                overwrite: true,
-                only_files: file_index.map(|i| vec![i]),
-                ..Default::default()
-            };
+            // Adaptive timeout: start at 30s, double on each retry up to 3 attempts
+            let _ = db.update_download_status(&info_hash, "initializing").await;
+            let mut resp = None;
+            for attempt in 0..3u32 {
+                let opts = AddTorrentOptions {
+                    overwrite: true,
+                    only_files: file_index.map(|i| vec![i]),
+                    ..Default::default()
+                };
+                let timeout_secs = 30u64 << attempt; // 30s, 60s, 120s
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(timeout_secs),
+                    session.add_torrent(
+                        AddTorrent::from_url(&magnet_uri),
+                        Some(opts),
+                    ),
+                )
+                .await;
 
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                session.add_torrent(AddTorrent::from_url(&magnet_uri), Some(opts)),
-            )
-            .await;
+                match result {
+                    Ok(Ok(r)) => {
+                        resp = Some(r);
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        warn!(info_hash = %info_hash, attempt, "Failed to add torrent: {e}");
+                        if attempt == 2 {
+                            let _ = db.update_download_status(&info_hash, "error").await;
+                            return;
+                        }
+                    }
+                    Err(_) => {
+                        warn!(
+                            info_hash = %info_hash,
+                            attempt,
+                            timeout_secs,
+                            "Timed out adding torrent, retrying with longer timeout"
+                        );
+                        if attempt == 2 {
+                            let _ = db.update_download_status(&info_hash, "error").await;
+                            return;
+                        }
+                    }
+                }
+            }
 
-            let resp = match result {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    warn!(info_hash = %info_hash, "Failed to add torrent: {e}");
-                    let _ = db.update_download_status(&info_hash, "error").await;
-                    return;
-                }
-                Err(_) => {
-                    warn!(info_hash = %info_hash, "Timed out adding torrent");
-                    let _ = db.update_download_status(&info_hash, "error").await;
-                    return;
-                }
+            let resp = match resp {
+                Some(r) => r,
+                None => return,
             };
 
             let (tid, handle) = match resp {

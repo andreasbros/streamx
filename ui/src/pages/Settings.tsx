@@ -5,10 +5,12 @@ import {
   Button,
   Badge,
   RadioGroup,
+  Switch,
   Separator,
 } from "@radix-ui/themes";
 import { ExitIcon } from "@radix-ui/react-icons";
 import { useAuth } from "../hooks/useAuth";
+import { useDebug } from "../hooks/useDebug";
 
 interface SettingsProps {
   theme: "dark" | "light";
@@ -17,6 +19,7 @@ interface SettingsProps {
 
 export function Settings({ theme, setTheme }: SettingsProps) {
   const { user, logout } = useAuth();
+  const { debug, setDebug } = useDebug();
 
   return (
     <Flex direction="column" gap="4" style={{ maxWidth: 500 }}>
@@ -45,6 +48,18 @@ export function Settings({ theme, setTheme }: SettingsProps) {
               </Text>
             </Flex>
           </RadioGroup.Root>
+        </Flex>
+      </Card>
+
+      <Card>
+        <Flex direction="column" gap="3">
+          <Text size="3" weight="medium">
+            Developer
+          </Text>
+          <Flex align="center" justify="between">
+            <Text size="2">Debug log</Text>
+            <Switch checked={debug} onCheckedChange={setDebug} />
+          </Flex>
         </Flex>
       </Card>
 

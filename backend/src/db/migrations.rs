@@ -68,6 +68,44 @@ const MIGRATIONS: &[&str] = &[
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     );",
+    // Migration 7: Create media_metadata table for rich metadata and local posters
+    "CREATE TABLE IF NOT EXISTS media_metadata (
+        info_hash TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        year INTEGER,
+        rating REAL,
+        runtime INTEGER,
+        genres TEXT,
+        language TEXT,
+        mpa_rating TEXT,
+        summary TEXT,
+        imdb_code TEXT,
+        trailer_code TEXT,
+        video_codec TEXT,
+        audio_channels TEXT,
+        bit_depth TEXT,
+        source_type TEXT,
+        poster_small TEXT,
+        poster_medium TEXT,
+        poster_large TEXT,
+        backdrop TEXT,
+        local_poster TEXT,
+        created_at TEXT NOT NULL
+    );",
+    // Migration 8: Create favourites table
+    "CREATE TABLE IF NOT EXISTS favourites (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        content_type TEXT NOT NULL DEFAULT 'movie',
+        title TEXT NOT NULL,
+        year INTEGER,
+        rating REAL,
+        poster_url TEXT,
+        info_hash TEXT,
+        metadata_json TEXT,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_favourites_user ON favourites(user_id, content_type);",
 ];
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

@@ -19,9 +19,13 @@ test.describe("Movie playback e2e", () => {
     await page.waitForURL("**/", { timeout: 10000 });
 
     await page.goto("/player/demo");
+    await page.waitForTimeout(3000);
 
-    await page.waitForSelector(".vjs-big-play-button", { timeout: 10000 });
-    await page.click(".vjs-big-play-button");
+    // Click our custom play overlay (covers the video box)
+    const overlay = page.locator('[style*="cursor: pointer"]').first();
+    if (await overlay.isVisible().catch(() => false)) {
+      await overlay.click();
+    }
 
     const played = await page.evaluate(() => {
       return new Promise<{ currentTime: number; paused: boolean; readyState: number }>((resolve) => {
@@ -62,16 +66,19 @@ test.describe("Movie playback e2e", () => {
       headers,
       data: { query: "night of the living dead 1968" },
     });
-    const results = (await searchRes.json()).results;
-    expect(results.length).toBeGreaterThan(0);
+    const searchData = await searchRes.json();
+    const groups = searchData.results;
+    expect(groups.length).toBeGreaterThan(0);
 
-    const movie = results.find(
-      (r: any) => r.quality === "720p" && r.title.includes("1968")
-    ) || results[0];
+    // Results are grouped - pick the first variant from the best group
+    const group = groups.find(
+      (g: any) => g.title.includes("1968") && g.variants?.length > 0
+    ) || groups[0];
+    const variant = group.variants[0];
 
     const streamRes = await request.post("/api/stream", {
       headers,
-      data: { magnet_uri: movie.magnet },
+      data: { magnet_uri: variant.magnet },
     });
     expect(streamRes.ok()).toBeTruthy();
     const { stream_id } = await streamRes.json();

@@ -34,6 +34,12 @@
 
 ## High priority
 
+- [x] Safari HEVC/x265 fallback: auto-detect unsupported codecs via canPlayType + file extension, fall back to HLS CPU transcode
+- [ ] HLS seek to any position: when user seeks beyond transcoded range, restart FFmpeg with `-ss {position}`
+  - Frontend detects seek beyond available range
+  - Requests `/api/stream/{id}/playlist.m3u8?seek={seconds}`
+  - Backend kills current FFmpeg, starts new from that position
+  - Returns new playlist, frontend switches to it
 - [ ] Download management: partial/ and complete/ directories
   - librqbit downloads to `downloads/partial/{torrent_name}/`
   - On completion + hash verification, atomic move to `downloads/complete/{torrent_name}/`

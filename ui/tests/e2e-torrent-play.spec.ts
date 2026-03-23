@@ -25,11 +25,22 @@ test("search and play a torrent shows player with stream status", async ({
   await page.waitForTimeout(2000);
   await page.screenshot({ path: "test-results/torrent-01-search.png" });
 
-  // Click Food Inc result
+  // Click Food Inc result to expand the group card
   const result = page.locator("text=Food, Inc");
-  const target = result;
-  await expect(target.first()).toBeVisible({ timeout: 10000 });
-  await target.first().click();
+  await expect(result.first()).toBeVisible({ timeout: 10000 });
+  await result.first().click();
+  await page.waitForTimeout(500);
+
+  // Click the first variant row in the expanded card to navigate to player
+  // Variant rows contain quality badges (HD, FHD, 4K, SD) and are clickable
+  const variantRow = page.locator('[style*="cursor: pointer"][style*="border"]').first();
+  if (await variantRow.isVisible().catch(() => false)) {
+    await variantRow.click();
+  } else {
+    // Fallback: click any element showing quality/size inside the expanded area
+    const qualityBadge = page.locator('span:has-text("HD"), span:has-text("FHD"), span:has-text("720")').first();
+    await qualityBadge.click();
+  }
   await page.waitForURL("**/player/**", { timeout: 15000 });
 
   console.log("Player URL:", page.url());
@@ -96,17 +107,20 @@ test("search and play a torrent shows player with stream status", async ({
 
     if (state.hasVideo) {
       videoVisible = true;
-      // Try to play if paused
+      // Try to play if paused - click our custom overlay play button
       if (state.currentTime === 0) {
-        await page.evaluate(() => {
-          const v = document.querySelector("video");
-          if (v) v.play().catch(() => {});
-        });
-        const playBtn = page.locator(".vjs-big-play-button");
-        if (await playBtn.isVisible().catch(() => false)) {
-          await playBtn.click().catch(() => {});
+        // Our custom play overlay covers the video box
+        const overlay = page.locator('[style*="cursor: pointer"][style*="z-index"]');
+        if (await overlay.isVisible().catch(() => false)) {
+          await overlay.click().catch(() => {});
+          console.log("Clicked custom play overlay");
+        } else {
+          await page.evaluate(() => {
+            const v = document.querySelector("video");
+            if (v) v.play().catch(() => {});
+          });
+          console.log("Triggered play via JS");
         }
-        console.log("Triggered play");
       }
 
       if (state.currentTime > 0.5) {

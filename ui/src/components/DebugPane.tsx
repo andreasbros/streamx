@@ -4,12 +4,11 @@ import {
   Text,
   Button,
   Badge,
-  ScrollArea,
   Select,
   Code,
   IconButton,
 } from "@radix-ui/themes";
-import { TrashIcon, Cross2Icon, ChevronUpIcon } from "@radix-ui/react-icons";
+import { TrashIcon, Cross2Icon, ChevronUpIcon, CopyIcon } from "@radix-ui/react-icons";
 import { debugLog } from "../lib/debug-log";
 import type { LogLevel, LogEntry } from "../lib/debug-log";
 
@@ -115,6 +114,20 @@ export function DebugPane({ onClose }: DebugPaneProps) {
           {errorCount > 0 && (
             <Badge size="1" color="red" variant="solid">{errorCount} err</Badge>
           )}
+          <IconButton variant="ghost" size="1" onClick={(e) => {
+            e.stopPropagation();
+            const text = entries.map((en) => {
+              const t = new Date(en.timestamp).toLocaleTimeString("en", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+              const d = en.data !== undefined ? ` ${typeof en.data === "string" ? en.data : JSON.stringify(en.data)}` : "";
+              return `${t} ${en.level.charAt(0).toUpperCase()} ${en.source} ${en.message}${d}`;
+            }).join("\n");
+            navigator.clipboard.writeText(text).then(
+              () => debugLog.info("debug", "Log copied to clipboard"),
+              () => debugLog.warn("debug", "Copy failed")
+            );
+          }}>
+            <CopyIcon width={12} height={12} />
+          </IconButton>
         </Flex>
         <Flex align="center" gap="2" onClick={(e) => e.stopPropagation()}>
           {expanded && (
@@ -157,17 +170,19 @@ export function DebugPane({ onClose }: DebugPaneProps) {
       </Flex>
 
       {expanded && (
-        <ScrollArea scrollbars="vertical" style={{ height: 220 }}>
-          <div ref={scrollRef} onScroll={handleScroll} style={{ padding: "0 12px 8px" }}>
-            {filtered.length === 0 ? (
-              <Flex align="center" justify="center" py="4">
-                <Text size="1" color="gray">No log entries</Text>
-              </Flex>
-            ) : (
-              filtered.map((entry, i) => <LogLine key={i} entry={entry} />)
-            )}
-          </div>
-        </ScrollArea>
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          style={{ height: 220, overflowY: "auto", padding: "0 12px 8px", WebkitOverflowScrolling: "touch" }}
+        >
+          {filtered.length === 0 ? (
+            <Flex align="center" justify="center" py="4">
+              <Text size="1" color="gray">No log entries</Text>
+            </Flex>
+          ) : (
+            filtered.map((entry, i) => <LogLine key={i} entry={entry} />)
+          )}
+        </div>
       )}
     </div>
   );

@@ -188,6 +188,26 @@ impl Database {
         Ok(entries)
     }
 
+    pub async fn delete_download(&self, info_hash: &str) -> Result<()> {
+        let conn = self.connection().lock().await;
+        conn.execute(
+            "DELETE FROM downloads WHERE info_hash = ?1",
+            rusqlite::params![info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        conn.execute(
+            "DELETE FROM media_metadata WHERE info_hash = ?1",
+            rusqlite::params![info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        conn.execute(
+            "DELETE FROM watch_history WHERE magnet_uri IN (SELECT magnet_uri FROM downloads WHERE info_hash = ?1)",
+            rusqlite::params![info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        Ok(())
+    }
+
     pub async fn set_downloading_to_paused(&self) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let conn = self.connection().lock().await;

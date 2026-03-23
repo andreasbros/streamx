@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod embedded;
 pub mod error;
+pub mod logging;
 pub mod server;
 pub mod torrent;
 pub mod transcode;
