@@ -1,0 +1,22 @@
+[package]
+name = "streamx-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "StreamX HTTP API contract + typed client shared between server, web (via ts-rs), and desktop"
+
+[features]
+# Emits TypeScript bindings during `cargo test --features ts-export`.
+ts-export = ["dep:ts-rs"]
+# Enables the reqwest-based client. Server crate uses only `types`, so it
+# leaves this off. Desktop enables it.
+client = ["dep:reqwest", "dep:tokio", "dep:thiserror"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+ts-rs = { version = "10", features = ["serde-compat", "chrono-impl"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+tokio = { version = "1", features = ["rt"], optional = true }
+thiserror = { version = "2", optional = true }

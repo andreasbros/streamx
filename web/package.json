@@ -10,7 +10,8 @@
     "test": "vitest",
     "test:e2e": "playwright test",
     "lint": "eslint src --ext ts,tsx",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "tokens": "node ../scripts/gen-tokens.mjs"
   },
   "dependencies": {
     "react": "^19.0.0",

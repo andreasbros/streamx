@@ -1,19 +1,10 @@
 use crate::db::Database;
 use crate::error::{self, Result};
 use chrono::Utc;
-use serde::Serialize;
 use snafu::ResultExt;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct User {
-    pub id: String,
-    pub username: String,
-    #[serde(skip_serializing)]
-    pub password_hash: String,
-    pub created_at: String,
-    pub is_admin: bool,
-}
+pub use streamx_api::types::User;
 
 impl Database {
     pub async fn create_user(&self, username: &str, password_hash: &str) -> Result<User> {

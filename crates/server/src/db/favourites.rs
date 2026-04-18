@@ -1,34 +1,10 @@
 use crate::db::Database;
 use crate::error::{self, Result};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FavouriteItem {
-    pub id: String,
-    pub user_id: String,
-    pub content_type: String,
-    pub title: String,
-    pub year: Option<i32>,
-    pub rating: Option<f64>,
-    pub poster_url: Option<String>,
-    pub info_hash: Option<String>,
-    pub metadata_json: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AddFavouriteRequest {
-    pub content_type: Option<String>,
-    pub title: String,
-    pub year: Option<i32>,
-    pub rating: Option<f64>,
-    pub poster_url: Option<String>,
-    pub info_hash: Option<String>,
-    pub metadata_json: Option<String>,
-}
+pub use streamx_api::types::{AddFavouriteRequest, FavouriteItem};
 
 impl Database {
     pub async fn add_favourite(

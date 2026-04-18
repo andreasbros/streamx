@@ -1,0 +1,33 @@
+[package]
+name = "streamx-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "StreamX native desktop client (GPUI). Phase 3 hello-world."
+
+[[bin]]
+name = "streamx-desktop"
+path = "src/main.rs"
+
+[features]
+# Links streamx-server and runs it in-process. Default.
+# Phase 3 keeps this as a flag only; the server is not yet embedded.
+default = []
+embedded = []
+# Thin client: no server, connect to a remote URL.
+thin-client = []
+
+[dependencies]
+gpui.workspace = true
+
+streamx-api = { path = "../api", features = ["client"] }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+once_cell = "1"
+parking_lot = "0.12"
+directories = "6"

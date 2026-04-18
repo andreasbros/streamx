@@ -7,5 +7,9 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[workspace.dependencies]
+# Pinned to the commit nocapsec uses so dep resolution is known-good.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "7ce845210d3af82a57a7518e0abe8c167d60cc6a" }
+
 [workspace.metadata.crane]
 name = "streamx"

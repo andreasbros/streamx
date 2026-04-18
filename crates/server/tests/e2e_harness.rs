@@ -39,7 +39,8 @@ async fn start_e2e_server() -> E2eServer {
             port,
             bind: "127.0.0.1".to_string(),
             open_browser: false,
-        },
+            log_level: None,
+},
         torrent: streamx::config::TorrentConfig {
             max_connections: 10,
             sequential: true,

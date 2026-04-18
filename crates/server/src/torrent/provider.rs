@@ -2,7 +2,7 @@ use crate::config::ProviderConfig;
 use crate::error::Result;
 use crate::server::proxy::{self, CINEMETA_PROXY_ID};
 use crate::torrent::metadata::CinemetaClient;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 fn proxy_opt(url: &Option<String>, proxy_id: u32) -> Option<String> {
     url.as_ref().map(|u| proxy::to_proxy_url(u, proxy_id))
@@ -27,39 +27,7 @@ const TRACKERS: &[&str] = &[
     "udp://tracker.leechers-paradise.org:6969",
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchResultGroup {
-    pub title: String,
-    pub year: Option<u32>,
-    pub rating: Option<f64>,
-    pub runtime: Option<u32>,
-    pub genres: Vec<String>,
-    pub language: Option<String>,
-    pub mpa_rating: Option<String>,
-    pub summary: Option<String>,
-    pub imdb_code: Option<String>,
-    pub trailer_code: Option<String>,
-    pub poster: Option<String>,
-    pub poster_small: Option<String>,
-    pub poster_medium: Option<String>,
-    pub poster_large: Option<String>,
-    pub backdrop: Option<String>,
-    pub variants: Vec<SearchResult>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchResult {
-    pub magnet: String,
-    pub seeds: u32,
-    pub leeches: u32,
-    pub size: String,
-    pub size_bytes: u64,
-    pub quality: Option<String>,
-    pub video_codec: Option<String>,
-    pub audio_channels: Option<String>,
-    pub bit_depth: Option<String>,
-    pub source_type: Option<String>,
-}
+pub use streamx_api::types::{SearchResult, SearchResultGroup};
 
 #[derive(Debug, Deserialize)]
 struct YtsResponse {
@@ -107,45 +75,9 @@ struct YtsTorrent {
     audio_channels: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MusicVideoResult {
-    pub title: String,
-    pub magnet: Option<String>,
-    pub seeds: u32,
-    pub leeches: u32,
-    pub size: String,
-    pub detail_url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TvSearchResultGroup {
-    pub show_name: String,
-    pub imdb_id: Option<String>,
-    pub seasons: Vec<TvSeason>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TvSeason {
-    pub season: u32,
-    pub episodes: Vec<TvEpisode>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TvEpisode {
-    pub episode: u32,
-    pub title: Option<String>,
-    pub variants: Vec<TvTorrent>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TvTorrent {
-    pub magnet: String,
-    pub seeds: u32,
-    pub leeches: u32,
-    pub size_bytes: u64,
-    pub quality: Option<String>,
-    pub filename: String,
-}
+pub use streamx_api::types::{
+    MusicVideoResult, TvEpisode, TvSearchResultGroup, TvSeason, TvTorrent,
+};
 
 #[derive(Debug, Deserialize)]
 struct ApibayTorrent {

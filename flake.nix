@@ -42,10 +42,11 @@
           shaderc
           libxkbcommon
           wayland
-          xorg.libX11
-          xorg.libXcursor
-          xorg.libXi
-          xorg.libXrandr
+          libx11
+          libxcb
+          libxcursor
+          libxi
+          libxrandr
           # MPRIS media session on Linux
           dbus
           dbus.dev

@@ -8,49 +8,11 @@ use crate::server::AppState;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
-pub struct SearchRequest {
-    pub query: String,
-    #[serde(default = "default_page")]
-    pub page: u32,
-}
-
-fn default_page() -> u32 {
-    1
-}
-
-#[derive(Debug, Serialize)]
-pub struct SearchResponse {
-    pub results: Vec<crate::torrent::SearchResultGroup>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateStreamRequest {
-    pub magnet_uri: String,
-    pub file_index: Option<usize>,
-    pub poster_url: Option<String>,
-    // Rich metadata from search results
-    pub title: Option<String>,
-    pub year: Option<u32>,
-    pub rating: Option<f64>,
-    pub runtime: Option<u32>,
-    pub genres: Option<Vec<String>>,
-    pub language: Option<String>,
-    pub video_codec: Option<String>,
-    pub audio_channels: Option<String>,
-    pub source_type: Option<String>,
-    pub summary: Option<String>,
-    pub imdb_code: Option<String>,
-    pub mpa_rating: Option<String>,
-    pub bit_depth: Option<String>,
-    pub trailer_code: Option<String>,
-    pub poster_small: Option<String>,
-    pub poster_medium: Option<String>,
-    pub poster_large: Option<String>,
-    pub backdrop: Option<String>,
-}
+pub use streamx_api::types::{
+    CreateStreamRequest, SearchRequest, SearchResponse,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateHistoryRequest {

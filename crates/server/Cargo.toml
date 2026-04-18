@@ -9,7 +9,16 @@ default-run = "streamx"
 name = "streamx"
 path = "src/main.rs"
 
+[features]
+# Enables #[derive(TS)] on shared types so `cargo test --features ts-export`
+# regenerates web/src/api/generated/*.ts. The default build does not pull
+# ts-rs into the final binary; the derives are cfg-gated.
+ts-export = ["streamx-api/ts-export", "dep:ts-rs"]
+
 [dependencies]
+streamx-api = { path = "../api" }
+ts-rs = { version = "10", optional = true }
+
 axum = { version = "0.8", features = ["macros", "ws"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }
 tokio = { version = "1", features = ["full"] }

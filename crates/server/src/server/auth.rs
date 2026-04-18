@@ -120,17 +120,7 @@ fn extract_token(parts: &Parts) -> std::result::Result<String, Error> {
         })
 }
 
-#[derive(Debug, Deserialize)]
-pub struct RegisterRequest {
-    pub username: String,
-    pub password: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LoginRequest {
-    pub username: String,
-    pub password: String,
-}
+pub use streamx_api::types::{LoginRequest, RegisterRequest};
 
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {

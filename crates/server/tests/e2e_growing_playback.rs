@@ -41,7 +41,8 @@ async fn start_server() -> GrowingServer {
     let config = streamx::config::AppConfig {
         server: streamx::config::ServerConfig {
             port, bind: "127.0.0.1".to_string(), open_browser: false,
-        },
+            log_level: None,
+},
         torrent: streamx::config::TorrentConfig {
             max_connections: 10, sequential: true, seed_after_complete: false, dht: false, pex: false,
         },

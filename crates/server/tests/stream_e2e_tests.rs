@@ -29,7 +29,8 @@ async fn start_test_server() -> TestServer {
             port,
             bind: "127.0.0.1".to_string(),
             open_browser: false,
-        },
+            log_level: None,
+},
         torrent: streamx::config::TorrentConfig {
             max_connections: 10,
             sequential: true,

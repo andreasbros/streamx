@@ -1,45 +1,11 @@
 use crate::db::Database;
 use crate::error::{self, Result};
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Playlist {
-    pub id: String,
-    pub user_id: String,
-    pub name: String,
-    pub track_count: i64,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlaylistTrack {
-    pub id: String,
-    pub playlist_id: String,
-    pub info_hash: String,
-    pub file_index: i64,
-    pub title: String,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-    pub duration_seconds: Option<i64>,
-    pub artwork_url: Option<String>,
-    pub position: i64,
-    pub created_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct AddTrackRequest {
-    pub info_hash: String,
-    pub file_index: Option<i64>,
-    pub title: String,
-    pub artist: Option<String>,
-    pub album: Option<String>,
-    pub duration_seconds: Option<i64>,
-    pub artwork_url: Option<String>,
-}
+// Re-export shared types for callers that still use `crate::db::playlists::*`.
+pub use streamx_api::types::{AddTrackRequest, Playlist, PlaylistTrack};
 
 impl Database {
     pub async fn create_playlist(&self, user_id: &str, name: &str) -> Result<Playlist> {
