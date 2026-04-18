@@ -17,5 +17,5 @@ cache/
 logs/
 test-results/
 test-results-live/
-backend/test-media/
+crates/server/test-media/
 providers.toml

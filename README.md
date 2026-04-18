@@ -31,10 +31,10 @@ All tooling is pinned via Nix. Enter the dev shell, then build the frontend and 
 nix develop
 
 # Frontend
-cd ui && pnpm install && pnpm build && cd ..
+cd web && pnpm install && pnpm build && cd ..
 
 # Backend (release build embeds the UI)
-cargo build --release --manifest-path backend/Cargo.toml
+cargo build --release --manifest-path crates/server/Cargo.toml
 
 # Run
 ./target/release/streamx
@@ -114,32 +114,32 @@ Hot reload with the Vite dev server proxying to a `cargo run` backend:
 nix develop
 
 # Terminal 1: frontend dev server (vite on :9000, proxies /api to :8998)
-cd ui && pnpm dev
+cd web && pnpm dev
 
 # Terminal 2: backend
-cargo run --manifest-path backend/Cargo.toml -- --port 8998
+cargo run --manifest-path crates/server/Cargo.toml -- --port 8998
 ```
 
 ### Checks
 
 ```bash
-cargo fmt --all --manifest-path backend/Cargo.toml
-cargo clippy --manifest-path backend/Cargo.toml -- -D warnings
-cargo check --manifest-path backend/Cargo.toml
-cd ui && pnpm typecheck
+cargo fmt --all --manifest-path crates/server/Cargo.toml
+cargo clippy --manifest-path crates/server/Cargo.toml -- -D warnings
+cargo check --manifest-path crates/server/Cargo.toml
+cd web && pnpm typecheck
 ```
 
 ### Tests
 
 ```bash
 # Rust unit + integration tests
-cargo test --manifest-path backend/Cargo.toml
+cargo test --manifest-path crates/server/Cargo.toml
 
 # Frontend component tests
-cd ui && pnpm test
+cd web && pnpm test
 
 # End-to-end browser tests (requires a running backend on port 8999)
-cd ui && pnpm test:e2e
+cd web && pnpm test:e2e
 ```
 
 ## CLI
@@ -157,35 +157,37 @@ Credentials can also be passed via `STREAMX_ADMIN_USER` and `STREAMX_ADMIN_PASSW
 ## Project layout
 
 ```
-backend/
-  src/
-    config.rs          configuration + env var expansion
-    server/            HTTP routes, auth, image proxy, static asset serving
-    torrent/           librqbit engine, provider dispatch, search formats
-    transcode/         FFmpeg HLS pipeline (GPU detect, probe, multi-variant)
-    db/                SQLite (users, history, downloads, favourites, playlists)
-ui/
+crates/
+  server/              Rust backend (Axum, librqbit, FFmpeg, SQLite). Builds the `streamx` binary.
+    src/
+      config.rs          configuration + env var expansion
+      server/            HTTP routes, auth, image proxy, static asset serving
+      torrent/           librqbit engine, provider dispatch, search formats
+      transcode/         FFmpeg HLS pipeline (GPU detect, probe, multi-variant)
+      db/                SQLite (users, history, downloads, favourites, playlists)
+web/                   React + TypeScript frontend (Vite, Radix UI, hls.js)
   src/
     pages/             Search, Browse, Player, Music, Favourites, etc.
     components/        VideoPlayer, AudioPlayerBar, ExpandedPlayer, Layout
     hooks/             useSearch, useStream, useAudioPlayer, useMediaSession
     api/               API client and types
+Cargo.toml             Cargo workspace (members = ["crates/*"])
 flake.nix              Nix flake (dev shell + builds)
 ```
 
 ## Troubleshooting
 
 - **Port in use:** `ss -tlnp | grep 8999` and kill the process, or pass `--port`.
-- **Frontend not showing:** build the UI first (`cd ui && pnpm install && pnpm build`), then restart the backend.
+- **Frontend not showing:** build the UI first (`cd web && pnpm install && pnpm build`), then restart the backend.
 - **Nix flake not found:** the flake file must be tracked by git (`git add flake.nix`).
 - **Safari HLS shows 401:** the stream token is not attached to segment requests. Open the debug pane (user menu → Debug Mode) and check the last `/api/stream/.../playlist.m3u8` response.
 - **Transcoding fails on GPU:** FFmpeg automatically falls back to CPU. Pass `--log-level debug` and watch the backend logs to see which acceleration was tried.
 
 ## Tooling
 
-- [`docs/og-preview.png`](docs/og-preview.png) is produced by `ui/tests/screenshot-og.spec.ts`. Regenerate it against a running instance with:
+- [`docs/og-preview.png`](docs/og-preview.png) is produced by `web/tests/screenshot-og.spec.ts`. Regenerate it against a running instance with:
   ```bash
-  cd ui && npx playwright test tests/screenshot-og.spec.ts --config tests/live.config.ts
+  cd web && npx playwright test tests/screenshot-og.spec.ts --config tests/live.config.ts
   ```
 
 ## License

@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BINARY="$SCRIPT_DIR/target/release/streamx"
 PORT=8999
 BIND="0.0.0.0"
-WORKDIR="$SCRIPT_DIR/backend"
+WORKDIR="$SCRIPT_DIR/crates/server"
 
 if [ ! -f "$BINARY" ]; then
   echo "Binary not found at $BINARY - run 'cargo build --release' first"

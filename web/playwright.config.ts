@@ -19,7 +19,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `cd ../backend && cargo run -- --port ${port} --data-dir ${tmpDir} --admin-user admin --admin-password password`,
+    command: `cargo run --manifest-path ../crates/server/Cargo.toml -- --port ${port} --data-dir ${tmpDir} --admin-user admin --admin-password password`,
     port,
     reuseExistingServer: !process.env.CI,
     timeout: 120000,

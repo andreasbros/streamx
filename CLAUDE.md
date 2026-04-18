@@ -8,8 +8,8 @@ All tools are managed via Nix. Run `nix develop` to enter the dev shell.
 
 ```bash
 nix develop
-cd ui && pnpm install && pnpm build
-cd backend && cargo build
+cd web && pnpm install && pnpm build && cd ..
+cargo build --manifest-path crates/server/Cargo.toml
 ```
 
 ## Code standards
@@ -28,8 +28,9 @@ cd backend && cargo build
 
 ## Project structure
 
-- `backend/` - Rust backend (Axum, librqbit, FFmpeg transcoding, SQLite)
-- `ui/` - React/TypeScript frontend (Vite, Radix UI, hls.js, framer-motion)
+- `crates/server/` - Rust backend (Axum, librqbit, FFmpeg transcoding, SQLite). Cargo workspace member; binary still named `streamx`.
+- `crates/` - future crates (`core`, `api`, `desktop`) land here. See feat/workspace-split.
+- `web/` - React/TypeScript frontend (Vite, Radix UI, hls.js, framer-motion). Built assets (`web/dist/`) are embedded into the server binary via rust-embed.
 - `flake.nix` - Nix flake for dev shell and builds
 
 ## Testing

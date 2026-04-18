@@ -1,60 +1,130 @@
 {
-  description = "StreamX - Torrent Video Streaming Player";
+  description = "StreamX - torrent-based streaming player (server + desktop)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    rust-overlay.url = "github:oxalica/rust-overlay";
-    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    crane = {
+      url = "github:ipetkov/crane";
+    };
   };
 
-  # For faster CI/dev builds, consider using a binary cache:
-  #   - Cachix: `cachix use <your-cache>` after `cachix create <your-cache>`
-  #     then add `cachix push <your-cache>` to your CI pipeline
-  #   - Self-hosted nix binary cache: configure `nix.settings.substituters`
-  #     and `nix.settings.trusted-public-keys` in your NixOS/nix config
-  #   - GitHub Actions cache: use DeterminateSystems/magic-nix-cache-action
-
-  outputs = { self, nixpkgs, rust-overlay, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, crane }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [ (import rust-overlay) ];
+        overlays = [ rust-overlay.overlays.default ];
         pkgs = import nixpkgs { inherit system overlays; };
-        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
-          extensions = [ "rust-src" "rust-analyzer" "clippy" "rustfmt" ];
-          targets = [ "x86_64-unknown-linux-musl" ];
+
+        # Nightly Rust toolchain pinned via rust-toolchain.toml.
+        # Nightly is required for edition 2024 (gpui, future desktop crate).
+        rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+
+        craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+
+        # Shared dependencies for building any crate in the workspace.
+        commonBuildInputs = with pkgs; [
+          openssl
+          sqlite
+          ffmpeg-full
+          mpv-unwrapped              # libmpv for future desktop video playback
+        ] ++ lib.optionals stdenv.isDarwin [
+          apple-sdk_15
+          libiconv
+          darwin.libobjc
+        ] ++ lib.optionals stdenv.isLinux [
+          # GPUI / graphics
+          vulkan-loader
+          vulkan-headers
+          shaderc
+          libxkbcommon
+          wayland
+          xorg.libX11
+          xorg.libXcursor
+          xorg.libXi
+          xorg.libXrandr
+          # MPRIS media session on Linux
+          dbus
+          dbus.dev
+          # Hardware video decode (existing)
+          libva
+          libdrm
+          intel-media-driver
+        ];
+
+        commonNativeBuildInputs = with pkgs; [
+          pkg-config
+          cmake
+        ];
+
+        commonArgs = {
+          src = craneLib.cleanCargoSource ./.;
+          strictDeps = true;
+          buildInputs = commonBuildInputs;
+          nativeBuildInputs = commonNativeBuildInputs;
         };
+
       in
       {
-        devShells.default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [
-            pkg-config
-          ];
+        # Packages intentionally deferred. `nix build .#default` would need
+        # the frontend pre-built at web/dist/ because rust-embed resolves
+        # that path at compile time. Proper packaging lands in Phase 8.
+        # Until then, build inside the dev shell:
+        #   cd web && pnpm install && pnpm build && cd ..
+        #   cargo build --release --manifest-path crates/server/Cargo.toml
 
-          buildInputs = with pkgs; [
+        devShells.default = pkgs.mkShell {
+          packages = with pkgs; [
             rustToolchain
-            openssl
-            openssl.dev
+            rust-analyzer
+
+            # Cargo ecosystem
+            cargo-watch
+            cargo-edit
+            cargo-nextest
+
+            # Frontend toolchain
             pnpm
             nodejs_22
-            imagemagick
-            sqlite
-            ffmpeg-full
-            playwright-driver.browsers
-            libva
-            libva-utils
-            libdrm
-            intel-media-driver
-          ];
 
+            # Testing / graphics
+            playwright-driver.browsers
+            imagemagick
+          ]
+          ++ commonBuildInputs
+          ++ commonNativeBuildInputs;
+
+          # Environment variables (identical across platforms unless overridden below)
           shellHook = ''
             export RUST_LOG=info
+            export RUST_BACKTRACE=1
             export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
             export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
             export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+          '' + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
             export LIBVA_DRIVERS_PATH="${pkgs.intel-media-driver}/lib/dri:${pkgs.libva}/lib/dri''${LIBVA_DRIVERS_PATH:+:$LIBVA_DRIVERS_PATH}"
             export LIBVA_DRIVER_NAME=iHD
+          '' + ''
+            echo "StreamX dev shell ready"
+            echo "  Rust:     $(rustc --version)"
+            echo "  Node:     $(node --version)"
+            echo "  Platform: ${system}"
           '';
+        };
+
+        # cargo clippy + fmt as reusable checks. Run with: nix flake check
+        checks = {
+          clippy = craneLib.cargoClippy (commonArgs // {
+            cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          });
+
+          fmt = craneLib.cargoFmt {
+            src = ./.;
+          };
         };
       }
     );

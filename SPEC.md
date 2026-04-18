@@ -67,7 +67,7 @@ streamx/
 ├── scripts/
 │   ├── generate-logo.sh        # Bash script to generate SX logo icons
 │   └── build-release.sh        # Cross-compile release builds
-├── backend/
+├── crates/server/
 │   ├── Cargo.toml
 │   ├── src/
 │   │   ├── main.rs             # Entry point — CLI, config loading, server start
@@ -102,7 +102,7 @@ streamx/
 │       ├── transcode_tests.rs  # Transcoding tests
 │       ├── auth_tests.rs       # Auth flow tests
 │       └── e2e_tests.rs        # Full end-to-end tests
-├── ui/
+├── web/
 │   ├── package.json
 │   ├── pnpm-lock.yaml
 │   ├── tsconfig.json
@@ -453,7 +453,7 @@ File selected → probe with FFmpeg
 - Square logo with "SX" monogram
 - Dark background, modern sans-serif font
 - Generate sizes: 16x16, 32x32, 48x48, 64x64, 128x128, 256x256, 512x512
-- Output to `ui/public/icons/`
+- Output to `web/public/icons/`
 - Also generate `favicon.ico` (multi-size)
 - Also generate `apple-touch-icon.png` (180x180)
 
@@ -472,8 +472,8 @@ File selected → probe with FFmpeg
 - ImageMagick (for logo generation)
 
 **`nix build`:**
-- Build frontend first (`pnpm build` in `ui/`)
-- Copy frontend dist to `backend/ui-dist/` (for `rust-embed`)
+- Build frontend first (`pnpm build` in `web/`)
+- Copy frontend dist to `web/dist/` (for `rust-embed`)
 - Build Rust binary with musl target for static linking
 - Output: single static binary `streamx`
 
@@ -575,9 +575,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 # Development
 cd streamx
 nix develop              # Enter dev shell
-cd ui && pnpm install    # Install frontend deps
-cd ui && pnpm dev        # Frontend dev server (hot reload)
-cd backend && cargo run  # Backend dev server
+cd web && pnpm install    # Install frontend deps
+cd web && pnpm dev        # Frontend dev server (hot reload)
+cargo run --manifest-path crates/server/Cargo.toml  # Backend dev server
 
 # Production build
 nix build .#streamx-x86_64-linux

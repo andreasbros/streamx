@@ -46,7 +46,7 @@ fn main() {
 
     // Re-run on every build
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../ui/dist/index.html");
+    println!("cargo:rerun-if-changed=../../web/dist/index.html");
 
     if let Ok(output) = Command::new("git").args(["rev-parse", "--short", "HEAD"]).output() {
         let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
