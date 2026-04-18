@@ -1,0 +1,25 @@
+[server]
+port = 8999
+bind = "127.0.0.1"
+open_browser = true
+
+[torrent]
+download_dir = "~/.streamx/downloads"
+max_connections = 200
+sequential = true
+seed_after_complete = true
+dht = true
+pex = true
+
+[transcode]
+hls_segment_duration = 4
+video_codec = "h264"
+audio_codec = "aac"
+preset = "ultrafast"
+
+[auth]
+jwt_secret = ""
+session_duration = "7d"
+
+[ui]
+default_theme = "dark"

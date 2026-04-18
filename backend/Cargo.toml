@@ -1,0 +1,45 @@
+[package]
+name = "streamx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "streamx"
+
+[[bin]]
+name = "streamx"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["macros", "ws"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+rust-embed = { version = "8", features = ["compression"] }
+snafu = { version = "0.8", features = ["futures"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+bcrypt = "0.16"
+jsonwebtoken = "9"
+tower-http = { version = "0.6", features = ["cors", "compression-gzip", "trace", "set-header"] }
+tower = { version = "0.5", features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio-util = { version = "0.7", features = ["io"] }
+mime_guess = "2"
+rand = "0.8"
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+http = "1"
+bytes = "1"
+librqbit = "8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+urlencoding = "2"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+portpicker = "0.1"

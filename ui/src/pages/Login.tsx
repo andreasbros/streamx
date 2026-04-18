@@ -1,0 +1,135 @@
+import { useState } from "react";
+import {
+  Box,
+  Card,
+  Flex,
+  Text,
+  TextField,
+  Button,
+  Tabs,
+} from "@radix-ui/themes";
+import { PersonIcon, LockClosedIcon } from "@radix-ui/react-icons";
+import { motion } from "framer-motion";
+import { NeonBackground } from "../components/NeonBackground";
+import { useAuth } from "../hooks/useAuth";
+
+export function Login() {
+  const { login, register } = useAuth();
+  const [tab, setTab] = useState<"login" | "register">("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+
+    try {
+      if (tab === "login") {
+        await login(username, password);
+      } else {
+        await register(username, password);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Authentication failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Box
+      style={{
+        position: "fixed",
+        inset: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <NeonBackground />
+      <motion.div
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.3 }}
+        style={{ position: "relative", zIndex: 1, width: "100%", maxWidth: 400, padding: 16 }}
+      >
+        <Card
+          size="4"
+          style={{
+            backdropFilter: "blur(24px)",
+            background: "var(--color-panel-translucent)",
+          }}
+        >
+          <Flex direction="column" gap="4">
+            <Flex direction="column" align="center" gap="2">
+              <img src="/icons/logo.svg" alt="StreamX" width={48} height={48} />
+              <Text size="6" weight="bold">
+                StreamX
+              </Text>
+              <Text size="2" color="gray">
+                Torrent video streaming
+              </Text>
+            </Flex>
+
+            <Tabs.Root
+              value={tab}
+              onValueChange={(v) => {
+                setTab(v as "login" | "register");
+                setError(null);
+              }}
+            >
+              <Tabs.List>
+                <Tabs.Trigger value="login">Sign In</Tabs.Trigger>
+                <Tabs.Trigger value="register">Create Account</Tabs.Trigger>
+              </Tabs.List>
+            </Tabs.Root>
+
+            <form onSubmit={handleSubmit}>
+              <Flex direction="column" gap="3">
+                <TextField.Root
+                  placeholder="Username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  required
+                >
+                  <TextField.Slot>
+                    <PersonIcon />
+                  </TextField.Slot>
+                </TextField.Root>
+
+                <TextField.Root
+                  type="password"
+                  placeholder="Password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                >
+                  <TextField.Slot>
+                    <LockClosedIcon />
+                  </TextField.Slot>
+                </TextField.Root>
+
+                {error && (
+                  <Text size="2" color="red">
+                    {error}
+                  </Text>
+                )}
+
+                <Button type="submit" size="3" disabled={loading}>
+                  {loading
+                    ? "Please wait..."
+                    : tab === "login"
+                      ? "Sign In"
+                      : "Create Account"}
+                </Button>
+              </Flex>
+            </form>
+          </Flex>
+        </Card>
+      </motion.div>
+    </Box>
+  );
+}
