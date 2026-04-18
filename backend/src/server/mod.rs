@@ -83,13 +83,19 @@ pub fn build_router(
     let stream_routes = Router::new()
         .route("/url/playlist.m3u8", get(stream::url_playlist))
         .route("/", post(api::create_stream))
+        .route("/music", post(api::create_music_stream))
         .route("/{id}", get(api::get_stream))
         .route("/{id}", delete(api::delete_stream))
         .route("/{id}/pause", put(api::pause_stream))
         .route("/{id}/resume", put(api::resume_stream))
+        .route("/{id}/share", post(api::share_stream))
         .route("/{id}/ws", get(stream::stream_ws))
         .route("/{id}/playlist.m3u8", get(stream::playlist))
         .route("/{id}/file", get(stream::stream_file))
+        .route("/{id}/files", get(stream::list_stream_files))
+        .route("/{id}/file/{file_index}", get(stream::stream_file_by_index))
+        .route("/{id}/artwork/{file_index}", get(stream::stream_artwork))
+        .route("/{id}/vlc/{token}", get(stream::stream_vlc))
         .route(
             "/{id}/{variant}/playlist.m3u8",
             get(stream::variant_playlist),
@@ -126,6 +132,15 @@ pub fn build_router(
         .route("/browse", get(api::browse_music))
         .route("/resolve-magnet", post(api::resolve_magnet));
 
+    let playlist_routes = Router::new()
+        .route("/", post(api::create_playlist))
+        .route("/", get(api::get_playlists))
+        .route("/{id}", put(api::rename_playlist))
+        .route("/{id}", delete(api::delete_playlist))
+        .route("/{id}/tracks", get(api::get_playlist_tracks))
+        .route("/{id}/tracks", post(api::add_playlist_track))
+        .route("/{id}/tracks/{track_id}", delete(api::remove_playlist_track));
+
     let trailer_routes = Router::new().route("/search", get(api::trailer_search));
 
     let poster_routes = Router::new().route("/{filename}", get(api::serve_poster));
@@ -145,7 +160,15 @@ pub fn build_router(
         .route("/logs", get(admin::admin_logs_ws))
         .route("/kill/{stream_id}", delete(admin::kill_transcode));
 
+    let version_handler = || async {
+        axum::Json(serde_json::json!({
+            "version": static_files::VERSION,
+            "hash": static_files::BUILD_HASH,
+        }))
+    };
+
     let api_routes = Router::new()
+        .route("/version", get(version_handler))
         .nest("/admin", admin_routes)
         .nest("/auth", auth_routes)
         .nest("/search", search_routes)
@@ -157,6 +180,7 @@ pub fn build_router(
         .nest("/music-videos", music_video_routes)
         .nest("/music", music_routes)
         .nest("/settings", settings_routes)
+        .nest("/playlists", playlist_routes)
         .nest("/trailer", trailer_routes)
         .nest("/posters", poster_routes)
         .nest("/test", test_routes);
@@ -177,7 +201,10 @@ pub fn build_router(
         ])
         .allow_credentials(true);
 
-    let proxy_routes = Router::new().route("/{id}/{*path}", get(proxy::proxy_image));
+    let proxy_routes = Router::new()
+        .route("/local", get(proxy::list_local_files))
+        .route("/local/{filename}", get(proxy::local_file))
+        .route("/{id}/{*path}", get(proxy::proxy_image));
 
     Router::new()
         .nest("/api", api_routes)

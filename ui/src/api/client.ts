@@ -274,8 +274,80 @@ class ApiClient {
     return `/api/stream/${streamId}/file`;
   }
 
+  getFileByIndexUrl(streamId: string, fileIndex: number): string {
+    return `/api/stream/${streamId}/file/${fileIndex}`;
+  }
+
+  getArtworkUrl(streamId: string, fileIndex: number): string {
+    return `/api/stream/${streamId}/artwork/${fileIndex}`;
+  }
+
+  async getStreamFiles(streamId: string): Promise<{ files: import("./types").TorrentFileInfo[] }> {
+    return this.request(`/api/stream/${streamId}/files`);
+  }
+
+  async startMusicStream(magnetUri: string): Promise<StreamResponse> {
+    return this.request("/api/stream/music", {
+      method: "POST",
+      body: JSON.stringify({ magnet_uri: magnetUri }),
+    });
+  }
+
   async deleteStream(streamId: string): Promise<void> {
     await this.request(`/api/stream/${streamId}`, { method: "DELETE" });
+  }
+
+  async createShareLink(streamId: string, durationHours = 24 * 30): Promise<{ token: string; url: string }> {
+    return this.request(`/api/stream/${streamId}/share`, {
+      method: "POST",
+      body: JSON.stringify({ duration_hours: durationHours }),
+    });
+  }
+
+  // Playlists
+  async getPlaylists(): Promise<{ playlists: import("./types").Playlist[] }> {
+    return this.request("/api/playlists");
+  }
+
+  async createPlaylist(name: string): Promise<import("./types").Playlist> {
+    return this.request("/api/playlists", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  async renamePlaylist(id: string, name: string): Promise<void> {
+    await this.request(`/api/playlists/${id}`, {
+      method: "PUT",
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  async deletePlaylist(id: string): Promise<void> {
+    await this.request(`/api/playlists/${id}`, { method: "DELETE" });
+  }
+
+  async getPlaylistTracks(id: string): Promise<{ tracks: import("./types").PlaylistTrack[] }> {
+    return this.request(`/api/playlists/${id}/tracks`);
+  }
+
+  async addPlaylistTrack(playlistId: string, track: {
+    info_hash: string;
+    file_index?: number;
+    title: string;
+    artist?: string;
+    album?: string;
+    duration_seconds?: number;
+    artwork_url?: string;
+  }): Promise<import("./types").PlaylistTrack> {
+    return this.request(`/api/playlists/${playlistId}/tracks`, {
+      method: "POST",
+      body: JSON.stringify(track),
+    });
+  }
+
+  async removePlaylistTrack(playlistId: string, trackId: string): Promise<void> {
+    await this.request(`/api/playlists/${playlistId}/tracks/${trackId}`, { method: "DELETE" });
   }
 }
 

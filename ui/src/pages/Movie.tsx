@@ -91,8 +91,27 @@ export function Movie() {
     });
   };
 
+  const bgImage = group.backdrop || group.poster_large || group.poster || null;
+
   return (
     <Flex direction="column" gap="4">
+      {bgImage && (
+        <div style={{ position: "fixed", inset: 0, zIndex: -1, overflow: "hidden" }}>
+          <img
+            src={bgImage}
+            alt=""
+            style={{
+              position: "absolute",
+              inset: "-20%",
+              width: "140%",
+              height: "140%",
+              objectFit: "cover",
+              filter: "blur(40px) brightness(0.15) saturate(1.4)",
+            }}
+          />
+          <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)" }} />
+        </div>
+      )}
       <Button variant="ghost" size="1" onClick={() => navigate(-1)} style={{ alignSelf: "flex-start" }}>
         <ArrowLeftIcon width={18} height={18} />
       </Button>

@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import {
   Flex,
   Text,
@@ -104,6 +105,27 @@ export function Settings({ theme, setTheme }: SettingsProps) {
           </Button>
         </Flex>
       </Card>
+
+      <Card>
+        <Flex direction="column" gap="2">
+          <Text size="3" weight="medium">About</Text>
+          <VersionInfo />
+        </Flex>
+      </Card>
+    </Flex>
+  );
+}
+
+function VersionInfo() {
+  const [version, setVersion] = useState<{ version: string; hash: string } | null>(null);
+  useEffect(() => {
+    fetch("/api/version").then(r => r.json()).then(setVersion).catch(() => {});
+  }, []);
+  if (!version) return null;
+  return (
+    <Flex direction="column" gap="1">
+      <Text size="1" color="gray">Version: {version.version}</Text>
+      <Text size="1" color="gray">Build: {version.hash}</Text>
     </Flex>
   );
 }

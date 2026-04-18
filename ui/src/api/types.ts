@@ -21,6 +21,7 @@ export interface RegisterRequest {
 
 export interface SearchRequest {
   query: string;
+  page?: number;
 }
 
 export interface SearchResultGroup {
@@ -239,4 +240,33 @@ export interface FavouriteItem {
 
 export interface FavouritesResponse {
   items: FavouriteItem[];
+}
+
+export interface TorrentFileInfo {
+  index: number;
+  path: string;
+  size: number;
+  is_video: boolean;
+  is_audio: boolean;
+}
+
+export interface Playlist {
+  id: string;
+  name: string;
+  track_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlaylistTrack {
+  id: string;
+  playlist_id: string;
+  info_hash: string;
+  file_index: number;
+  title: string;
+  artist: string | null;
+  album: string | null;
+  duration_seconds: number | null;
+  artwork_url: string | null;
+  position: number;
 }

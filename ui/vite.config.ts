@@ -10,7 +10,7 @@ export default defineConfig({
     },
   },
   server: {
-    port: 8999,
+    port: 9000,
     host: "0.0.0.0",
     allowedHosts: ["streamx.cbdemo.net"],
     headers: {
@@ -21,18 +21,18 @@ export default defineConfig({
     },
     proxy: {
       "/api": {
-        target: "http://localhost:8998",
+        target: "http://localhost:8999",
         changeOrigin: true,
         ws: true,
       },
       "/proxy": {
-        target: "http://localhost:8998",
+        target: "http://localhost:8999",
         changeOrigin: true,
       },
     },
   },
   preview: {
-    port: 8999,
+    port: 9000,
     host: "0.0.0.0",
   },
   build: {

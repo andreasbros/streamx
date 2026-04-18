@@ -19,11 +19,105 @@ const BCRYPT_COST: u32 = 12;
 const RATE_LIMIT_WINDOW_SECS: i64 = 60;
 const RATE_LIMIT_MAX_REQUESTS: usize = 10;
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Admin,
+    User,
+    Guest,
+}
+
+fn default_role() -> Role {
+    Role::User
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
     pub user_id: String,
     pub username: String,
+    #[serde(default = "default_role")]
+    pub role: Role,
+    /// Only set for Guest tokens - restricts access to this stream
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
     pub exp: usize,
+}
+
+/// Extractor: any valid token (user, admin, or guest)
+impl<S> FromRequestParts<S> for Claims
+where
+    S: Send + Sync,
+    AppState: axum::extract::FromRef<S>,
+{
+    type Rejection = Error;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let app_state = AppState::from_ref(state);
+        let token = extract_token(parts)?;
+        validate_jwt(&token, &app_state.jwt_secret)
+    }
+}
+
+/// Extractor: rejects Guest tokens. Use for browse, search, settings, admin, etc.
+pub struct AuthenticatedUser(pub Claims);
+
+impl<S> FromRequestParts<S> for AuthenticatedUser
+where
+    S: Send + Sync,
+    AppState: axum::extract::FromRef<S>,
+{
+    type Rejection = Error;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &S,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let app_state = AppState::from_ref(state);
+        let token = extract_token(parts)?;
+        let claims = validate_jwt(&token, &app_state.jwt_secret)?;
+        if claims.role == Role::Guest {
+            return Err(Error::Unauthorized {
+                message: "Guest access not allowed for this endpoint".to_string(),
+            });
+        }
+        Ok(AuthenticatedUser(claims))
+    }
+}
+
+fn extract_token(parts: &Parts) -> std::result::Result<String, Error> {
+    parts
+        .headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| t.to_string())
+        .or_else(|| {
+            parts
+                .uri
+                .query()
+                .and_then(|q| {
+                    q.split('&')
+                        .find_map(|pair| pair.strip_prefix("token="))
+                })
+                .map(|t| t.to_string())
+        })
+        .or_else(|| {
+            // Also check for ?guest= query param
+            parts
+                .uri
+                .query()
+                .and_then(|q| {
+                    q.split('&')
+                        .find_map(|pair| pair.strip_prefix("guest="))
+                })
+                .map(|t| t.to_string())
+        })
+        .ok_or_else(|| Error::Unauthorized {
+            message: "Missing authorization (header or ?token= query param)".to_string(),
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,43 +181,36 @@ impl RateLimiter {
     }
 }
 
-impl<S> FromRequestParts<S> for Claims
-where
-    S: Send + Sync,
-    AppState: axum::extract::FromRef<S>,
-{
-    type Rejection = Error;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &S,
-    ) -> std::result::Result<Self, Self::Rejection> {
-        let app_state = AppState::from_ref(state);
-
-        let token = parts
-            .headers
-            .get("Authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|t| t.to_string())
-            .or_else(|| {
-                parts
-                    .uri
-                    .query()
-                    .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
-                    .map(|t| t.to_string())
-            })
-            .ok_or_else(|| Error::Unauthorized {
-                message: "Missing authorization (header or ?token= query param)".to_string(),
-            })?;
-
-        validate_jwt(&token, &app_state.jwt_secret)
-    }
-}
-
 pub fn create_jwt(
     user_id: &str,
     username: &str,
+    is_admin: bool,
+    secret: &str,
+    duration_hours: i64,
+) -> Result<String> {
+    let expiration = Utc::now()
+        .checked_add_signed(Duration::hours(duration_hours))
+        .ok_or_else(|| Error::Internal {
+            message: "Failed to compute token expiration".to_string(),
+        })?;
+
+    let role = if is_admin { Role::Admin } else { Role::User };
+
+    let claims = Claims {
+        user_id: user_id.to_string(),
+        username: username.to_string(),
+        role,
+        stream_id: None,
+        exp: expiration.timestamp() as usize,
+    };
+
+    let header = Header::default();
+    let key = EncodingKey::from_secret(secret.as_bytes());
+    encode(&header, &claims, &key).map_err(|source| Error::Jwt { source })
+}
+
+pub fn create_guest_token(
+    stream_id: &str,
     secret: &str,
     duration_hours: i64,
 ) -> Result<String> {
@@ -134,14 +221,15 @@ pub fn create_jwt(
         })?;
 
     let claims = Claims {
-        user_id: user_id.to_string(),
-        username: username.to_string(),
+        user_id: "guest".to_string(),
+        username: "guest".to_string(),
+        role: Role::Guest,
+        stream_id: Some(stream_id.to_string()),
         exp: expiration.timestamp() as usize,
     };
 
     let header = Header::default();
     let key = EncodingKey::from_secret(secret.as_bytes());
-
     encode(&header, &claims, &key).map_err(|source| Error::Jwt { source })
 }
 
@@ -232,7 +320,7 @@ pub async fn register(
     let user = state.db.create_user(&username, &password_hash).await?;
 
     let duration_hours = parse_session_duration(&state.config.auth.session_duration)?;
-    let token = create_jwt(&user.id, &user.username, &state.jwt_secret, duration_hours)?;
+    let token = create_jwt(&user.id, &user.username, user.is_admin, &state.jwt_secret, duration_hours)?;
 
     Ok((StatusCode::CREATED, Json(AuthResponse { token })))
 }
@@ -263,7 +351,7 @@ pub async fn login(
     }
 
     let duration_hours = parse_session_duration(&state.config.auth.session_duration)?;
-    let token = create_jwt(&user.id, &user.username, &state.jwt_secret, duration_hours)?;
+    let token = create_jwt(&user.id, &user.username, user.is_admin, &state.jwt_secret, duration_hours)?;
 
     Ok(Json(AuthResponse { token }))
 }
@@ -272,6 +360,16 @@ pub async fn me(
     State(state): State<AppState>,
     claims: Claims,
 ) -> std::result::Result<impl IntoResponse, Error> {
+    // Guest tokens return minimal info
+    if claims.role == Role::Guest {
+        return Ok(Json(MeResponse {
+            id: "guest".to_string(),
+            username: "guest".to_string(),
+            is_admin: false,
+            created_at: String::new(),
+        }));
+    }
+
     let user = state
         .db
         .find_user_by_id(&claims.user_id)

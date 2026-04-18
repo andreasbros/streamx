@@ -18,7 +18,7 @@ fn bcrypt_verify_wrong_password_fails() {
 #[test]
 fn jwt_create_and_validate() {
     let secret = "test-jwt-secret";
-    let token = auth::create_jwt("user-123", "testuser", secret, 24).unwrap();
+    let token = auth::create_jwt("user-123", "testuser", false, secret, 24).unwrap();
 
     let claims = auth::validate_jwt(&token, secret).unwrap();
     assert_eq!(claims.user_id, "user-123");
@@ -27,7 +27,7 @@ fn jwt_create_and_validate() {
 
 #[test]
 fn jwt_with_wrong_secret_fails() {
-    let token = auth::create_jwt("user-123", "testuser", "secret-a", 24).unwrap();
+    let token = auth::create_jwt("user-123", "testuser", false, "secret-a", 24).unwrap();
     let result = auth::validate_jwt(&token, "secret-b");
     assert!(result.is_err());
 }
@@ -35,7 +35,7 @@ fn jwt_with_wrong_secret_fails() {
 #[test]
 fn jwt_with_expired_token_fails() {
     let secret = "test-jwt-secret";
-    let token = auth::create_jwt("user-123", "testuser", secret, -1).unwrap();
+    let token = auth::create_jwt("user-123", "testuser", false, secret, -1).unwrap();
 
     let result = auth::validate_jwt(&token, secret);
     assert!(result.is_err());

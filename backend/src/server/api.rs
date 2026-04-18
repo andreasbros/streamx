@@ -1,7 +1,8 @@
 use crate::db::favourites::AddFavouriteRequest;
 use crate::db::metadata::MediaMetadata;
+use crate::db::playlists::AddTrackRequest;
 use crate::error::Error;
-use crate::server::auth::Claims;
+use crate::server::auth::{AuthenticatedUser, create_guest_token};
 use crate::server::proxy;
 use crate::server::AppState;
 use axum::extract::{Path, State};
@@ -12,6 +13,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 pub struct SearchRequest {
     pub query: String,
+    #[serde(default = "default_page")]
+    pub page: u32,
+}
+
+fn default_page() -> u32 {
+    1
 }
 
 #[derive(Debug, Serialize)]
@@ -57,7 +64,7 @@ pub struct UpdateSettingsRequest {
 
 pub async fn search(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Json(body): Json<SearchRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let query = body.query.trim();
@@ -67,7 +74,8 @@ pub async fn search(
         });
     }
 
-    let results = state.search_provider.search(query).await?;
+    let page = body.page.max(1);
+    let results = state.search_provider.search(query, page).await?;
     let result_count = results.len() as i32;
 
     state
@@ -80,7 +88,7 @@ pub async fn search(
 
 pub async fn browse(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let sort_by = params
@@ -109,7 +117,7 @@ pub async fn browse(
 
 pub async fn search_history(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let searches = state.db.get_search_history(&claims.user_id).await?;
     Ok(Json(serde_json::json!({ "searches": searches })))
@@ -117,7 +125,7 @@ pub async fn search_history(
 
 pub async fn create_stream(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Json(body): Json<CreateStreamRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let magnet_uri = body.magnet_uri.trim();
@@ -221,6 +229,28 @@ pub async fn create_stream(
     })))
 }
 
+/// Create a music stream that downloads ALL files in the torrent (for albums).
+pub async fn create_music_stream(
+    State(state): State<AppState>,
+    AuthenticatedUser(_claims): AuthenticatedUser,
+    Json(body): Json<CreateStreamRequest>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let magnet_uri = body.magnet_uri.trim();
+    if magnet_uri.is_empty() || magnet_uri.len() > 2048 {
+        return Err(Error::BadRequest {
+            message: "Invalid magnet URI".to_string(),
+        });
+    }
+
+    let download = state.torrent_engine.add_magnet_album(magnet_uri).await?;
+
+    Ok(Json(serde_json::json!({
+        "stream_id": download.info_hash,
+        "status": download.status,
+        "title": download.title,
+    })))
+}
+
 async fn download_poster(
     url: &str,
     dest: &std::path::Path,
@@ -233,7 +263,7 @@ async fn download_poster(
 
 pub async fn get_stream(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     Path(id): Path<String>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let download = state
@@ -262,7 +292,7 @@ pub async fn get_stream(
 
 pub async fn pause_stream(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     Path(id): Path<String>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     state.torrent_engine.pause(&id).await?;
@@ -271,7 +301,7 @@ pub async fn pause_stream(
 
 pub async fn resume_stream(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     Path(id): Path<String>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     state.torrent_engine.resume(&id).await?;
@@ -280,14 +310,35 @@ pub async fn resume_stream(
 
 pub async fn delete_stream(
     State(state): State<AppState>,
-    _claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> std::result::Result<impl IntoResponse, Error> {
-    // Stop torrent
-    let _ = state.torrent_engine.pause(&id).await;
+    // Admin only
+    let user = state.db.find_user_by_id(&claims.user_id).await?.ok_or_else(|| Error::Unauthorized {
+        message: "User not found".to_string(),
+    })?;
+    if !user.is_admin {
+        return Err(Error::Unauthorized { message: "Admin access required".to_string() });
+    }
+
+    cleanup_stream(&state, &id).await?;
+    state.db.reset_download(&id).await?;
+    tracing::info!(stream_id = %id, "Admin reset stream for re-download");
+    Ok(Json(serde_json::json!({ "status": "deleted" })))
+}
+
+/// Full cleanup: stop download, kill transcodes, delete files
+pub async fn cleanup_stream(state: &AppState, id: &str) -> std::result::Result<(), Error> {
+    // Stop and remove torrent from engine (prevents stale progress reporting)
+    let _ = state.torrent_engine.stop_and_remove(id).await;
+
+    // Kill active transcodes (drops handles -> SIGTERM FFmpeg)
+    if let Err(e) = state.hls_pipeline.cleanup(id).await {
+        tracing::warn!(stream_id = %id, "HLS cleanup failed (non-fatal): {e}");
+    }
 
     // Delete files on disk
-    if let Ok(Some(dl)) = state.torrent_engine.get_download(&id).await {
+    if let Ok(Some(dl)) = state.torrent_engine.get_download(id).await {
         if let Some(ref p) = dl.partial_path {
             let path = std::path::PathBuf::from(p);
             if path.exists() {
@@ -305,20 +356,41 @@ pub async fn delete_stream(
             }
         }
     }
+    Ok(())
+}
 
-    // Clean HLS cache
-    state.hls_pipeline.cleanup(&id).await?;
+pub async fn share_stream(
+    State(state): State<AppState>,
+    _claims: AuthenticatedUser,
+    Path(id): Path<String>,
+    Json(body): Json<std::collections::HashMap<String, serde_json::Value>>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    // Verify stream exists
+    let _ = state
+        .torrent_engine
+        .get_download(&id)
+        .await?
+        .ok_or_else(|| Error::NotFound {
+            message: format!("Stream {id} not found"),
+        })?;
 
-    // Delete DB records
-    state.db.delete_download(&id).await?;
+    let duration_hours = body
+        .get("duration_hours")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(24 * 30)
+        .min(24 * 90)
+        .max(1);
 
-    tracing::info!(stream_id = %id, "Stream deleted");
-    Ok(Json(serde_json::json!({ "status": "deleted" })))
+    let token = create_guest_token(&id, &state.jwt_secret, duration_hours)?;
+    let url = format!("/player/{id}?guest={token}");
+
+    tracing::info!(stream_id = %id, duration_hours, "Share link created");
+    Ok(Json(serde_json::json!({ "token": token, "url": url })))
 }
 
 pub async fn get_history(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let items = state.db.get_watch_history_enriched(&claims.user_id).await?;
     Ok(Json(serde_json::json!({ "items": items })))
@@ -326,7 +398,7 @@ pub async fn get_history(
 
 pub async fn update_history(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     Path(id): Path<String>,
     Json(body): Json<UpdateHistoryRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
@@ -344,7 +416,7 @@ pub async fn update_history(
 
 pub async fn delete_history(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     Path(id): Path<String>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     state.db.delete_watch(&id).await?;
@@ -353,7 +425,7 @@ pub async fn delete_history(
 
 pub async fn get_settings(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let settings = state.db.get_settings(&claims.user_id).await?;
     Ok(Json(settings))
@@ -361,7 +433,7 @@ pub async fn get_settings(
 
 pub async fn update_settings(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Json(body): Json<UpdateSettingsRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let mut settings = state.db.get_settings(&claims.user_id).await?;
@@ -515,7 +587,7 @@ pub async fn trailer_search(
 
 pub async fn add_favourite(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Json(body): Json<AddFavouriteRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     if body.title.trim().is_empty() || body.title.len() > 500 {
@@ -529,7 +601,7 @@ pub async fn add_favourite(
 
 pub async fn get_favourites(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let content_type = params.get("type").map(|s| s.as_str());
@@ -542,7 +614,7 @@ pub async fn get_favourites(
 
 pub async fn delete_favourite(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let deleted = state.db.delete_favourite(&id, &claims.user_id).await?;
@@ -556,7 +628,7 @@ pub async fn delete_favourite(
 
 pub async fn search_tv(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     Json(body): Json<SearchRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let query = body.query.trim();
@@ -571,7 +643,7 @@ pub async fn search_tv(
 
 pub async fn browse_tv(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let page = params
@@ -589,7 +661,7 @@ pub async fn browse_tv(
 
 pub async fn get_tv_show(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     axum::extract::Path(imdb_id): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> std::result::Result<impl IntoResponse, Error> {
@@ -613,7 +685,7 @@ pub async fn get_tv_show(
 
 pub async fn search_music_videos(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     Json(body): Json<SearchRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let query = body.query.trim();
@@ -628,7 +700,7 @@ pub async fn search_music_videos(
 
 pub async fn browse_music_videos(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let page = params
@@ -641,7 +713,7 @@ pub async fn browse_music_videos(
 
 pub async fn search_music(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     Json(body): Json<SearchRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let query = body.query.trim();
@@ -656,7 +728,7 @@ pub async fn search_music(
 
 pub async fn browse_music(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let page = params
@@ -669,7 +741,7 @@ pub async fn browse_music(
 
 pub async fn resolve_magnet(
     State(state): State<AppState>,
-    _claims: Claims,
+    _claims: AuthenticatedUser,
     Json(body): Json<std::collections::HashMap<String, String>>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let detail_url = body.get("detail_url").ok_or_else(|| Error::BadRequest {
@@ -722,4 +794,81 @@ pub async fn serve_poster(
         ],
         bytes,
     ))
+}
+
+// --- Playlist CRUD ---
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePlaylistRequest {
+    pub name: String,
+}
+
+pub async fn create_playlist(
+    State(state): State<AppState>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+    Json(body): Json<CreatePlaylistRequest>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let playlist = state.db.create_playlist(&claims.user_id, &body.name).await?;
+    Ok(Json(playlist))
+}
+
+pub async fn get_playlists(
+    State(state): State<AppState>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let playlists = state.db.get_playlists(&claims.user_id).await?;
+    Ok(Json(serde_json::json!({ "playlists": playlists })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RenamePlaylistRequest {
+    pub name: String,
+}
+
+pub async fn rename_playlist(
+    State(state): State<AppState>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+    Path(id): Path<String>,
+    Json(body): Json<RenamePlaylistRequest>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    state.db.rename_playlist(&id, &claims.user_id, &body.name).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn delete_playlist(
+    State(state): State<AppState>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+    Path(id): Path<String>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    state.db.delete_playlist(&id, &claims.user_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn get_playlist_tracks(
+    State(state): State<AppState>,
+    AuthenticatedUser(_claims): AuthenticatedUser,
+    Path(id): Path<String>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let tracks = state.db.get_playlist_tracks(&id).await?;
+    Ok(Json(serde_json::json!({ "tracks": tracks })))
+}
+
+pub async fn add_playlist_track(
+    State(state): State<AppState>,
+    AuthenticatedUser(_claims): AuthenticatedUser,
+    Path(id): Path<String>,
+    Json(body): Json<AddTrackRequest>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let track = state.db.add_playlist_track(&id, &body).await?;
+    Ok(Json(track))
+}
+
+pub async fn remove_playlist_track(
+    State(state): State<AppState>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+    Path((playlist_id, track_id)): Path<(String, String)>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let _ = playlist_id; // validated by route
+    state.db.remove_playlist_track(&track_id, &claims.user_id).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }

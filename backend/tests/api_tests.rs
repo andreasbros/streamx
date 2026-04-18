@@ -41,7 +41,7 @@ async fn start_test_server() -> TestServer {
             threads: None,
             gpu: false,
             hls_downscale: true,
-            hls_max_height: 1080,
+            hls_max_height: 1080, hls_force_stereo: true,
         },
         auth: streamx::config::AuthConfig {
             jwt_secret: "test-secret-key-for-integration-tests".to_string(),
@@ -535,7 +535,7 @@ async fn admin_user_creation_via_config() {
             threads: None,
             gpu: false,
             hls_downscale: true,
-            hls_max_height: 1080,
+            hls_max_height: 1080, hls_force_stereo: true,
         },
         auth: streamx::config::AuthConfig {
             jwt_secret: "admin-test-secret".to_string(),

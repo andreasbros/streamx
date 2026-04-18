@@ -1,5 +1,5 @@
 use crate::error::Error;
-use crate::server::auth::Claims;
+use crate::server::auth::AuthenticatedUser;
 use crate::server::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -63,7 +63,7 @@ struct ActiveDownload {
 
 pub async fn admin_monitor_ws(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, Error> {
     let user = state
@@ -381,7 +381,7 @@ fn detect_running_ffmpeg_outputs() -> Vec<String> {
 
 pub async fn kill_transcode(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Path(stream_id): Path<String>,
 ) -> Result<impl IntoResponse, Error> {
     let user = state
@@ -429,9 +429,10 @@ pub async fn kill_transcode(
     Ok(axum::Json(serde_json::json!({ "killed": killed })))
 }
 
+
 pub async fn admin_logs_ws(
     State(state): State<AppState>,
-    claims: Claims,
+    AuthenticatedUser(claims): AuthenticatedUser,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, Error> {

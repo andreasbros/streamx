@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Flex,
@@ -9,6 +10,18 @@ import {
 } from "@radix-ui/themes";
 import { ArrowLeftIcon, PlayIcon, GlobeIcon } from "@radix-ui/react-icons";
 import { api } from "../api/client";
+
+interface LocalFile {
+  name: string;
+  size: number;
+  url: string;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
+  return `${(bytes / 1e3).toFixed(0)} KB`;
+}
 
 interface DemoTrack {
   title: string;
@@ -195,6 +208,21 @@ const HTTP_TRACKS: HttpTrack[] = [
 
 export function SurroundSound() {
   const navigate = useNavigate();
+  const [localFiles, setLocalFiles] = useState<LocalFile[]>([]);
+  const [selectedLocal, setSelectedLocal] = useState<string | null>(null);
+  const [playError, setPlayError] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/proxy/local")
+      .then((r) => r.json())
+      .then((data: LocalFile[]) => {
+        const mp4s = data
+          .filter((f) => f.name.endsWith(".mp4"))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        setLocalFiles(mp4s);
+      })
+      .catch(() => {/* no local files available */});
+  }, []);
 
   const handlePlay = (track: DemoTrack) => {
     const tempId = `pending-${Date.now()}`;
@@ -254,6 +282,73 @@ export function SurroundSound() {
       <Text size="2" color="gray">
         Demo and reference video content for testing surround sound setups.
       </Text>
+
+      {/* Local Test Files */}
+      {localFiles.length > 0 && (
+        <>
+          <Text size="4" weight="bold">Local Test Files (MP4 Range Stream)</Text>
+          <Text size="2" color="gray">
+            4K surround MP4 files served via /proxy/local with HTTP range support.
+            Native &lt;video&gt; element, no HLS, no transcoding.
+          </Text>
+          <Flex gap="2" wrap="wrap">
+            {localFiles.map((f) => (
+              <Card
+                key={f.name}
+                style={{
+                  cursor: "pointer",
+                  outline: selectedLocal === f.url
+                    ? "2px solid var(--accent-9)"
+                    : "1px solid var(--gray-a5)",
+                  padding: "8px 12px",
+                }}
+                onClick={() => {
+                  setSelectedLocal(f.url);
+                  setPlayError(null);
+                }}
+              >
+                <Flex direction="column" gap="1">
+                  <Text size="2" weight="medium">{f.name}</Text>
+                  <Badge size="1" color="gray">{formatSize(f.size)}</Badge>
+                </Flex>
+              </Card>
+            ))}
+          </Flex>
+
+          {selectedLocal && (
+            <Card>
+              <Flex direction="column" gap="2">
+                <Flex align="center" gap="2" wrap="wrap">
+                  <Text size="2" weight="medium">
+                    {localFiles.find((f) => f.url === selectedLocal)?.name}
+                  </Text>
+                  <Badge size="1" color="blue">{selectedLocal}</Badge>
+                </Flex>
+                {playError && <Text size="2" color="red">{playError}</Text>}
+                <video
+                  key={selectedLocal}
+                  controls
+                  autoPlay
+                  style={{
+                    width: "100%",
+                    maxHeight: "60vh",
+                    background: "#000",
+                    borderRadius: 8,
+                  }}
+                  onError={(e) => {
+                    const err = e.currentTarget.error;
+                    setPlayError(`Error: ${err?.message ?? "unknown"} (code ${err?.code})`);
+                  }}
+                >
+                  <source src={selectedLocal} type="video/mp4" />
+                </video>
+              </Flex>
+            </Card>
+          )}
+
+          <Separator size="4" />
+        </>
+      )}
 
       {/* HTTPS Direct Streams */}
       <Text size="4" weight="bold">Instant Play (HTTPS)</Text>

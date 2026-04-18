@@ -18,3 +18,4 @@ logs/
 test-results/
 test-results-live/
 backend/test-media/
+providers.toml

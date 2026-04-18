@@ -240,8 +240,46 @@ impl SearchProvider {
             .collect()
     }
 
-    pub async fn search(&self, query: &str) -> Result<Vec<SearchResultGroup>> {
-        let providers = self.providers_by_kind("movies");
+    /// Parse "provider_name: query" prefix from search query.
+    /// Returns (provider_name, actual_query) or (None, original_query).
+    fn parse_provider_prefix<'a>(query: &'a str) -> (Option<&'a str>, &'a str) {
+        if let Some((prefix, rest)) = query.split_once(':') {
+            let prefix = prefix.trim();
+            let rest = rest.trim();
+            if !prefix.is_empty() && !rest.is_empty() && !prefix.contains(' ') {
+                return (Some(prefix), rest);
+            }
+        }
+        (None, query)
+    }
+
+    fn providers_by_kind_and_name(&self, kind: &str, name: Option<&str>) -> Vec<ProviderConfig> {
+        self.providers
+            .iter()
+            .filter(|p| {
+                p.kind == kind
+                    && match name {
+                        Some(n) => {
+                            let n_lower = n.to_lowercase();
+                            p.name
+                                .as_deref()
+                                .map(|pn| pn.to_lowercase() == n_lower)
+                                .unwrap_or(false)
+                                || p.format
+                                    .as_deref()
+                                    .map(|f| f.to_lowercase() == n_lower)
+                                    .unwrap_or(false)
+                        }
+                        None => true,
+                    }
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub async fn search(&self, query: &str, page: u32) -> Result<Vec<SearchResultGroup>> {
+        let (prefix, actual_query) = Self::parse_provider_prefix(query);
+        let providers = self.providers_by_kind_and_name("movies", prefix);
         if providers.is_empty() {
             return Ok(Vec::new());
         }
@@ -250,11 +288,13 @@ impl SearchProvider {
             .iter()
             .map(|p| {
                 let p = p.clone();
+                let q = actual_query.to_string();
                 async move {
                     let fmt = p.format.as_deref().unwrap_or("yts");
                     match fmt {
-                        "torrentio" => self.search_torrentio_movies(query, &p).await,
-                        _ => self.search_yts(query, &p).await,
+                        "torrentio" => self.search_torrentio_movies(&q, &p).await,
+                        "apibay" => self.search_movies_apibay(&q, &p).await,
+                        _ => self.search_yts(&q, &p, page).await,
                     }
                 }
             })
@@ -275,15 +315,17 @@ impl SearchProvider {
         &self,
         query: &str,
         provider: &ProviderConfig,
+        page: u32,
     ) -> Result<Vec<SearchResultGroup>> {
         let api_url = provider
             .api_url
             .clone()
             .unwrap_or_else(|| format!("{}/api/v2/list_movies.json", provider.url));
+        let page_str = page.to_string();
         let response = self
             .client
             .get(&api_url)
-            .query(&[("query_term", query), ("sort_by", "seeds"), ("limit", "20")])
+            .query(&[("query_term", query), ("sort_by", "seeds"), ("limit", "20"), ("page", &page_str)])
             .send()
             .await;
 
@@ -500,6 +542,101 @@ impl SearchProvider {
         let mut groups = groups;
         for group in &mut groups {
             proxy_posters(group, provider.id);
+        }
+
+        Ok(groups)
+    }
+
+    async fn search_movies_apibay(
+        &self,
+        query: &str,
+        provider: &ProviderConfig,
+    ) -> Result<Vec<SearchResultGroup>> {
+        let cat = provider.category.as_deref().unwrap_or("207");
+        let url = format!(
+            "{}/q.php?q={}&cat={}",
+            provider.url,
+            urlencoding::encode(query),
+            cat
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| crate::error::Error::Internal { message: e.to_string() })?
+            .json::<Vec<serde_json::Value>>()
+            .await
+            .map_err(|e| crate::error::Error::Internal { message: e.to_string() })?;
+
+        let mut groups = Vec::new();
+
+        for item in resp.iter().take(100) {
+            let name = item["name"].as_str().unwrap_or("");
+            let info_hash = item["info_hash"].as_str().unwrap_or("");
+            let size = item["size"]
+                .as_str()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let seeders = item["seeders"]
+                .as_str()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
+
+            if name.is_empty()
+                || info_hash.is_empty()
+                || info_hash == "0000000000000000000000000000000000000000"
+            {
+                continue;
+            }
+
+            let tracker_params: String = provider
+                .trackers
+                .iter()
+                .map(|t| format!("&tr={}", urlencoding::encode(t)))
+                .collect();
+            let magnet = format!(
+                "magnet:?xt=urn:btih:{info_hash}&dn={}{tracker_params}",
+                urlencoding::encode(name)
+            );
+
+            let size_str = if size > 1_073_741_824 {
+                format!("{:.1} GB", size as f64 / 1_073_741_824.0)
+            } else {
+                format!("{:.1} MB", size as f64 / 1_048_576.0)
+            };
+
+            groups.push(SearchResultGroup {
+                title: name.to_string(),
+                year: None,
+                rating: None,
+                runtime: None,
+                genres: Vec::new(),
+                language: None,
+                mpa_rating: None,
+                summary: None,
+                imdb_code: None,
+                trailer_code: None,
+                poster: None,
+                poster_small: None,
+                poster_medium: None,
+                poster_large: None,
+                backdrop: None,
+                variants: vec![SearchResult {
+                    magnet,
+                    seeds: seeders,
+                    leeches: 0,
+                    size: size_str,
+                    size_bytes: size,
+                    quality: None,
+                    video_codec: None,
+                    audio_channels: None,
+                    bit_depth: None,
+                    source_type: Some(
+                        provider.name.as_deref().unwrap_or("tpb").to_string(),
+                    ),
+                }],
+            });
         }
 
         Ok(groups)

@@ -44,6 +44,28 @@ function FavTile({
   const [imgError, setImgError] = useState(false);
 
   const handleClick = () => {
+    // Stream favourite: open the player directly
+    if (fav.info_hash) {
+      const group = restoreGroup(fav);
+      navigate(`/player/${fav.info_hash}`, {
+        state: {
+          poster: fav.poster_url,
+          meta: group ? {
+            title: group.title,
+            year: group.year,
+            rating: group.rating,
+            genres: group.genres,
+            summary: group.summary,
+            imdb_code: group.imdb_code,
+            trailer_code: group.trailer_code,
+            poster_large: group.poster_large,
+            backdrop: group.backdrop,
+          } : undefined,
+        },
+      });
+      return;
+    }
+    // Movie title favourite: open the movie page
     const group = restoreGroup(fav);
     if (group) {
       navigate("/movie", { state: group });

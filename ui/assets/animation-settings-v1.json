@@ -1,0 +1,39 @@
+{
+  "lasers": {
+    "count": 40,
+    "width": 9,
+    "spacing": 69,
+    "fade": 100,
+    "dash": 300,
+    "gap": 195,
+    "speed": 14,
+    "seed": 1,
+    "length": 118,
+    "paused": false
+  },
+  "glow": {
+    "blur": 30,
+    "opacity": 0,
+    "pulse": 0
+  },
+  "frost": {
+    "darkness": 0,
+    "blur": 7
+  },
+  "logo": {
+    "size": 600,
+    "y": -71,
+    "show": true
+  },
+  "slogan": {
+    "text": "Video Streaming Platform",
+    "size": 54,
+    "y": -55,
+    "show": true
+  },
+  "colors": [
+    "#3b82f6",
+    "#8b5cf6",
+    "#22d3ee"
+  ]
+}

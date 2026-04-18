@@ -42,9 +42,12 @@ scraper = "0.22"
 dashmap = "6"
 futures = "0.3"
 libc = "0.2"
+lofty = "0.21"
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 portpicker = "0.1"
+serial_test = "3"
+rstest = "0.24"

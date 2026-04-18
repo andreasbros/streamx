@@ -1,9 +1,11 @@
 use crate::error::Error;
 use crate::server::AppState;
 use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 fn cache_key(url: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -159,4 +161,139 @@ pub fn resolve_proxy_url(proxy_url: &str, providers: &[crate::config::ProviderCo
         }
     }
     proxy_url.to_string()
+}
+
+/// List available local test media files.
+/// Route: /proxy/local
+pub async fn list_local_files() -> std::result::Result<impl IntoResponse, Error> {
+    let media_dir = PathBuf::from("test-media/surround");
+    let mut files = Vec::new();
+
+    if let Ok(mut entries) = tokio::fs::read_dir(&media_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !matches!(ext, "mp4" | "mkv" | "webm" | "mov" | "avi") {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata().await {
+                files.push(serde_json::json!({
+                    "name": entry.file_name().to_string_lossy(),
+                    "size": meta.len(),
+                    "url": format!("/proxy/local/{}", entry.file_name().to_string_lossy()),
+                }));
+            }
+        }
+    }
+
+    Ok(axum::Json(files))
+}
+
+/// Serve local test media files with HTTP range support for video streaming.
+/// Route: /proxy/local/{filename}
+pub async fn local_file(
+    headers: HeaderMap,
+    Path(filename): Path<String>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err(Error::BadRequest {
+            message: "Invalid filename".to_string(),
+        });
+    }
+
+    let media_dir: PathBuf = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("test-media")
+        .join("surround");
+
+    // Also check relative to working directory
+    let file_path = if media_dir.join(&filename).exists() {
+        media_dir.join(&filename)
+    } else {
+        PathBuf::from("test-media/surround").join(&filename)
+    };
+
+    let metadata = tokio::fs::metadata(&file_path)
+        .await
+        .map_err(|_| Error::NotFound {
+            message: format!("File not found: {filename}"),
+        })?;
+    let file_size = metadata.len();
+
+    let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let content_type = match ext {
+        "mp4" | "m4v" => "video/mp4",
+        "mkv" => "video/x-matroska",
+        "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
+        "mov" => "video/quicktime",
+        _ => "application/octet-stream",
+    };
+
+    let range = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| {
+            let r = s.strip_prefix("bytes=")?;
+            let (start_str, end_str) = r.split_once('-')?;
+            let start: u64 = start_str.parse().ok()?;
+            let end: u64 = if end_str.is_empty() {
+                file_size.checked_sub(1)?
+            } else {
+                end_str.parse().ok()?
+            };
+            if start > end || start >= file_size {
+                return None;
+            }
+            Some((start, end.min(file_size - 1)))
+        });
+
+    match range {
+        Some((start, end)) => {
+            let length = end - start + 1;
+            let mut file = tokio::fs::File::open(&file_path)
+                .await
+                .map_err(|e| Error::Io { source: e })?;
+            file.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(|e| Error::Io { source: e })?;
+            let stream = tokio_util::io::ReaderStream::new(file.take(length));
+            let body = axum::body::Body::from_stream(stream);
+            axum::response::Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, length.to_string())
+                .header(
+                    header::CONTENT_RANGE,
+                    format!("bytes {start}-{end}/{file_size}"),
+                )
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::CACHE_CONTROL, "no-cache, no-store")
+                .body(body)
+                .map_err(|e| Error::Internal {
+                    message: format!("{e}"),
+                })
+        }
+        None => {
+            let file = tokio::fs::File::open(&file_path)
+                .await
+                .map_err(|e| Error::Io { source: e })?;
+            let stream = tokio_util::io::ReaderStream::new(file);
+            let body = axum::body::Body::from_stream(stream);
+            axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type)
+                .header(header::CONTENT_LENGTH, file_size.to_string())
+                .header(header::ACCEPT_RANGES, "bytes")
+                .header(header::CACHE_CONTROL, "no-cache, no-store")
+                .body(body)
+                .map_err(|e| Error::Internal {
+                    message: format!("{e}"),
+                })
+        }
+    }
 }

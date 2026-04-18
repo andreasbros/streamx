@@ -71,6 +71,22 @@ pub struct HlsManager {
     cache_dir: PathBuf,
 }
 
+impl Drop for HlsManager {
+    fn drop(&mut self) {
+        // Clear the active map to trigger Drop on all TranscodeHandles,
+        // which sends SIGKILL to running FFmpeg processes.
+        // (The watchdog task also holds an Arc to `active`, so just dropping
+        //  the manager wouldn't drop the map without this explicit clear.)
+        if let Ok(mut active) = self.active.try_write() {
+            let count = active.len();
+            active.clear();
+            if count > 0 {
+                tracing::info!(count, "HlsManager dropped: killed all active transcodes");
+            }
+        }
+    }
+}
+
 pub enum PlaylistResponse {
     Content(String),
     Redirect(String),
@@ -90,13 +106,13 @@ impl HlsManager {
             cache_dir,
         };
 
-        // Spawn watchdog to stop idle transcodes after 120s of no access
+        // Spawn watchdog to stop idle transcodes after 30s of no access
         let active = manager.active.clone();
         let last_access = manager.last_access.clone();
         let history = manager.transcode_history.clone();
         let cache_dir_wd = manager.cache_dir.clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             loop {
                 interval.tick().await;
                 let idle_keys: Vec<String> = {
@@ -106,7 +122,7 @@ impl HlsManager {
                         .filter(|key| {
                             let idle = last_access
                                 .get(*key)
-                                .map(|t| t.elapsed() > std::time::Duration::from_secs(120))
+                                .map(|t| t.elapsed() > std::time::Duration::from_secs(30))
                                 .unwrap_or(true);
                             idle
                         })
@@ -115,8 +131,8 @@ impl HlsManager {
                 };
 
                 for key in idle_keys {
-                    tracing::info!(stream_key = %key, "Stopping idle transcode (no access for 120s)");
-                    // Kill the FFmpeg process by dropping the handle
+                    tracing::info!(stream_key = %key, "Stopping idle transcode (no access for 30s)");
+                    // Drop the handle -> triggers SIGTERM -> FFmpeg exits gracefully
                     let handle = active.write().await.remove(&key);
                     if let Some(h) = handle {
                         let status = h.status.borrow().clone();
@@ -172,16 +188,62 @@ impl HlsManager {
             }
         }
 
+        // Stop other running qualities for this stream - only one quality at a time
+        {
+            let prefix = format!("{stream_id}/");
+            let other_keys: Vec<String> = {
+                let active = self.active.read().await;
+                active
+                    .keys()
+                    .filter(|k| k.starts_with(&prefix) && *k != &active_key)
+                    .cloned()
+                    .collect()
+            };
+            if !other_keys.is_empty() {
+                let mut active = self.active.write().await;
+                for key in &other_keys {
+                    tracing::info!(stream_id, quality, old_key = %key, "Stopping previous quality transcode");
+                    active.remove(key);
+                }
+            }
+        }
+
         let stream_dir = self.cache_dir.join(stream_id);
 
-        // Check for cached variant playlist
-        let variant_playlist = stream_dir.join(quality).join("playlist.m3u8");
+        // Check for cached variant playlist with valid segments
+        let tier_dir = stream_dir.join(quality);
+        let variant_playlist = tier_dir.join("playlist.m3u8");
         if variant_playlist.exists() {
             let content = tokio::fs::read_to_string(&variant_playlist)
                 .await
                 .unwrap_or_default();
-            if content.matches("EXTINF:").count() > 10 {
-                tracing::info!(stream_id, quality, "Valid cached quality found, skipping");
+            let has_endlist = content.contains("EXT-X-ENDLIST");
+            let seg_count = content.matches("EXTINF:").count();
+
+            if has_endlist && seg_count > 0 {
+                // Completed transcode - verify first and last segments are valid
+                let segments: Vec<&str> = content
+                    .lines()
+                    .filter(|l| !l.starts_with('#') && !l.is_empty())
+                    .collect();
+                let all_valid = segments.iter().take(1).chain(segments.iter().rev().take(1)).all(|seg| {
+                    let path = tier_dir.join(seg);
+                    match std::fs::read(&path) {
+                        Ok(data) => is_valid_fmp4(&data),
+                        Err(_) => false,
+                    }
+                });
+                if all_valid {
+                    tracing::info!(stream_id, quality, seg_count, "Valid completed cache found");
+                    return Ok(());
+                }
+                // Cache has corrupt segments - delete and re-transcode
+                tracing::warn!(stream_id, quality, "Cached segments corrupt, re-transcoding");
+                let _ = tokio::fs::remove_dir_all(&tier_dir).await;
+                let _ = tokio::fs::create_dir_all(&tier_dir).await;
+            } else if !has_endlist && seg_count > 10 {
+                // Incomplete transcode with enough segments to start playback
+                tracing::info!(stream_id, quality, seg_count, "Partial cache found, skipping");
                 return Ok(());
             }
         }
@@ -424,11 +486,25 @@ impl HlsManager {
         // Serve the variant playlist, rewriting segment paths to include quality prefix
         let variant_path = stream_dir.join(quality).join("playlist.m3u8");
         if let Ok(content) = tokio::fs::read_to_string(&variant_path).await {
+            let has_endlist = content.contains("EXT-X-ENDLIST");
             let rewritten = content
                 .lines()
                 .map(|line| {
                     if !line.starts_with('#') && !line.is_empty() {
+                        // Prefix segment filenames with quality dir
                         format!("{quality}/{line}")
+                    } else if line.contains("EXT-X-MAP:URI=") {
+                        // Rewrite init segment URI (fMP4 only, MPEG-TS doesn't have this)
+                        line.replace("URI=\"", &format!("URI=\"{quality}/"))
+                    } else if line.starts_with("#EXT-X-MEDIA-SEQUENCE") && !has_endlist {
+                        // Growing playlist (transcode in progress): add EVENT type
+                        // so the player starts from the beginning, not the live edge
+                        format!("{line}\n#EXT-X-PLAYLIST-TYPE:EVENT")
+                    } else if line == "#EXT-X-DISCONTINUITY" {
+                        // Remove spurious discontinuity tag added by FFmpeg append_list.
+                        // There's no actual discontinuity in a continuous transcode and
+                        // Safari starts from the wrong position when it sees this.
+                        String::new()
                     } else {
                         line.to_string()
                     }
@@ -470,8 +546,8 @@ impl HlsManager {
         let path = self.cache_dir.join(stream_id).join(segment_name);
         match tokio::fs::read(&path).await {
             Ok(data) => {
-                if segment_name.ends_with(".ts") && !is_valid_ts_segment(&data) {
-                    tracing::warn!(stream_id, segment_name, "Corrupt TS segment detected, deleting");
+                if !is_valid_segment(&data, segment_name) {
+                    tracing::warn!(stream_id, segment_name, "Corrupt segment detected, deleting");
                     let _ = tokio::fs::remove_file(&path).await;
                     return Ok(None);
                 }
@@ -526,8 +602,8 @@ impl HlsManager {
             .join(segment_name);
         match tokio::fs::read(&path).await {
             Ok(data) => {
-                if segment_name.ends_with(".ts") && !is_valid_ts_segment(&data) {
-                    tracing::warn!(stream_id, variant, segment_name, "Corrupt TS segment detected, deleting");
+                if !is_valid_segment(&data, segment_name) {
+                    tracing::warn!(stream_id, variant, segment_name, "Corrupt segment detected, deleting");
                     let _ = tokio::fs::remove_file(&path).await;
                     return Ok(None);
                 }
@@ -698,7 +774,18 @@ impl HlsManager {
     }
 
     pub async fn cleanup(&self, stream_id: &str) -> Result<()> {
-        self.active.write().await.remove(stream_id);
+        // Remove all active handles for this stream (keys are {stream_id}/{quality})
+        let prefix = format!("{stream_id}/");
+        let keys: Vec<String> = {
+            let active = self.active.read().await;
+            active.keys().filter(|k| k.starts_with(&prefix) || *k == stream_id).cloned().collect()
+        };
+        if !keys.is_empty() {
+            let mut active = self.active.write().await;
+            for key in &keys {
+                active.remove(key);
+            }
+        }
 
         let dir = self.cache_dir.join(stream_id);
         if dir.exists() {
@@ -713,32 +800,89 @@ impl HlsManager {
     }
 }
 
-/// Check MPEG-TS segment integrity by verifying sync bytes.
-/// Each TS packet is 188 bytes and must start with 0x47.
-/// Returns true if valid, false if corrupt or empty.
-fn is_valid_ts_segment(data: &[u8]) -> bool {
-    if data.is_empty() {
+/// Validate segment integrity based on format.
+/// fMP4 (.m4s/.mp4): walk ISO BMFF boxes and verify declared sizes match file size
+/// MPEG-TS (.ts): check for 0x47 sync bytes at 188-byte boundaries
+fn is_valid_segment(data: &[u8], name: &str) -> bool {
+    if data.len() < 8 {
         return false;
     }
-    // Check first sync byte
-    if data[0] != 0x47 {
-        return false;
-    }
-    // Spot-check a few packets (first, middle, last)
-    let pkt_size = 188;
-    let check_offsets = [
-        0,
-        pkt_size,
-        pkt_size * 2,
-        (data.len() / pkt_size / 2) * pkt_size,
-        (data.len() / pkt_size).saturating_sub(1) * pkt_size,
-    ];
-    for offset in check_offsets {
-        if offset < data.len() && data[offset] != 0x47 {
+    if name.ends_with(".m4s") || name.ends_with(".mp4") {
+        is_valid_fmp4(data)
+    } else if name.ends_with(".ts") {
+        if data[0] != 0x47 {
             return false;
         }
+        let pkt_size = 188;
+        let check_offsets = [
+            pkt_size,
+            pkt_size * 2,
+            (data.len() / pkt_size / 2) * pkt_size,
+        ];
+        for offset in check_offsets {
+            if offset < data.len() && data[offset] != 0x47 {
+                return false;
+            }
+        }
+        true
+    } else {
+        true
     }
-    true
+}
+
+/// Walk ISO BMFF box structure to verify the file isn't truncated.
+/// Each box: 4 bytes size (big-endian) + 4 bytes type. Boxes must tile
+/// the entire file with no gaps. A truncated file will have a box whose
+/// declared size extends past EOF.
+fn is_valid_fmp4(data: &[u8]) -> bool {
+    let len = data.len();
+    let mut offset = 0usize;
+    let mut found_mdat = false;
+
+    while offset + 8 <= len {
+        let box_size = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        let box_type = &data[offset + 4..offset + 8];
+
+        // box_size == 0 means "rest of file" (only valid for last box)
+        if box_size == 0 {
+            return true;
+        }
+        // box_size == 1 means 64-bit extended size (next 8 bytes)
+        if box_size == 1 {
+            if offset + 16 > len {
+                return false;
+            }
+            let ext_size = u64::from_be_bytes([
+                data[offset + 8], data[offset + 9],
+                data[offset + 10], data[offset + 11],
+                data[offset + 12], data[offset + 13],
+                data[offset + 14], data[offset + 15],
+            ]) as usize;
+            if offset + ext_size > len {
+                return false; // truncated
+            }
+            offset += ext_size;
+            continue;
+        }
+        if box_size < 8 {
+            return false; // invalid
+        }
+        if offset + box_size > len {
+            return false; // truncated - declared size exceeds file
+        }
+        if box_type == b"mdat" {
+            found_mdat = true;
+        }
+        offset += box_size;
+    }
+
+    // Media segments must have mdat; init segments have moov
+    offset == len && (found_mdat || data.len() < 10000)
 }
 
 fn tier_dir_size(path: &std::path::Path) -> u64 {

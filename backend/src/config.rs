@@ -54,6 +54,8 @@ pub struct ServerConfig {
     pub bind: String,
     #[serde(default = "default_open_browser")]
     pub open_browser: bool,
+    #[serde(default)]
+    pub log_level: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +98,12 @@ pub struct TranscodeConfig {
     pub hls_downscale: bool,
     #[serde(default = "default_hls_max_height")]
     pub hls_max_height: u32,
+    /// Force stereo audio in transcoded HLS tiers (720p/1080p/360p).
+    /// Chrome/Firefox MSE cannot decode multi-channel AAC.
+    /// Default: true (stereo for browser compatibility).
+    /// Set to false to preserve surround in transcoded tiers (Safari/native players only).
+    #[serde(default = "default_true")]
+    pub hls_force_stereo: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,12 +122,18 @@ pub struct ProviderConfig {
     pub id: u32,
     pub kind: String,
     pub url: String,
+    /// Display name for provider-prefixed search (e.g. "yts", "tpb", "1337x")
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub api_url: Option<String>,
     #[serde(default)]
     pub format: Option<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// Tracker URLs appended to magnets from this provider
+    #[serde(default)]
+    pub trackers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,6 +201,7 @@ fn default_server() -> ServerConfig {
         port: default_port(),
         bind: default_bind(),
         open_browser: default_open_browser(),
+        log_level: None,
     }
 }
 
@@ -214,6 +229,7 @@ fn default_transcode() -> TranscodeConfig {
         gpu: false,
         hls_downscale: true,
         hls_max_height: default_hls_max_height(),
+        hls_force_stereo: true,
     }
 }
 
@@ -339,6 +355,66 @@ default_theme = "dark"
     .to_string()
 }
 
+/// Provider entry in providers.toml (no id required)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProviderEntry {
+    pub kind: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub url: String,
+    #[serde(default)]
+    pub api_url: Option<String>,
+    #[serde(default)]
+    pub format: Option<String>,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub trackers: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProvidersFile {
+    #[serde(default, rename = "provider")]
+    providers: Vec<ProviderEntry>,
+}
+
+fn load_providers_file(data_dir: &Path) -> Vec<ProviderConfig> {
+    let path = data_dir.join("providers.toml");
+    if !path.exists() {
+        return Vec::new();
+    }
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("Failed to read providers.toml: {e}");
+            return Vec::new();
+        }
+    };
+    let file: ProvidersFile = match toml::from_str(&content) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!("Failed to parse providers.toml: {e}");
+            return Vec::new();
+        }
+    };
+
+    // Assign IDs starting from 1000 to avoid collision with config.toml providers
+    file.providers
+        .into_iter()
+        .enumerate()
+        .map(|(i, entry)| ProviderConfig {
+            id: 1000 + i as u32,
+            kind: entry.kind,
+            name: entry.name,
+            url: entry.url,
+            api_url: entry.api_url,
+            format: entry.format,
+            category: entry.category,
+            trackers: entry.trackers,
+        })
+        .collect()
+}
+
 pub fn load_config(cli: &Cli) -> Result<AppConfig> {
     let data_dir = match &cli.data_dir {
         Some(d) => PathBuf::from(d),
@@ -366,8 +442,17 @@ pub fn load_config(cli: &Cli) -> Result<AppConfig> {
         config.server.bind = bind.clone();
     }
 
+    // Load additional providers from providers.toml
+    let extra_providers = load_providers_file(&data_dir);
+    if !extra_providers.is_empty() {
+        tracing::info!("Loaded {} providers from providers.toml", extra_providers.len());
+        config.providers.extend(extra_providers);
+    }
+
     config.data_dir = data_dir.clone();
-    config.log_level = cli.log_level.clone().unwrap_or_else(|| "info".to_string());
+    config.log_level = cli.log_level.clone()
+        .or_else(|| config.server.log_level.clone())
+        .unwrap_or_else(|| "info".to_string());
     config.log_dir = cli
         .log_dir
         .as_ref()

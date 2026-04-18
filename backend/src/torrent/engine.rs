@@ -14,6 +14,72 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+/// Sanitize a filename from a torrent to prevent path traversal and shell injection.
+/// - Decodes HTML entities (&amp; &lt; etc.)
+/// - Allows: letters (unicode), digits, spaces, hyphens, underscores, dots,
+///   commas, parentheses, square brackets, ampersands, plus, exclamation
+/// - Strips: slashes, backslashes, quotes, backticks, null bytes, control chars
+/// - Collapses multiple spaces/dots
+/// - Trims leading/trailing dots and spaces
+/// - Falls back to "unnamed" if result is empty
+fn sanitize_filename(raw: &str) -> String {
+    // Decode common HTML entities
+    let decoded = raw
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "")
+        .replace("&#39;", "")
+        .replace("&apos;", "")
+        .replace("&#x27;", "")
+        .replace("&nbsp;", " ");
+
+    let mut result = String::with_capacity(decoded.len());
+
+    for ch in decoded.chars() {
+        match ch {
+            // Always allow
+            'a'..='z' | 'A'..='Z' | '0'..='9' => result.push(ch),
+            ' ' | '-' | '_' | '.' | ',' | '(' | ')' | '[' | ']' | '&' | '+' | '!' => {
+                result.push(ch)
+            }
+            // Safe unicode letters (accented, CJK, etc.)
+            c if c.is_alphabetic() && !c.is_control() => result.push(c),
+            // Replace dangerous chars with underscore
+            '/' | '\\' | '\'' | '"' | '`' | '\0' | ':' | ';' | '|' | '*' | '?' | '<' | '>'
+            | '{' | '}' | '$' | '~' => result.push('_'),
+            // Control chars / other - skip
+            c if c.is_control() => {}
+            // Everything else becomes underscore
+            _ => result.push('_'),
+        }
+    }
+
+    // Collapse multiple underscores/spaces/dots
+    let mut prev = ' ';
+    let collapsed: String = result
+        .chars()
+        .filter(|&c| {
+            let dominated = (c == ' ' || c == '_' || c == '.') && (prev == ' ' || prev == '_' || prev == '.');
+            if !dominated || (c == '.' && prev != '.') {
+                prev = c;
+                true
+            } else {
+                false
+            }
+        })
+        .collect();
+
+    // Trim leading/trailing dots and spaces (prevent hidden files, trailing dots on Windows)
+    let trimmed = collapsed.trim_matches(|c: char| c == '.' || c == ' ' || c == '_');
+
+    if trimmed.is_empty() {
+        "unnamed".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 struct ActiveHandle {
     torrent_id: usize,
     handle: Arc<ManagedTorrent>,
@@ -101,6 +167,23 @@ impl TorrentEngine {
         magnet_uri: &str,
         file_index: Option<usize>,
     ) -> Result<Download> {
+        self.add_magnet_inner(magnet_uri, file_index, false).await
+    }
+
+    /// Add a magnet and download ALL files (for music albums).
+    pub async fn add_magnet_album(
+        &self,
+        magnet_uri: &str,
+    ) -> Result<Download> {
+        self.add_magnet_inner(magnet_uri, None, true).await
+    }
+
+    async fn add_magnet_inner(
+        &self,
+        magnet_uri: &str,
+        file_index: Option<usize>,
+        download_all: bool,
+    ) -> Result<Download> {
         let hash = extract_info_hash(magnet_uri).ok_or_else(|| Error::BadRequest {
             message: "Could not extract info hash from magnet URI".to_string(),
         })?;
@@ -128,7 +211,7 @@ impl TorrentEngine {
         };
         self.db.upsert_download(&dl).await?;
 
-        self.spawn_add_torrent(hash.clone(), magnet_uri.to_string(), file_index);
+        self.spawn_add_torrent(hash.clone(), magnet_uri.to_string(), file_index, download_all);
 
         Ok(dl)
     }
@@ -201,7 +284,19 @@ impl TorrentEngine {
             dl.info_hash.clone(),
             dl.magnet_uri.clone(),
             Some(dl.file_index),
+            false,
         );
+        Ok(())
+    }
+
+    /// Fully stop and remove a torrent from the engine (for delete/reset flows)
+    pub async fn stop_and_remove(&self, info_hash: &str) -> Result<()> {
+        let handle = self.handles.write().await.remove(info_hash);
+        if let Some(active) = handle {
+            let tid = active.handle.id();
+            let _ = self.session.delete(librqbit::api::TorrentIdOrHash::Id(tid), false).await;
+            info!(info_hash = %info_hash, "Torrent stopped and removed from engine");
+        }
         Ok(())
     }
 
@@ -259,6 +354,7 @@ impl TorrentEngine {
                     dl.info_hash.clone(),
                     dl.magnet_uri.clone(),
                     Some(dl.file_index),
+                    false,
                 );
             }
         }
@@ -327,6 +423,51 @@ impl TorrentEngine {
         Ok(Some((active.torrent_id, active.file_index)))
     }
 
+    /// List all files in a torrent (for multi-file album torrents).
+    pub async fn list_torrent_files(&self, info_hash: &str) -> Result<Vec<TorrentFile>> {
+        let handles = self.handles.read().await;
+        let active = match handles.get(info_hash) {
+            Some(a) => a,
+            None => return Ok(Vec::new()),
+        };
+
+        let files = active
+            .handle
+            .with_metadata(|meta| {
+                meta.file_infos
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, fi)| {
+                        let path = sanitize_filename(&fi.relative_filename.to_string_lossy());
+                        TorrentFile {
+                            index: idx,
+                            path: path.clone(),
+                            size: fi.len,
+                            is_video: TorrentFile::detect_video(&path),
+                            is_audio: TorrentFile::detect_audio(&path),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        Ok(files)
+    }
+
+    /// Get torrent_id + file_index for streaming a specific file within a multi-file torrent.
+    pub async fn get_stream_file_info_by_index(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+    ) -> Result<Option<(usize, usize)>> {
+        let handles = self.handles.read().await;
+        let active = match handles.get(info_hash) {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        Ok(Some((active.torrent_id, file_index)))
+    }
+
     pub fn session(&self) -> &Arc<Session> {
         &self.session
     }
@@ -339,7 +480,7 @@ impl TorrentEngine {
         &self.complete_dir
     }
 
-    fn spawn_add_torrent(&self, info_hash: String, magnet_uri: String, file_index: Option<usize>) {
+    fn spawn_add_torrent(&self, info_hash: String, magnet_uri: String, file_index: Option<usize>, download_all: bool) {
         let session = self.session.clone();
         let handles = self.handles.clone();
         let db = self.db.clone();
@@ -353,7 +494,7 @@ impl TorrentEngine {
             for attempt in 0..3u32 {
                 let opts = AddTorrentOptions {
                     overwrite: true,
-                    only_files: file_index.map(|i| vec![i]),
+                    only_files: if download_all { None } else { file_index.map(|i| vec![i]) },
                     ..Default::default()
                 };
                 let timeout_secs = 30u64 << attempt; // 30s, 60s, 120s
@@ -407,37 +548,61 @@ impl TorrentEngine {
                 }
             };
 
-            let resolved_fi = handle
-                .with_metadata(|meta| {
-                    meta.file_infos
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, f)| {
-                            TorrentFile::detect_video(&f.relative_filename.to_string_lossy())
-                        })
-                        .max_by_key(|(_, f)| f.len)
-                        .map(|(idx, _)| idx)
-                })
-                .ok()
-                .flatten()
-                .unwrap_or(file_index.unwrap_or(0));
+            let resolved_fi = if download_all {
+                // For album downloads, pick the first audio file (or first file)
+                handle
+                    .with_metadata(|meta| {
+                        meta.file_infos
+                            .iter()
+                            .enumerate()
+                            .find(|(_, f)| TorrentFile::detect_audio(&f.relative_filename.to_string_lossy()))
+                            .or_else(|| meta.file_infos.iter().enumerate().next())
+                            .map(|(idx, _)| idx)
+                    })
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0)
+            } else {
+                // For single-file downloads, pick the largest video file
+                handle
+                    .with_metadata(|meta| {
+                        meta.file_infos
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, f)| {
+                                TorrentFile::detect_video(&f.relative_filename.to_string_lossy())
+                            })
+                            .max_by_key(|(_, f)| f.len)
+                            .map(|(idx, _)| idx)
+                    })
+                    .ok()
+                    .flatten()
+                    .unwrap_or(file_index.unwrap_or(0))
+            };
 
             let (title, file_name, file_size, partial_path) = handle
                 .with_metadata(|meta| {
-                    let name = meta.name.clone().unwrap_or_default();
+                    let name = sanitize_filename(&meta.name.clone().unwrap_or_default());
                     let fi = meta.file_infos.get(resolved_fi);
                     let fname = fi
-                        .map(|f| f.relative_filename.to_string_lossy().to_string())
+                        .map(|f| sanitize_filename(&f.relative_filename.to_string_lossy()))
                         .unwrap_or_default();
                     let fsize = fi.map(|f| f.len).unwrap_or(0);
                     let pp = fi.map(|f| {
-                        let rel = f.relative_filename.to_string_lossy().to_string();
+                        let rel = sanitize_filename(&f.relative_filename.to_string_lossy());
+                        // Try nested path first (multi-file torrent with folder)
                         if meta.name.is_some() {
-                            partial_dir
-                                .join(&name)
-                                .join(&rel)
-                                .to_string_lossy()
-                                .to_string()
+                            let nested = partial_dir.join(&name).join(&rel);
+                            if nested.exists() {
+                                return nested.to_string_lossy().to_string();
+                            }
+                            // Try flat path (single file, no folder)
+                            let flat = partial_dir.join(&rel);
+                            if flat.exists() {
+                                return flat.to_string_lossy().to_string();
+                            }
+                            // File might not exist yet during initialization
+                            nested.to_string_lossy().to_string()
                         } else {
                             partial_dir.join(&rel).to_string_lossy().to_string()
                         }
@@ -503,9 +668,22 @@ impl TorrentEngine {
                         Some(f) => f,
                         None => return None,
                     };
-                    let rel = fi.relative_filename.to_string_lossy().to_string();
-                    let src = if let Some(ref name) = meta.name {
-                        partial_dir.join(name).join(&rel)
+                    let raw_rel = fi.relative_filename.to_string_lossy().to_string();
+                    let rel = sanitize_filename(&raw_rel);
+                    let raw_name = meta.name.as_deref().unwrap_or("");
+                    let name = sanitize_filename(raw_name);
+
+                    // Find the actual source file (try nested then flat, using both raw and sanitized names)
+                    let src = if !raw_name.is_empty() {
+                        let nested_raw = partial_dir.join(raw_name).join(&raw_rel);
+                        let nested_san = partial_dir.join(&name).join(&rel);
+                        let flat_raw = partial_dir.join(&raw_rel);
+                        let flat_san = partial_dir.join(&rel);
+                        if nested_raw.exists() { nested_raw }
+                        else if nested_san.exists() { nested_san }
+                        else if flat_raw.exists() { flat_raw }
+                        else if flat_san.exists() { flat_san }
+                        else { nested_raw }
                     } else {
                         partial_dir.join(&rel)
                     };
@@ -605,17 +783,3 @@ pub fn extract_info_hash(magnet_uri: &str) -> Option<String> {
         .map(|h| h.to_lowercase())
 }
 
-impl TorrentFile {
-    pub fn detect_video(path: &str) -> bool {
-        let lower = path.to_lowercase();
-        lower.ends_with(".mp4")
-            || lower.ends_with(".mkv")
-            || lower.ends_with(".avi")
-            || lower.ends_with(".mov")
-            || lower.ends_with(".wmv")
-            || lower.ends_with(".flv")
-            || lower.ends_with(".webm")
-            || lower.ends_with(".m4v")
-            || lower.ends_with(".ts")
-    }
-}

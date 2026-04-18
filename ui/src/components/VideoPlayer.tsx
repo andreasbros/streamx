@@ -9,6 +9,8 @@ export interface QualityLevel {
 
 export interface VideoPlayerHandle {
   play: () => boolean;
+  pause: () => void;
+  seek: (time: number) => void;
   getQualityLevels: () => QualityLevel[];
   setQualityLevel: (height: number | "auto") => void;
 }
@@ -59,6 +61,14 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(
         }
         return true;
       },
+      pause() {
+        const videoEl = containerRef.current?.querySelector("video");
+        if (videoEl) videoEl.pause();
+      },
+      seek(time: number) {
+        const videoEl = containerRef.current?.querySelector("video");
+        if (videoEl) videoEl.currentTime = time;
+      },
       getQualityLevels(): QualityLevel[] {
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -103,7 +113,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(
       const report = () => {
         if (!videoEl || document.fullscreenElement) return;
         const ct = videoEl.currentTime;
-        const dur = videoEl.duration || 0;
+        // Use metadata duration if available (HLS playlist only reports transcoded portion)
+        const rawDur = videoEl.duration || 0;
+        const dur = (durationSeconds && durationSeconds > 0 && (rawDur < durationSeconds * 0.9 || !isFinite(rawDur)))
+          ? durationSeconds : rawDur;
         let ahead = 0;
         for (let i = 0; i < videoEl.buffered.length; i++) {
           if (videoEl.buffered.start(i) <= ct && videoEl.buffered.end(i) > ct) {
@@ -142,14 +155,101 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(
         });
       };
 
+      const isHls = src.includes(".m3u8");
+
+      // HLS streams: use hls.js (proven compatible with MPEG-TS segments).
+      // video.js VHS has fMP4/MPEG-TS quirks that cause append failures.
+      // Non-HLS (direct file): use video.js for controls, range requests, etc.
+      if (isHls && !safari) {
+        import("hls.js").then((hlsMod) => {
+          if (disposed) return;
+          const Hls = hlsMod.default;
+          if (!Hls.isSupported()) {
+            debugLog.error("hls", "hls.js not supported, falling back to video.js");
+            loadVideoJs();
+            return;
+          }
+          debugLog.info("hls", `src=${src.substring(0, 80)}`);
+          const hls = new Hls({
+            enableWorker: true,
+            startPosition: 0,
+            maxBufferLength: 30,
+            maxMaxBufferLength: 60,
+          });
+          hls.loadSource(src);
+          hls.attachMedia(videoEl);
+
+          // Expose a minimal player-like API for the rest of the component
+          playerRef.current = {
+            play: () => { videoEl.play()?.catch(() => {}); return true; },
+            currentTime: (t?: number) => { if (t !== undefined) videoEl.currentTime = t; return videoEl.currentTime; },
+            duration: (d?: number) => {
+              if (d !== undefined && d > 0) {
+                // Can't set duration on native element, but store for UI
+                return d;
+              }
+              return videoEl.duration;
+            },
+            paused: () => videoEl.paused,
+            dispose: () => { hls.destroy(); },
+            error: () => videoEl.error ? { code: videoEl.error.code, message: videoEl.error.message } : null,
+            on: () => {},
+            off: () => {},
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any;
+
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            debugLog.info("hls", "manifest parsed");
+            videoEl.currentTime = 0;
+            report();
+          });
+          hls.on(Hls.Events.ERROR, (_evt: string, data: { type: string; details: string; fatal: boolean }) => {
+            debugLog.error("hls", `${data.type} ${data.details} fatal=${data.fatal}`);
+            if (data.fatal) {
+              if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                hls.startLoad();
+                cbRef.current.onServerError?.(true);
+              } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                hls.recoverMediaError();
+              } else {
+                cbRef.current.onPlayError?.("not_supported");
+              }
+            }
+          });
+
+          videoEl.addEventListener("timeupdate", () => {
+            cbRef.current.onTimeUpdate?.(videoEl.currentTime);
+            report();
+          });
+          videoEl.addEventListener("playing", () => {
+            cbRef.current.onServerError?.(false);
+            report();
+          });
+          videoEl.addEventListener("error", () => {
+            const err = videoEl.error;
+            if (err?.code === 4) cbRef.current.onPlayError?.("not_supported");
+          });
+          videoEl.addEventListener("resize", report);
+          // Enable native browser controls (remove video-js class which hides them)
+          videoEl.controls = true;
+          videoEl.className = "";
+          videoEl.style.width = "100%";
+          videoEl.style.height = "100%";
+          videoEl.style.objectFit = "contain";
+          pollId = setInterval(report, 1000);
+        });
+        return;
+      }
+
+      // Safari uses native HLS (no MSE needed), non-HLS uses video.js
+      function loadVideoJs() {
       import("video.js").then((mod) => {
         if (disposed) return;
         try {
-          const isHls = src.includes(".m3u8");
           const sourceType = type || (isHls ? "application/x-mpegURL" : "video/mp4");
           debugLog.info("vjs", `src=${src.substring(0, 60)} type=${sourceType}`);
 
-          const player = mod.default(videoEl, {
+          const player = mod.default(videoEl!, {
             controls: true,
             responsive: true,
             fluid: true,
@@ -171,6 +271,25 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(
           });
 
           playerRef.current = player;
+
+          // HLS debug tracing
+          if (isHls) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const tech = () => { try { return (player as any).tech?.({ IWillNotUseThisInPlugins: true }); } catch { return null; } };
+            player.on("loadstart", () => debugLog.info("vjs", "loadstart"));
+            player.on("loadeddata", () => {
+              const vhs = tech()?.vhs;
+              const media = vhs?.playlists?.media?.();
+              debugLog.info("vjs", `loadeddata playlist=${media?.uri || "?"} segments=${media?.segments?.length || 0}`);
+              if (media?.segments?.[0]?.map?.uri) {
+                debugLog.info("vjs", `init segment: ${media.segments[0].map.uri}`);
+              }
+            });
+            player.on("waiting", () => debugLog.debug("vjs", `waiting ct=${player.currentTime()?.toFixed(1)}`));
+            player.on("canplay", () => debugLog.info("vjs", `canplay ct=${player.currentTime()?.toFixed(1)}`));
+            player.on("playing", () => debugLog.info("vjs", `playing ct=${player.currentTime()?.toFixed(1)}`));
+            player.on("stalled", () => debugLog.warn("vjs", `stalled ct=${player.currentTime()?.toFixed(1)}`));
+          }
 
           player.on("timeupdate", () => {
             const t = player.currentTime();
@@ -211,7 +330,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(
           }
 
           // resize fires when decoded video dimensions change (first frame + ABR switches)
-          videoEl.addEventListener("resize", report);
+          videoEl?.addEventListener("resize", report);
           for (const evt of ["progress", "loadedmetadata", "loadeddata", "canplay", "waiting", "playing", "pause"]) {
             player.on(evt, report);
           }
@@ -249,13 +368,25 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(
               return;
             }
 
-            // Network error (2) or decode error (3) - attempt recovery
-            if (err?.code === 2 || err?.code === 3) {
+            // Network error (2) - attempt recovery
+            if (err?.code === 2) {
               attemptRecovery();
               return;
             }
 
-            if (err && safari) {
+            // Decode error (3) - likely codec incompatibility (e.g. HEVC on Chrome)
+            // Retry a few times in case it's transient, then report as unsupported
+            if (err?.code === 3) {
+              if (retryCount < 3) {
+                attemptRecovery();
+              } else {
+                debugLog.error("vjs", `Decode error persists after ${retryCount} retries, reporting as unsupported`);
+                cbRef.current.onPlayError?.("not_supported");
+              }
+              return;
+            }
+
+            if (err && safari && videoEl) {
               player.dispose();
               playerRef.current = null;
               videoEl.src = src;
@@ -277,7 +408,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(
           player.on("waiting", () => {
             if (stallTimer) clearTimeout(stallTimer);
             stallTimer = setTimeout(() => {
-              if (disposed || player.paused()) return;
+              if (disposed || player.paused() || !videoEl) return;
               const buffered = videoEl.buffered;
               const ct = videoEl.currentTime;
               let ahead = 0;
@@ -303,6 +434,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(
           setInitError(String(e));
         }
       }).catch((e) => setInitError(`Failed to load video.js: ${e}`));
+      } // end loadVideoJs
+
+      // For Safari HLS or non-HLS sources, use video.js
+      loadVideoJs();
 
       return () => {
         disposed = true;
@@ -319,11 +454,11 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(
             {initError}
           </div>
         )}
-        <div ref={containerRef} style={{ width: "100%", height: "100%" }}>
+        <div ref={containerRef} style={{ width: "100%", height: "100%", position: "relative" }}>
           <video
             className="video-js vjs-big-play-centered"
             playsInline
-            style={{ width: "100%", height: "100%", objectFit: "contain" }}
+            style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain" }}
           />
         </div>
       </div>

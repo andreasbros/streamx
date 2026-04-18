@@ -1,95 +1,55 @@
 # StreamX
 
-Torrent-based streaming player. Single static Rust binary serving a React UI. Search for torrents, paste magnet links, stream video in the browser.
+Self-hosted torrent streaming. Single static Rust binary serving a React UI. Search movies, TV, and music, paste a magnet link, and stream directly in the browser with HLS transcoding and adaptive bitrate.
 
-## About
+![StreamX home page](docs/og-preview.png)
 
-StreamX starts a web server with a modern UI where you can search for torrents, paste magnet links, and stream video content directly in the browser.
+## Features
 
-- Rust backend: Axum, librqbit (BitTorrent), FFmpeg transcoding, SQLite
-- React frontend: Radix UI, hls.js, framer-motion
-- Auth: bcrypt + JWT, multi-user with search/watch history
-- Streaming: sequential torrent download with on-the-fly HLS transcoding
+- **Multi-source search**: movies (YTS, Torrentio), TV (Torrentio, eztv), music + music videos (apibay, 1337x)
+- **Browser streaming**: sequential BitTorrent download + on-the-fly HLS transcoding (fMP4/CMAF). Watch while it downloads.
+- **Adaptive bitrate**: multi-variant HLS (360p / 720p / 1080p / source). hls.js handles quality switching automatically.
+- **Codec support**: H.264 passthrough, HEVC/H.265 passthrough on capable devices, MKV/AC3/DTS transcoded to browser-safe H.264 + AAC.
+- **Surround audio preserved** through transcoding (up to 8 channels).
+- **Music player**: album browsing, per-track streaming while downloading, playlists, favourites, MediaSession integration (iOS lock screen controls), AirPlay, Web Audio EQ, shareable track links with OG previews.
+- **Shareable links**: guest tokens let you share a specific stream with a single URL, without giving away your account.
+- **Multi-user**: bcrypt + JWT auth, per-user search/watch history and favourites.
+- **GPU acceleration**: FFmpeg auto-detects VAAPI / NVENC / VideoToolbox, falls back to CPU.
+- **Optional SOCKS5 proxy** for torrent traffic.
 
-## How it works
+## Architecture
 
-### Provider system
+- **Backend** (Rust): Axum HTTP server, `librqbit` BitTorrent engine, FFmpeg for transcoding, SQLite for state. The release binary embeds the frontend.
+- **Frontend** (TypeScript): React + Radix UI, `hls.js` for HLS playback, `framer-motion` for transitions. Built with Vite.
+- **Streaming pipeline**: torrent peers → librqbit sequential download → FFmpeg (passthrough or transcode) → HLS master playlist → hls.js / Safari native.
 
-All torrent sources are configured as **providers** in `config.toml`. Each provider has a `kind` (movies, tv, music, music-videos), a `url`, and a `format` that controls how queries are made.
+## Build
 
-| Format | Supports | How it works |
-|---|---|---|
-| `yts` | Movies (browse + search) | Queries YTS JSON API. Returns rich metadata (posters, ratings, trailers). |
-| `torrentio` | Movies, TV (search only) | Resolves text queries to IMDB IDs via [Cinemeta](https://v3-cinemeta.strem.io), then fetches streams from [Torrentio](https://torrentio.strem.fun). No API key needed. |
-| `apibay` | TV, Music, Music Videos (browse + search) | Queries The Pirate Bay API. |
-| `eztv` | TV (browse + search) | Queries EZTV API. Returns structured season/episode data. |
-| `scrape` | Music, Music Videos (browse + search) | Scrapes 1337x HTML pages. |
+All tooling is pinned via Nix. Enter the dev shell, then build the frontend and the release backend (the release binary bundles the UI).
 
-### Home page (Browse)
+```bash
+nix develop
 
-The home page shows movie categories (Latest, Popular, Top Rated, by genre). The UI calls `GET /api/search/browse` with sort/filter/page params. This requires a format with catalog support -- **YTS** for movies, **apibay/eztv** for TV.
+# Frontend
+cd ui && pnpm install && pnpm build && cd ..
 
-Torrentio has no catalog (it's IMDB-ID based), so browse returns empty with `format = "torrentio"`. Keep YTS as your movies provider to populate the home page.
+# Backend (release build embeds the UI)
+cargo build --release --manifest-path backend/Cargo.toml
 
-### Search
-
-- **Movies** (`POST /api/search`): With YTS, queries the API directly. With Torrentio, searches Cinemeta for IMDB matches, then fetches Torrentio streams and Cinemeta detail concurrently for each result.
-- **TV** (`POST /api/tv/search`): With Torrentio, searches Cinemeta for series, then probes Torrentio for episodes across seasons (up to 15 seasons x 30 episodes, fetched concurrently) to build structured season/episode results. With eztv/apibay, queries their APIs directly.
-- **Music / Music Videos** (`POST /api/music/search`, `/api/music-videos/search`): Uses apibay or 1337x scraping. Torrentio does not support these.
-
-### Streaming pipeline
-
+# Run
+./target/release/streamx
+# Open http://127.0.0.1:8999
 ```
-Torrent peers --> librqbit (sequential download) --> movie.mp4
-                                                        |
-                                          FFmpeg (passthrough or multi-variant transcode)
-                                                        |
-                                     master.m3u8 (adaptive bitrate)
-                                      /        |        \
-                                 360p/      720p/     source/
-                              playlist    playlist    playlist
-                              segments    segments    segments
-                                      \        |        /
-                                  hls.js / Safari native HLS --> browser playback
-```
-
-1. User selects a torrent variant (quality/source)
-2. Backend downloads via librqbit in sequential mode so the beginning arrives first
-3. For browser-compatible formats (H.264/AAC in MP4): **direct HTTP range requests** on the torrent stream. librqbit blocks until pieces arrive, the browser buffers naturally.
-4. For incompatible formats (MKV, HEVC/x265, AC3): **multi-variant HLS transcoding**. Multiple FFmpeg processes run in parallel, one per quality tier, producing a master playlist with adaptive bitrate streaming. The player picks the best tier for the connection speed.
-5. Browser plays via hls.js (Chrome/Firefox) or Safari's native HLS player
-
-### Adaptive bitrate
-
-Transcodes produce multiple quality tiers filtered by source resolution:
-
-| Tier   | Height | Video Bitrate | Audio Bitrate |
-|--------|--------|---------------|---------------|
-| 360p   | 360    | 800k          | 128k          |
-| 720p   | 720    | 2500k         | 192k          |
-| 1080p  | 1080   | 5000k         | 256k          |
-| source | native | 8000k         | 320k          |
-
-Tiers with height >= source are skipped (except "source" which is always included). A 480p source produces 360p + source. A 4K source produces all four tiers. hls.js handles automatic quality switching based on bandwidth -- mobile clients get 360p, desktop gets source quality.
-
-Passthrough (browser-compatible source) skips all of this and uses a single flat playlist.
-
-### Audio preservation
-
-Surround audio (5.1, 7.1) is preserved through transcoding. FFmpeg keeps the original channel layout when encoding to AAC, with a safety cap at 8 channels.
-
-### Piped transcoding
-
-For active downloads (not yet complete), the torrent stream is written to a temp file. Once 1MB arrives, FFmpeg processes start reading from it. Each FFmpeg instance blocks on EOF when the file hasn't grown enough, providing natural backpressure that matches the download pace.
 
 ## Configuration
 
-`~/.streamx/config.toml` (created on first run):
+Config lives at `~/.streamx/config.toml` and is created with defaults on first run.
 
 ```toml
 [server]
 port = 8999
 bind = "127.0.0.1"
+# log_level = "info"
 
 [torrent]
 max_connections = 200
@@ -99,11 +59,13 @@ sequential = true
 video_codec = "h264"
 preset = "ultrafast"
 crf = 23
+hls_force_stereo = true   # set false to preserve surround in HLS tiers
 
 [auth]
 session_duration = "7d"
+# jwt_secret auto-generated on first run if empty
 
-# Movies: YTS for browse + search
+# Movies: YTS has browse + search with rich metadata
 [[providers]]
 id = 1
 kind = "movies"
@@ -117,14 +79,6 @@ kind = "tv"
 url = "https://torrentio.strem.fun/providers=eztv,1337x,thepiratebay"
 format = "torrentio"
 
-# Music videos
-[[providers]]
-id = 3
-kind = "music-videos"
-url = "https://apibay.org"
-format = "apibay"
-category = "601"
-
 # Music
 [[providers]]
 id = 4
@@ -133,102 +87,107 @@ url = "https://apibay.org"
 format = "apibay"
 category = "101"
 
-# Optional: route torrent traffic through SOCKS5 proxy
+# Optional: route torrent traffic through a SOCKS5 proxy
 # [vpn]
 # socks5 = "socks5://user:pass@host:port"
 ```
 
-### Torrentio provider selection
+Extra providers can be kept out of the main config in `~/.streamx/providers.toml` (same `[[providers]]` format). That file is gitignored by default.
 
-The Torrentio URL path controls which upstream sources it aggregates:
+### Provider formats
 
-```
-https://torrentio.strem.fun/providers=eztv,1337x,thepiratebay
-```
+| Format | Supports | How it works |
+|---|---|---|
+| `yts` | Movies (browse + search) | YTS JSON API. Rich metadata (posters, ratings, trailers). |
+| `torrentio` | Movies, TV (search only) | Resolves text to IMDB IDs via [Cinemeta](https://v3-cinemeta.strem.io), then fetches streams from [Torrentio](https://torrentio.strem.fun). No API key. |
+| `apibay` | TV, Music (browse + search) | Pirate Bay JSON API. |
+| `eztv` | TV (browse + search) | EZTV API. Structured season/episode data. |
+| `scrape` | Music (browse + search) | Scrapes 1337x HTML. |
 
-Available: `yts`, `eztv`, `1337x`, `thepiratebay`, `torrentgalaxy`, `nyaasi`, and others. See [torrentio.strem.fun](https://torrentio.strem.fun) for the full list.
+Torrentio has no catalog (it is IMDB-ID based), so keep YTS as the movies provider if you want the home page populated.
 
-## Local build
+## Development
 
-All tools are managed via Nix.
-
-```bash
-nix develop
-
-# Frontend
-cd ui && pnpm install && pnpm build && cd ..
-
-# Backend (release build embeds the UI)
-cd backend && cargo build --release && cd ..
-
-# Run
-./target/release/streamx
-# Open http://127.0.0.1:8999
-```
-
-### Development (hot reload)
+Hot reload with the Vite dev server proxying to a `cargo run` backend:
 
 ```bash
 nix develop
 
-# Terminal 1: frontend dev server
+# Terminal 1: frontend dev server (vite on :9000, proxies /api to :8998)
 cd ui && pnpm dev
 
 # Terminal 2: backend
-cd backend && cargo run -- --port 8998
+cargo run --manifest-path backend/Cargo.toml -- --port 8998
 ```
-
-The vite dev server runs on port 8999 and proxies API requests to the backend on 8998.
 
 ### Checks
 
 ```bash
-cargo fmt --all -- --check
-cargo clippy -- -D warnings
-cargo check
+cargo fmt --all --manifest-path backend/Cargo.toml
+cargo clippy --manifest-path backend/Cargo.toml -- -D warnings
+cargo check --manifest-path backend/Cargo.toml
 cd ui && pnpm typecheck
 ```
 
-### CLI commands
+### Tests
 
 ```bash
-streamx                    # Start the server (default port 8999)
-streamx --port 9000        # Custom port
-streamx --admin-user admin --admin-password password  # Create admin on startup
-streamx clean              # Remove cache and downloads (keeps config + database)
-streamx wipe               # Remove everything except config.toml
+# Rust unit + integration tests
+cargo test --manifest-path backend/Cargo.toml
+
+# Frontend component tests
+cd ui && pnpm test
+
+# End-to-end browser tests (requires a running backend on port 8999)
+cd ui && pnpm test:e2e
 ```
 
-## Project structure
+## CLI
+
+```
+streamx                                             # start the server (port 8999 by default)
+streamx --port 9000                                 # custom port
+streamx --admin-user <user> --admin-password <pw>   # create an admin user on first boot
+streamx clean                                       # remove cache and downloads (keeps config + DB)
+streamx wipe                                        # remove everything except config.toml
+```
+
+Credentials can also be passed via `STREAMX_ADMIN_USER` and `STREAMX_ADMIN_PASSWORD` env vars.
+
+## Project layout
 
 ```
 backend/
   src/
-    config.rs           Configuration loading, env var expansion
-    server/             HTTP routes, auth, image proxy
-    torrent/
-      engine.rs         librqbit torrent management
-      provider.rs       Search/browse dispatch, format-specific clients
-      metadata.rs       Cinemeta client (IMDB ID resolution, no API key)
-    transcode/          FFmpeg HLS pipeline (GPU detection, probe, segmenting)
-    db/                 SQLite (users, history, downloads, favourites)
+    config.rs          configuration + env var expansion
+    server/            HTTP routes, auth, image proxy, static asset serving
+    torrent/           librqbit engine, provider dispatch, search formats
+    transcode/         FFmpeg HLS pipeline (GPU detect, probe, multi-variant)
+    db/                SQLite (users, history, downloads, favourites, playlists)
 ui/
   src/
-    pages/              Browse, Search, TvSearch, Player, etc.
-    hooks/              useSearch, useStream, useAudioPlayer, etc.
-    api/                API client and types
-    components/         VideoPlayer, Layout, DebugPane, etc.
-flake.nix               Nix flake for dev shell and builds
+    pages/             Search, Browse, Player, Music, Favourites, etc.
+    components/        VideoPlayer, AudioPlayerBar, ExpandedPlayer, Layout
+    hooks/             useSearch, useStream, useAudioPlayer, useMediaSession
+    api/               API client and types
+flake.nix              Nix flake (dev shell + builds)
 ```
 
 ## Troubleshooting
 
-**Port in use:** `ss -tlnp | grep 8999`. Kill the process or use `--port`.
+- **Port in use:** `ss -tlnp | grep 8999` and kill the process, or pass `--port`.
+- **Frontend not showing:** build the UI first (`cd ui && pnpm install && pnpm build`), then restart the backend.
+- **Nix flake not found:** the flake file must be tracked by git (`git add flake.nix`).
+- **Safari HLS shows 401:** the stream token is not attached to segment requests. Open the debug pane (user menu → Debug Mode) and check the last `/api/stream/.../playlist.m3u8` response.
+- **Transcoding fails on GPU:** FFmpeg automatically falls back to CPU. Pass `--log-level debug` and watch the backend logs to see which acceleration was tried.
 
-**Frontend not showing:** Build the UI first (`cd ui && pnpm install && pnpm build`), then restart the backend.
+## Tooling
 
-**Nix flake not found:** Run `git add flake.nix` -- Nix requires tracked files.
+- [`docs/og-preview.png`](docs/og-preview.png) is produced by `ui/tests/screenshot-og.spec.ts`. Regenerate it against a running instance with:
+  ```bash
+  cd ui && npx playwright test tests/screenshot-og.spec.ts --config tests/live.config.ts
+  ```
 
-**Video not playing on Safari:** Safari uses native HLS. If segments return 401, the auth token may be missing. Check the debug pane (user menu > Debug Mode).
+## License
 
-**Transcoding fails on GPU:** FFmpeg automatically falls back to CPU encoding if hardware acceleration fails.
+[MIT](LICENSE)

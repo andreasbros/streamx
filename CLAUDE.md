@@ -37,3 +37,7 @@ cd backend && cargo build
 - Rust: `cargo test` (unit + integration)
 - Frontend: `pnpm test` (vitest) and `pnpm test:e2e` (Playwright)
 - E2E tests use real backend with mock streaming endpoint
+- All tests must run inside `nix develop`
+- Performance metrics tracked in `benchmarks/e2e_perf.json` (git-tracked)
+- After running E2E tests, serve the report for review: `python3 -m http.server 8997 -d /tmp/streamx_e2e_artifacts/html-report`
+- Report port: 8997 (configurable via `STREAMX_REPORT_PORT`)

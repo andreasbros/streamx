@@ -39,11 +39,21 @@
             nodejs_22
             imagemagick
             sqlite
+            ffmpeg-full
+            playwright-driver.browsers
+            libva
+            libva-utils
+            libdrm
+            intel-media-driver
           ];
 
           shellHook = ''
             export RUST_LOG=info
             export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
+            export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
+            export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+            export LIBVA_DRIVERS_PATH="${pkgs.intel-media-driver}/lib/dri:${pkgs.libva}/lib/dri''${LIBVA_DRIVERS_PATH:+:$LIBVA_DRIVERS_PATH}"
+            export LIBVA_DRIVER_NAME=iHD
           '';
         };
       }

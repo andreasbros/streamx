@@ -9,13 +9,18 @@ import {
   Badge,
   Select,
 } from "@radix-ui/themes";
-import { ArrowLeftIcon, PlayIcon, DownloadIcon, TrashIcon, ChevronDownIcon, ChevronUpIcon } from "@radix-ui/react-icons";
+import { ArrowLeftIcon, DownloadIcon, TrashIcon, ChevronDownIcon, ChevronUpIcon, Share1Icon, CheckIcon } from "@radix-ui/react-icons";
 import { VideoPlayer } from "../components/VideoPlayer";
 import type { VideoPlayerHandle } from "../components/VideoPlayer";
 import { useStream } from "../hooks/useStream";
 import { api } from "../api/client";
 import { formatBytes, formatSpeed, formatRuntime } from "../lib/utils";
 import { debugLog } from "../lib/debug-log";
+import { useAuth } from "../hooks/useAuth";
+import { useMediaSession } from "../hooks/useMediaSession";
+import { useFavourites } from "../hooks/useFavourites";
+import { TrailerModal } from "../components/TrailerModal";
+import { LOGO_URL, PAGE_BG_URL, DEFAULT_VIDEO_POSTER_URL } from "../assets";
 
 const DEMO_HLS_URL = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
 
@@ -64,7 +69,18 @@ function CinematicBg({ poster }: { poster: string | null }) {
           }}
         />
       ) : (
-        <div style={{ position: "absolute", inset: 0, background: "#09090b" }} />
+        <img
+          src={PAGE_BG_URL}
+          alt=""
+          style={{
+            position: "absolute",
+            inset: "-20%",
+            width: "140%",
+            height: "140%",
+            objectFit: "cover",
+            filter: "blur(40px) brightness(0.15) saturate(1.4)",
+          }}
+        />
       )}
       <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.4)" }} />
     </div>
@@ -77,11 +93,17 @@ function VideoOverlay({
   videoReady,
   error,
   onPlay,
+  trailerCode,
+  trailerSearch,
+  onTrailer,
 }: {
   poster: string | null;
   videoReady: boolean;
   error: string | null;
   onPlay: () => void;
+  trailerCode?: string | null;
+  trailerSearch?: string | null;
+  onTrailer?: () => void;
 }) {
   return (
     <div
@@ -100,35 +122,74 @@ function VideoOverlay({
         if (videoReady && !error) onPlay();
       }}
     >
-      <div style={{ position: "absolute", inset: 0, background: "#000" }} />
-      {poster && (
-        <img src={poster} alt="" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover" }} />
-      )}
+      <div style={{ position: "absolute", inset: 0, background: "#000", overflow: "hidden" }}>
+        <img
+          src={poster || DEFAULT_VIDEO_POSTER_URL}
+          alt=""
+          style={{
+            position: "absolute",
+            left: 0,
+            width: "100%",
+            height: "150%",
+            objectFit: "cover",
+            objectPosition: "center center",
+            top: "-25%",
+            willChange: "transform",
+            transform: "translateY(30px) scale(1.15)",
+            animation: "posterPanDown 16s ease-in-out 1s infinite alternate both",
+          }}
+        />
+      </div>
       <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.35)" }} />
 
       {/* Content */}
       {error ? (
         <Text size="3" color="red" style={{ position: "relative" }}>{error}</Text>
       ) : videoReady ? (
-        <div
+        <img
+          src={LOGO_URL}
+          alt="Play"
           style={{
             position: "relative",
-            width: 60,
-            height: 60,
-            borderRadius: "50%",
-            background: "rgba(255,255,255,0.15)",
-            backdropFilter: "blur(4px)",
+            width: 160,
+            height: 160,
+            opacity: 0.85,
+            filter: "drop-shadow(0 0 20px rgba(255,255,255,0.3))",
+            transition: "opacity 0.15s, transform 0.15s",
+            cursor: "pointer",
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; e.currentTarget.style.transform = "scale(1.1)"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.opacity = "0.85"; e.currentTarget.style.transform = "scale(1)"; }}
+        />
+      ) : null}
+
+      {/* Watch Trailer - bottom right, only when play button is shown */}
+      {!error && (trailerCode || trailerSearch) && onTrailer && (
+        <div
+          onClick={(e) => { e.stopPropagation(); onTrailer(); }}
+          style={{
+            position: "absolute",
+            bottom: 11,
+            right: 19,
             display: "flex",
             alignItems: "center",
-            justifyContent: "center",
-            transition: "background 0.15s",
+            gap: 8,
+            cursor: "pointer",
+            opacity: 0.85,
+            transition: "opacity 0.15s",
+            zIndex: 3,
           }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.25)"; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.15)"; }}
+          onMouseEnter={(e) => { e.currentTarget.style.opacity = "1"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.opacity = "0.85"; }}
         >
-          <PlayIcon width={28} height={28} color="white" style={{ marginLeft: 3 }} />
+          <svg className="trailer-icon" viewBox="0 0 24 24" fill={trailerCode ? "#dc2626" : "#888"} xmlns="http://www.w3.org/2000/svg" style={{ width: 28, height: 28 }}>
+            <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.546 12 3.546 12 3.546s-7.505 0-9.377.504A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.504 9.376.504 9.376.504s7.505 0 9.377-.504a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+          </svg>
+          <span className="trailer-text" style={{ color: "white", fontSize: "var(--font-size-5)", fontWeight: 700 }}>Watch Trailer</span>
         </div>
-      ) : (
+      )}
+
+      {!videoReady && !error && (
         <div
           style={{
             position: "relative",
@@ -283,6 +344,67 @@ function UrlActions({ path, downloadName }: { path: string; downloadName?: strin
   );
 }
 
+function ShareButton({ streamId }: { streamId: string }) {
+  const [copied, setCopied] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const copyToClipboard = (text: string) => {
+    // Clipboard API may fail outside user gesture trust window
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).catch(() => {
+        fallbackCopy(text);
+      });
+    } else {
+      fallbackCopy(text);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 3000);
+  };
+
+  const fallbackCopy = (text: string) => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  };
+
+  const handleShare = async () => {
+    setLoading(true);
+    try {
+      const result = await api.createShareLink(streamId);
+      const fullUrl = `${window.location.origin}${result.url}`;
+
+      // Try native share (mobile)
+      if (navigator.share) {
+        try {
+          await navigator.share({ title: "StreamX", url: fullUrl });
+          setCopied(true);
+          setTimeout(() => setCopied(false), 3000);
+          return;
+        } catch {
+          // User cancelled or not supported - fall through to copy
+        }
+      }
+
+      copyToClipboard(fullUrl);
+    } catch {
+      copyToClipboard(window.location.href);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Button variant="soft" size="1" onClick={handleShare} disabled={loading} style={{ fontSize: "var(--font-size-2)", fontWeight: 700, height: "auto", padding: "7px 12px" }}>
+      {copied ? <><CheckIcon width={14} height={14} /> Copied</> : <><Share1Icon width={14} height={14} /> Share</>}
+    </Button>
+  );
+}
+
 function addToken(path: string): string {
   const token = localStorage.getItem("streamx_token");
   if (!token) return path;
@@ -309,6 +431,8 @@ function StreamUrls({ currentSrc, streamId, title }: { currentSrc: string; video
   const activePlaylisPath = currentSrc ? cleanPath(currentSrc.split(" | ")[0] || "") : null;
   const masterPath = streamId ? `/api/stream/${streamId}/playlist.m3u8` : null;
   const filePath = streamId ? `/api/stream/${streamId}/file` : null;
+  const vlcToken = localStorage.getItem("streamx_token") || "";
+  const vlcPath = streamId && vlcToken ? `/api/stream/${streamId}/vlc/${vlcToken}` : null;
   const safeTitle = (title || streamId || "stream").replace(/[^a-zA-Z0-9._-]/g, "_");
 
   return (
@@ -330,6 +454,13 @@ function StreamUrls({ currentSrc, streamId, title }: { currentSrc: string; video
                 <Badge size="1" variant="soft" color="gray" style={{ fontSize: 9, flexShrink: 0 }}>file</Badge>
                 <Text size="1" color="gray" style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{filePath}</Text>
                 <UrlActions path={addToken(filePath)} downloadName={`${safeTitle}.mkv`} />
+              </Flex>
+            )}
+            {vlcPath && (
+              <Flex align="center" gap="2">
+                <Badge size="1" variant="soft" color="blue" style={{ fontSize: 9, flexShrink: 0 }}>VLC</Badge>
+                <Text size="1" color="gray" style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{vlcPath}</Text>
+                <UrlActions path={vlcPath} downloadName={`${safeTitle}.mkv`} />
               </Flex>
             )}
             {masterPath && (
@@ -435,6 +566,9 @@ export function Player() {
   }, [poster, streamId]);
 
   // --- Stream state ---
+  const { user, isGuest } = useAuth();
+  const isAdmin = user?.is_admin === true;
+  const { isFavourite, addFavourite, removeFavouriteByTitle } = useFavourites();
   const playerRef = useRef<VideoPlayerHandle>(null);
   const { status, fileUrl, error, metadata: wsMeta } = useStream(isDemo ? null : streamId);
   const meta: Record<string, unknown> | null = wsMeta ? (wsMeta as unknown as Record<string, unknown>) : (locState?.meta ?? null);
@@ -480,6 +614,12 @@ export function Player() {
   );
   const qualityOptions = ["source", "1080p", "720p", "360p"];
 
+  // Detect HEVC from codec metadata OR filename (metadata may be unavailable for new streams)
+  const codecStr = status?.video_codec?.toLowerCase() ?? "";
+  const fileStr = status?.file_name?.toLowerCase() ?? "";
+  const sourceIsHevc = /hevc|h265|hev1|hvc1/.test(codecStr)
+    || /h[\s._-]?265|hevc/i.test(fileStr);
+
   const handleQualityChange = (q: string) => {
     setSelectedQuality(q);
     localStorage.setItem(QUALITY_STORAGE_KEY, q);
@@ -487,6 +627,24 @@ export function Player() {
 
   const [bufferInfo, setBufferInfo] = useState({
     bufferedSeconds: 0, currentTime: 0, duration: 0, readyState: 0, playing: false, videoHeight: 0, currentSrc: "",
+  });
+
+  // Media Session API: lock screen controls, Dynamic Island, background audio
+  const videoTitle = String(ms(meta, "title") || status?.title || "");
+  const runtimeMin = mn(meta, "runtime");
+  debugLog.debug("player", `media-session: title=${videoTitle} poster=${poster?.substring(0, 40) || "none"}`);
+  useMediaSession({
+    title: videoTitle || "StreamX",
+    artist: [mn(meta, "year") ? String(mn(meta, "year")) : null, ms(meta, "language")?.toUpperCase()].filter(Boolean).join(" - ") || "StreamX",
+    artwork: poster ?? DEFAULT_VIDEO_POSTER_URL,
+    duration: runtimeMin ? runtimeMin * 60 : bufferInfo.duration,
+    currentTime: bufferInfo.currentTime,
+    playing: bufferInfo.playing,
+    onPlay: () => playerRef.current?.play(),
+    onPause: () => playerRef.current?.pause(),
+    onSeekForward: () => playerRef.current?.seek(bufferInfo.currentTime + 10),
+    onSeekBackward: () => playerRef.current?.seek(Math.max(0, bufferInfo.currentTime - 10)),
+    onSeekTo: (t) => playerRef.current?.seek(t),
   });
 
   // Detect codec/container support - only switch to HLS when enough data to transcode
@@ -515,6 +673,11 @@ export function Player() {
       unsupported = true;
     }
 
+    // Detect HEVC from filename when codec metadata is missing (common for new streams)
+    if (!codec && /h[\s._-]?265|hevc/i.test(fileName)) {
+      unsupported = true;
+    }
+
     needsHlsRef.current = unsupported;
     if (unsupported) {
       const progress = status?.progress ?? 0;
@@ -522,11 +685,21 @@ export function Player() {
       if (ready) {
         debugLog.warn("player", `Unsupported format (codec=${codec} file=${fileName}), switching to HLS`);
         setUseHls(true);
+
+        // If source is HEVC and browser can't decode HEVC natively,
+        // auto-select a transcoded tier instead of "source" (which would copy HEVC)
+        const isHevc = codec === "x265" || codec === "hevc" || codec === "hev1" || codec === "hvc1";
+        const v = document.createElement("video");
+        const browserSupportsHevc = v.canPlayType('video/mp4; codecs="hvc1"') !== "" || v.canPlayType('video/mp4; codecs="hev1"') !== "";
+        if (isHevc && !browserSupportsHevc && selectedQuality === "source") {
+          debugLog.warn("player", "Browser lacks HEVC support, selecting 1080p instead of source");
+          setSelectedQuality("1080p");
+        }
       } else {
         debugLog.info("player", `Unsupported format, waiting for data (${progress.toFixed(1)}%)`);
       }
     }
-  }, [status?.video_codec, status?.file_name, status?.progress, status?.status, useHls, isDemo]);
+  }, [status?.video_codec, status?.file_name, status?.progress, status?.status, useHls, isDemo, selectedQuality]);
 
   const hlsUrl = streamId ? api.getPlaylistUrl(streamId, selectedQuality) : null;
   // URL-based streams (direct HTTPS or HLS-transcoded HTTPS)
@@ -549,20 +722,29 @@ export function Player() {
   const [userPlaying, setUserPlaying] = useState(false);
   const [hasPlayed, setHasPlayed] = useState(false);
   const [summaryExpanded, setSummaryExpanded] = useState(false);
-  const overlayVisible = !userPlaying && !bufferInfo.playing && !hasPlayed;
+  const [showTrailer, setShowTrailer] = useState(false);
+  // Once video has played, never show the poster overlay again
+  const overlayVisible = !hasPlayed && !userPlaying && !bufferInfo.playing;
 
 
 
   useEffect(() => {
     const handler = () => {
-      if (document.visibilityState === "visible") {
-        // Give video a moment to report its state, then check
-        setTimeout(() => setUserPlaying(false), 500);
+      if (document.visibilityState === "hidden") {
+        // Background: audio continues natively on iOS with Media Session + SW active
+        debugLog.info("player", "Entering background, audio continues");
+      } else {
+        // Foreground: video rendering resumes automatically
+        debugLog.info("player", "Returning to foreground");
+        // Only reset overlay if video hasn't played yet (don't show poster over playing video)
+        setTimeout(() => {
+          if (!hasPlayed) setUserPlaying(false);
+        }, 500);
       }
     };
     document.addEventListener("visibilitychange", handler);
     return () => document.removeEventListener("visibilitychange", handler);
-  }, []);
+  }, [hasPlayed]);
 
   // If bufferInfo.playing becomes true, mark as played and cancel timeout
   useEffect(() => {
@@ -576,6 +758,30 @@ export function Player() {
     }
   }, [bufferInfo.playing]);
 
+  // Auto-fallback: if HEVC source stalls (currentTime stuck near 0 for 8s), switch to 1080p
+  const hevcStallRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!useHls || !sourceIsHevc || selectedQuality !== "source") {
+      if (hevcStallRef.current) { clearTimeout(hevcStallRef.current); hevcStallRef.current = null; }
+      return;
+    }
+    if (bufferInfo.currentTime > 1) {
+      // Playing fine, cancel stall timer
+      if (hevcStallRef.current) { clearTimeout(hevcStallRef.current); hevcStallRef.current = null; }
+      return;
+    }
+    if (!hevcStallRef.current && userPlaying) {
+      hevcStallRef.current = setTimeout(() => {
+        hevcStallRef.current = null;
+        if (bufferInfo.currentTime < 1) {
+          debugLog.warn("player", "HEVC source stalled for 8s, falling back to 1080p");
+          setSelectedQuality("1080p");
+          localStorage.setItem(QUALITY_STORAGE_KEY, "1080p");
+        }
+      }, 8000);
+    }
+  }, [useHls, sourceIsHevc, selectedQuality, bufferInfo.currentTime, userPlaying]);
+
   const handlePlayError = useCallback((err: string) => {
     if (err === "not_supported") {
       if (playRetryRef.current) { clearInterval(playRetryRef.current); playRetryRef.current = null; }
@@ -587,10 +793,16 @@ export function Player() {
       } else if (!useHls && hlsUrl) {
         debugLog.warn("player", "Direct playback not supported, switching to HLS transcode");
         setUseHls(true);
+      } else if (useHls && selectedQuality === "source") {
+        // Source quality failed - likely HEVC or codec browser can't handle
+        // Auto-downgrade to 1080p which always transcodes to H.264
+        debugLog.warn("player", "Source quality failed, falling back to 1080p");
+        setSelectedQuality("1080p");
+        localStorage.setItem(QUALITY_STORAGE_KEY, "1080p");
       }
       setUserPlaying(false);
     }
-  }, [useHls, hlsUrl, streamId, urlDirect, urlFallbackHls, selectedQuality]);
+  }, [useHls, hlsUrl, streamId, urlDirect, urlFallbackHls, selectedQuality, sourceIsHevc]);
 
   const bufferInfoRef = useRef(bufferInfo);
   const handleBufferInfo = useCallback(
@@ -623,15 +835,18 @@ export function Player() {
     debugLog.info("player", `tryPlay ref=${!!playerRef.current} result=${result}`);
     if (result) {
       setUserPlaying(true);
-      // Only set HLS fallback timeout for files known to be incompatible
+      // Only set fallback timeout for direct file playback (not HLS).
+      // Once in HLS mode, playback stalls are handled by video.js retry logic.
       if (playTimeoutRef.current) clearTimeout(playTimeoutRef.current);
-      const fileName = statusRef.current?.file_name?.toLowerCase() ?? "";
-      const knownIncompatible = fileName.endsWith(".mkv") || fileName.endsWith(".avi") || fileName.endsWith(".wmv") || fileName.endsWith(".flv");
-      if (knownIncompatible) {
-        playTimeoutRef.current = setTimeout(() => {
-          debugLog.warn("player", `play timeout 10s, incompatible file: ${fileName}`);
-          handlePlayError("not_supported");
-        }, 10000);
+      if (!useHls) {
+        const fileName = statusRef.current?.file_name?.toLowerCase() ?? "";
+        const knownIncompatible = fileName.endsWith(".mkv") || fileName.endsWith(".avi") || fileName.endsWith(".wmv") || fileName.endsWith(".flv");
+        if (knownIncompatible) {
+          playTimeoutRef.current = setTimeout(() => {
+            debugLog.warn("player", `play timeout 10s, incompatible file: ${fileName}`);
+            handlePlayError("not_supported");
+          }, 10000);
+        }
       }
     } else {
       playRetryRef.current = setInterval(() => {
@@ -642,7 +857,7 @@ export function Player() {
         }
       }, 500);
     }
-  }, [handlePlayError]);
+  }, [handlePlayError, useHls]);
 
   const handlePlay = useCallback(() => {
     tryPlay();
@@ -664,7 +879,7 @@ export function Player() {
 
   return (
     <div style={{ position: "relative", minHeight: "100%" }}>
-      <CinematicBg poster={poster} />
+      <CinematicBg poster={ms(meta, "backdrop") || poster} />
 
       <Flex direction="column" gap="4">
         <Flex align="center" gap="3">
@@ -679,7 +894,7 @@ export function Player() {
         </Flex>
 
         {/* Video box */}
-        <Box style={{ aspectRatio: "16/9", background: "#000", borderRadius: 8, overflow: "hidden", position: "relative", border: "1px solid var(--gray-a5)" }}>
+        <Box style={{ width: "100%", aspectRatio: "16/9", background: "#000", borderRadius: 8, overflow: "hidden", position: "relative", border: "1px solid var(--gray-a5)" }}>
           {videoReady && videoUrl && (
             <VideoPlayer
               key={videoUrl}
@@ -692,12 +907,15 @@ export function Player() {
               onServerError={handleServerError}
             />
           )}
-          {overlayVisible && (
+          {(overlayVisible || (!videoReady && !hasPlayed)) && (
             <VideoOverlay
               poster={poster}
               videoReady={videoReady}
               error={error}
               onPlay={handlePlay}
+              trailerCode={ms(meta, "trailer_code") || null}
+              trailerSearch={meta ? `${ms(meta, "title") || ""} ${mn(meta, "year") || ""} official trailer` : null}
+              onTrailer={() => setShowTrailer(true)}
             />
           )}
         </Box>
@@ -765,6 +983,67 @@ export function Player() {
               </Card>
             )}
 
+            {/* Action buttons */}
+            <Flex gap="2" justify="end" wrap="wrap" align="center">
+              {!isGuest && meta && (() => {
+                const title = String(ms(meta, "title") || status?.title || "");
+                const year = mn(meta, "year") ?? undefined;
+                const active = isFavourite(title, year);
+                return (
+                  <button
+                    style={{ background: "var(--color-surface)", border: "none", borderRadius: 6, cursor: "pointer", padding: "7px 10px", display: "flex", alignItems: "center", transition: "transform 0.15s" }}
+                    onClick={async () => {
+                      if (active) {
+                        await removeFavouriteByTitle(title, year);
+                      } else {
+                        await addFavourite({
+                          content_type: "movie",
+                          title,
+                          year: year ?? null,
+                          rating: (mn(meta, "rating") as number) ?? null,
+                          poster_url: (ms(meta, "poster_medium") || ms(meta, "poster_large") || poster) ?? null,
+                          info_hash: streamId ?? null,
+                          metadata_json: JSON.stringify({
+                            genres: meta?.genres,
+                            summary: ms(meta, "summary"),
+                            imdb_code: ms(meta, "imdb_code"),
+                            poster_large: ms(meta, "poster_large"),
+                            backdrop: ms(meta, "backdrop"),
+                          }),
+                        });
+                      }
+                    }}
+                    title={active ? "Remove from favourites" : "Add to favourites"}
+                  >
+                    <svg width={22} height={22} viewBox="0 0 24 24" fill={active ? "#facc15" : "none"} stroke="#facc15" strokeWidth={2}>
+                      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+                    </svg>
+                  </button>
+                );
+              })()}
+              {status.status === "complete" && fileUrl && (
+                <a href={fileUrl} download style={{ textDecoration: "none" }}>
+                  <Button variant="soft" size="1" style={{ fontSize: "var(--font-size-2)", fontWeight: 700, height: "auto", padding: "7px 12px" }}>
+                    <DownloadIcon width={14} height={14} /> Download
+                  </Button>
+                </a>
+              )}
+              {!isGuest && streamId && (
+                <ShareButton streamId={streamId} />
+              )}
+              {isAdmin && streamId && (
+                <Button
+                  variant="soft"
+                  size="1"
+                  color="red"
+                  style={{ fontSize: "var(--font-size-2)", fontWeight: 700, height: "auto", padding: "7px 12px" }}
+                  onClick={() => api.deleteStream(streamId).catch(() => {})}
+                >
+                  <TrashIcon width={14} height={14} /> Delete
+                </Button>
+              )}
+            </Flex>
+
             {/* Technical info + stream status */}
             <Card>
               <Flex direction="column" gap="3">
@@ -814,7 +1093,7 @@ export function Player() {
                       Peers <Text weight="medium" size="1">{status.peers ?? 0}</Text>
                     </Text>
                     <Text size="1" color="gray" style={{ minWidth: 80 }}>
-                      Speed <Text weight="medium" size="1">{formatSpeed(status.speed ?? 0)}</Text>
+                      <Text weight="medium" size="1">{formatSpeed(status.speed ?? 0)}</Text>
                     </Text>
                     {useHls && (
                       <Flex gap="2" align="center">
@@ -829,7 +1108,7 @@ export function Player() {
                             {qualityOptions.map((q) => (
                               <Select.Item key={q} value={q}>
                                 {q === "source"
-                                  ? `Original${bufferInfo.videoHeight > 0 ? ` (${bufferInfo.videoHeight}p)` : ""}`
+                                  ? `Original${bufferInfo.videoHeight > 0 ? ` (${bufferInfo.videoHeight}p)` : ""}${sourceIsHevc ? " (HEVC)" : ""}`
                                   : q}
                               </Select.Item>
                             ))}
@@ -838,27 +1117,7 @@ export function Player() {
                       </Flex>
                     )}
                   </Flex>
-                  <Flex gap="1">
-                    {status.status === "complete" && fileUrl && (
-                      <a href={fileUrl} download style={{ textDecoration: "none" }}>
-                        <Button variant="ghost" size="1" color="blue">
-                          <DownloadIcon width={12} height={12} />
-                        </Button>
-                      </a>
-                    )}
-                    <Button
-                      variant="ghost"
-                      size="1"
-                      color="red"
-                      onClick={() => {
-                        if (streamId) {
-                          api.deleteStream(streamId).then(() => navigate("/")).catch(() => {});
-                        }
-                      }}
-                    >
-                      <TrashIcon width={12} height={12} />
-                    </Button>
-                  </Flex>
+                  <Flex gap="1" />
                 </Flex>
               </Flex>
             </Card>
@@ -897,6 +1156,13 @@ export function Player() {
           </Card>
         )}
       </Flex>
+      {showTrailer && (
+        <TrailerModal
+          youtubeId={ms(meta, "trailer_code") || undefined}
+          searchQuery={meta ? `${ms(meta, "title") || ""} ${mn(meta, "year") || ""} official trailer` : undefined}
+          onClose={() => setShowTrailer(false)}
+        />
+      )}
     </div>
   );
 }

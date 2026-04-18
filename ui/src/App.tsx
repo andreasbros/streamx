@@ -14,11 +14,11 @@ import { Movie } from "./pages/Movie";
 import { Favourites } from "./pages/Favourites";
 import { TvSearch } from "./pages/TvSearch";
 import { TvShow } from "./pages/TvShow";
-import { MusicVideoSearch } from "./pages/MusicVideoSearch";
 import { MusicSearch } from "./pages/MusicSearch";
 import { Settings } from "./pages/Settings";
 import { SurroundSound } from "./pages/SurroundSound";
 import { Admin } from "./pages/Admin";
+import { MusicPlayer } from "./pages/MusicPlayer";
 import type { ReactNode } from "react";
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -38,6 +38,7 @@ function AppRoutes({
   setTheme: (t: "dark" | "light") => void;
 }) {
   return (
+    <>
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route
@@ -57,8 +58,8 @@ function AppRoutes({
         <Route path="player/:id" element={<Player />} />
         <Route path="tv" element={<TvSearch />} />
         <Route path="tv/show" element={<TvShow />} />
-        <Route path="music-videos" element={<MusicVideoSearch />} />
         <Route path="music" element={<MusicSearch />} />
+        <Route path="music/play/:streamId/:fileIndex" element={<MusicPlayer />} />
         <Route path="history" element={<History />} />
         <Route path="surround" element={<SurroundSound />} />
         <Route path="favourites" element={<Favourites />} />
@@ -67,6 +68,7 @@ function AppRoutes({
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
+    </>
   );
 }
 

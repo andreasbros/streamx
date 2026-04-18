@@ -6,7 +6,6 @@ import {
   Separator,
 } from "@radix-ui/themes";
 import {
-  VideoIcon,
   CounterClockwiseClockIcon,
   GearIcon,
   ExitIcon,
@@ -144,7 +143,7 @@ export function DrawerMenu({ open, onClose }: DrawerMenuProps) {
             style={{
               position: "fixed",
               inset: 0,
-              background: "rgba(0, 0, 0, 0.5)",
+              background: "rgba(0, 0, 0, 0.25)",
               zIndex: 200,
             }}
           />
@@ -159,40 +158,49 @@ export function DrawerMenu({ open, onClose }: DrawerMenuProps) {
               left: 0,
               bottom: 0,
               width: 280,
-              background: "var(--color-panel-solid)",
+              background: "rgba(10, 10, 10, 0.82)",
+              backdropFilter: "blur(20px) saturate(1.8)",
+              WebkitBackdropFilter: "blur(20px) saturate(1.8)",
               zIndex: 201,
               display: "flex",
               flexDirection: "column",
               overflow: "auto",
-              borderRight: "1px solid var(--gray-a5)",
+              borderRight: "1px solid rgba(255,255,255,0.08)",
             }}
           >
-            {/* User profile */}
-            <Flex align="center" gap="3" p="4" pb="3">
+            {/* User profile - same height as top menu */}
+            <Flex align="center" gap="3" px="4" style={{ height: 52, borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
               <div
                 style={{
-                  width: 40,
-                  height: 40,
+                  width: 30,
+                  height: 30,
                   borderRadius: "50%",
-                  background: "var(--accent-9)",
+                  border: "1.5px solid rgba(255,255,255,0.7)",
+                  background: "transparent",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  color: "white",
-                  fontWeight: 600,
-                  fontSize: 16,
+                  flexShrink: 0,
                 }}
               >
-                {(user?.username ?? "U").charAt(0).toUpperCase()}
+                <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="8" r="4"/>
+                  <path d="M20 21a8 8 0 1 0-16 0"/>
+                </svg>
               </div>
-              <Flex direction="column" gap="0">
+              <Flex align="center" gap="2">
                 <Text size="2" weight="bold">
                   {user?.username ?? "User"}
                 </Text>
-                {user?.is_admin && (
-                  <Badge size="1" color="amber" style={{ alignSelf: "flex-start" }}>
-                    Admin
-                  </Badge>
+                {user?.is_admin ? (
+                  <svg width={9} height={9} viewBox="0 0 24 24" fill="none" stroke="var(--blue-9)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                  </svg>
+                ) : (
+                  <svg width={12} height={12} viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.4)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="8" r="4"/>
+                    <path d="M20 21a8 8 0 1 0-16 0"/>
+                  </svg>
                 )}
               </Flex>
             </Flex>
@@ -203,20 +211,19 @@ export function DrawerMenu({ open, onClose }: DrawerMenuProps) {
             <Flex direction="column" gap="0" py="2" px="2" style={{ flex: 1 }}>
               <MenuLink to="/" icon={<FilmIcon />} label="Movies" onClose={onClose} />
               <MenuLink to="/tv" icon={<MonitorIcon />} label="TV Shows" onClose={onClose} />
-              <MenuLink to="/music-videos" icon={<VideoIcon />} label="Music Videos" onClose={onClose} />
               <MenuLink to="/music" icon={<NoteIcon />} label="Music" onClose={onClose} />
 
               <Separator size="4" my="2" />
 
-              <MenuLink to="/surround" icon={<SurroundIcon />} label="Surround Sound" onClose={onClose} />
               <MenuLink to="/favourites" icon={<StarFilledIcon />} label="Favourites" onClose={onClose} />
               <MenuLink to="/history" icon={<CounterClockwiseClockIcon />} label="History" onClose={onClose} />
 
               <Separator size="4" my="2" />
 
+              <MenuLink to="/surround" icon={<SurroundIcon />} label="Surround Sound" onClose={onClose} />
               <MenuLink to="/settings" icon={<GearIcon />} label="Settings" onClose={onClose} />
               {user?.is_admin && (
-                <MenuLink to="/admin" icon={<CodeIcon />} label="Admin" onClose={onClose} />
+                <MenuLink to="/admin" icon={<svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>} label="Admin" onClose={onClose} />
               )}
 
               <div

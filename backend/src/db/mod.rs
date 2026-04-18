@@ -3,6 +3,7 @@ pub mod favourites;
 pub mod history;
 pub mod metadata;
 pub mod migrations;
+pub mod playlists;
 pub mod settings;
 pub mod users;
 

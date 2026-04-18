@@ -106,6 +106,30 @@ const MIGRATIONS: &[&str] = &[
         created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_favourites_user ON favourites(user_id, content_type);",
+    // Migration 9: Create playlists and playlist_tracks tables
+    "CREATE TABLE IF NOT EXISTS playlists (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_playlists_user ON playlists(user_id);
+
+    CREATE TABLE IF NOT EXISTS playlist_tracks (
+        id TEXT PRIMARY KEY,
+        playlist_id TEXT NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+        info_hash TEXT NOT NULL,
+        file_index INTEGER NOT NULL DEFAULT 0,
+        title TEXT NOT NULL,
+        artist TEXT,
+        album TEXT,
+        duration_seconds INTEGER,
+        artwork_url TEXT,
+        position INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_playlist_tracks ON playlist_tracks(playlist_id, position);",
 ];
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

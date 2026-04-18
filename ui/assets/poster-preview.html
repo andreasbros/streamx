@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>StreamX Default Poster Preview</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #111113; display: flex; flex-direction: column; align-items: center; gap: 20px; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #ededed; padding: 20px 20px 40px; }
+  .poster { width: 1200px; max-width: 100%; height: 630px; position: relative; overflow: hidden; background: #06060e; border-radius: 12px; border: 1px solid #222; }
+  .logo { filter: drop-shadow(0 0 20px rgba(255,255,255,0.15)); }
+  .tagline { color: white; font-size: 42px; font-weight: 700; letter-spacing: 1px; white-space: nowrap; }
+
+  .panel { max-width: 1200px; width: 100%; margin-top: 0; background: #1a1a1f; border: 1px solid #2a2a30; border-radius: 10px; padding: 20px; }
+  .panel-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: #666; margin: 0 0 14px 0; }
+  .panel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  .param { display: flex; flex-direction: column; gap: 4px; }
+  .param-label { font-size: 11px; color: #888; display: flex; justify-content: space-between; }
+  .param-label span { color: #67e8f9; font-family: monospace; font-size: 11px; }
+  .param input[type=range] { width: 100%; height: 4px; -webkit-appearance: none; appearance: none; background: #333; border-radius: 2px; outline: none; }
+  .param input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #3b82f6; cursor: pointer; border: 2px solid #1a1a1f; }
+  .param input[type=checkbox] { accent-color: #3b82f6; width: 16px; height: 16px; }
+  .check-row { display: flex; align-items: center; gap: 8px; padding-top: 10px; }
+  .check-row label { font-size: 12px; color: #aaa; cursor: pointer; }
+
+  .btn-row { display: flex; gap: 10px; margin-top: 20px; justify-content: center; flex-wrap: wrap; }
+  .btn { padding: 8px 20px; border-radius: 6px; border: none; cursor: pointer; font-size: 13px; font-weight: 500; }
+  .btn-primary { background: #3b82f6; color: white; }
+  .btn-primary:hover { background: #2563eb; }
+  .btn-secondary { background: #2a2a30; color: #aaa; border: 1px solid #333; }
+  .btn-secondary:hover { background: #333; color: #ddd; }
+
+  #json-output { margin-top: 8px; width: 100%; background: #0d0d14; border: 1px solid #2a2a30; border-radius: 8px; padding: 14px 18px; color: #67e8f9; font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; cursor: pointer; position: relative; transition: border-color 0.2s; }
+  #json-output:hover { border-color: #3b82f6; }
+  #json-output::after { content: 'click to copy'; position: absolute; top: 8px; right: 12px; font-size: 10px; color: #444; }
+  @keyframes glowPulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 0.8; }
+  }
+</style>
+</head>
+<body>
+
+<div class="poster" id="poster">
+  <svg id="laser-svg" width="1200" height="630" viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <filter id="glow">
+        <feGaussianBlur stdDeviation="10" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+    <g id="laser-group"></g>
+    <g id="glow-group" filter="url(#glow)"></g>
+  </svg>
+  <div id="frost" style="position:absolute;inset:0;"></div>
+  <svg class="logo" id="logo-el" style="position:absolute;left:50%;transform:translateX(-50%);" viewBox="0 0 935.43 935.43" xmlns="http://www.w3.org/2000/svg">
+    <g transform="translate(467.7,467.7) scale(1.25) translate(-467.7,-467.7)">
+      <path fill="#ffffff" fill-rule="evenodd" d="m467.64,424.99c-12.71,2.87-24.5,8.17-34.86,15.39h0s-.06-.03-.06-.03l-.06-.02-.06-.02-.06-.02-.06-.02-.13-.04-.06-.02-3.06-.89-.06-.02-.06-.02-.06-.02-.06-.02-.06-.02-.06-.02-.06-.02h-.01s-.29-.09-.29-.09l-3.67-1.09h-.02s-.02-.01-.02-.01h0c-5.26-1.58-10.39-3.19-15.39-4.86l-.2-.07-.05-.02-.05-.02-.05-.02-.05-.02-2.58-.87-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02h-.04s-.13-.05-.13-.05l-.23-.08-.05-.02-.05-.02-2.54-.88-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02-.05-.02-.84-.3-2.78-1-.95-.35h-.03s-2.35-.88-2.35-.88l-.07-.03-1.16-.44-.06-.02-2.25-.86-.06-.02-1.36-.53-2.06-.82-.1-.04-1.06-.43-.07-.03-.04-.02h-.04s-.04-.03-.04-.03l-.07-.03h-.04s-.04-.03-.04-.03l-1.64-.67-.04-.02-.07-.03-.04-.02h-.04s-.04-.03-.04-.03l-.04-.02h-.04s-.04-.03-.04-.03l-.04-.02h-.04s-.04-.03-.04-.03l-1.17-.49-1.9-.81-1.4-.6h-.02s-2.01-.89-2.01-.89h-.03s-1.39-.64-1.39-.64l-1.95-.89-.03-.02-1.05-.49-2.19-1.04-.83-.4-.05-.02-.04-.02c-49.08-24.01-76.17-59.66-65.87-125.94.77,47.73,30.72,82.91,84.73,107.75,0,0,.03,0,.05.02,22.07,10.15,48.15,18.57,77.9,25.41Z"/>
+      <path fill="#ffffff" fill-rule="evenodd" d="m288.22,343.35c-3.28,45.6,11.57,84.23,58.77,110.42-9.91,20.66-15.46,43.81-15.46,68.26,0,76.31,65.31,101.68,135.16,96.82h0c-43.9-10.35-76.58-49.77-76.58-96.82,0-27.46,11.14-52.33,29.14-70.33h0c-59.9-15.84-112.66-40.6-131.04-108.34Z"/>
+      <path fill="#ffffff" fill-rule="evenodd" d="m546.85,374.81c58.59,23.04,100.7,80.28,100.8,147.22.13,87.28-70.78,158.06-158.06,158.06-49.27,0-93.29-22.56-122.28-57.92,66.97,24.64,124.52,19.86,172.66-14.36h0c29.37-17.3,49.09-49.24,49.09-85.78,0-47.39-34.49-87.34-78.86-97.33,0-.12-.01-.24-.02-.36l-.23.31c-39.09-10.26-76.6-20.68-107.78-34.3h0c-59.76-26.1-96.21-63.96-75.74-134.99,31.81,64.52,135.23,87.25,220.5,119.34l-.08.11Z"/>
+      <polygon fill="#ffffff" fill-rule="evenodd" points="558.21 522.02 506.57 492.21 454.93 462.4 454.93 522.02 454.93 581.65 506.57 551.84 558.21 522.02"/>
+    </g>
+  </svg>
+  <div class="tagline" id="tagline-el" style="position:absolute;left:50%;transform:translateX(-50%);">Video Streaming Platform</div>
+</div>
+
+<div class="panel">
+  <div class="panel-title">Lasers</div>
+  <div class="panel-grid">
+    <div class="param"><div class="param-label">Count <span id="c-v"></span></div><input type="range" min="5" max="40" value="20" id="c" oninput="update()"></div>
+    <div class="param"><div class="param-label">Width <span id="w-v"></span></div><input type="range" min="1" max="15" value="5" id="w" oninput="update()"></div>
+    <div class="param"><div class="param-label">Spacing <span id="s-v"></span></div><input type="range" min="20" max="150" value="70" id="s" oninput="update()"></div>
+    <div class="param"><div class="param-label">Fade <span id="f-v"></span></div><input type="range" min="0" max="100" value="70" id="f" oninput="update()"></div>
+    <div class="param"><div class="param-label">Dash length <span id="d-v"></span></div><input type="range" min="20" max="300" value="80" id="d" oninput="update()"></div>
+    <div class="param"><div class="param-label">Gap <span id="g-v"></span></div><input type="range" min="0" max="300" value="120" id="g" oninput="update()"></div>
+    <div class="param"><div class="param-label">Speed <span id="sp-v"></span></div><input type="range" min="1" max="20" value="6" id="sp" oninput="update()"></div>
+    <div class="param"><div class="param-label">Seed <span id="sd-v"></span></div><input type="range" min="1" max="999" value="42" id="sd" oninput="update()"></div>
+    <div class="param"><div class="param-label">Length <span id="ll-v"></span></div><input type="range" min="20" max="200" value="100" id="ll" oninput="update()"></div>
+  </div>
+</div>
+
+<div style="display:flex;gap:20px;max-width:1200px;width:100%;">
+  <div class="panel" style="flex:1;margin-top:0;">
+    <div class="panel-title">Glow</div>
+    <div class="panel-grid">
+      <div class="param"><div class="param-label">Blur <span id="gb-v"></span></div><input type="range" min="0" max="30" value="10" id="gb" oninput="update()"></div>
+      <div class="param"><div class="param-label">Opacity <span id="go-v"></span></div><input type="range" min="0" max="100" value="60" id="go" oninput="update()"></div>
+      <div class="param"><div class="param-label">Pulse <span id="gp-v"></span></div><input type="range" min="0" max="10" value="4" id="gp" oninput="update()"></div>
+    </div>
+  </div>
+  <div class="panel" style="flex:1;margin-top:0;">
+    <div class="panel-title">Frost</div>
+    <div class="panel-grid">
+      <div class="param"><div class="param-label">Darkness <span id="fd-v"></span></div><input type="range" min="0" max="100" value="0" id="fd" oninput="update()"></div>
+      <div class="param"><div class="param-label">Blur <span id="fb-v"></span></div><input type="range" min="0" max="20" value="0" id="fb" oninput="update()"></div>
+    </div>
+  </div>
+  <div class="panel" style="flex:1.5;margin-top:0;">
+    <div class="panel-title">Logo &amp; Slogan</div>
+    <div style="display:flex;gap:16px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
+      <label style="font-size:12px;color:#aaa;display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="sl" checked onchange="update()" style="accent-color:#3b82f6;"> Logo</label>
+      <label style="font-size:12px;color:#aaa;display:flex;align-items:center;gap:5px;cursor:pointer;"><input type="checkbox" id="st" checked onchange="update()" style="accent-color:#3b82f6;"> Slogan</label>
+      <input type="text" id="stxt" value="Video Streaming Platform" oninput="update()" style="flex:1;min-width:150px;background:#111;border:1px solid #333;border-radius:4px;padding:5px 8px;color:#eee;font-size:12px;outline:none;">
+    </div>
+    <div class="panel-grid" style="grid-template-columns:repeat(4,1fr);">
+      <div class="param"><div class="param-label">Logo size <span id="ls-v"></span></div><input type="range" min="200" max="600" value="420" id="ls" oninput="update()"></div>
+      <div class="param"><div class="param-label">Logo Y <span id="ly-v"></span></div><input type="range" min="-100" max="100" value="-30" id="ly" oninput="update()"></div>
+      <div class="param"><div class="param-label">Slogan size <span id="ss-v"></span></div><input type="range" min="16" max="72" value="42" id="ss" oninput="update()"></div>
+      <div class="param"><div class="param-label">Slogan Y <span id="sy-v"></span></div><input type="range" min="-100" max="100" value="0" id="sy" oninput="update()"></div>
+    </div>
+  </div>
+</div>
+
+<div class="btn-row">
+  <button class="btn btn-primary" onclick="copyHash()">Copy URL</button>
+  <button class="btn btn-secondary" id="pause-btn" onclick="togglePause()">Pause</button>
+  <button class="btn btn-secondary" onclick="randomize()">Random</button>
+  <button class="btn btn-secondary" onclick="resetAll()">Reset</button>
+</div>
+
+<details style="max-width:1200px;width:100%;margin-top:16px;">
+  <summary style="cursor:pointer;color:#666;font-size:12px;text-transform:uppercase;letter-spacing:1.5px;padding:8px 0;">Config JSON</summary>
+  <div id="json-output" onclick="copyJson()"></div>
+</details>
+
+<script>
+// Seeded PRNG (mulberry32)
+function mulberry32(a) {
+  return function() {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+const RANGE_PARAMS = ['c','w','s','f','d','g','sp','sd','ll','gb','go','gp','fd','fb','ls','ly','ss','sy'];
+const DEFAULTS = {c:20,w:5,s:70,f:70,d:80,g:120,sp:6,sd:42,ll:100,gb:10,go:60,gp:4,fd:0,fb:0,ls:420,ly:-30,ss:42,sy:0,pa:0};
+const DEFAULT_SLOGAN = 'Video Streaming Platform';
+const colors = ['#3b82f6', '#8b5cf6', '#22d3ee'];
+
+function val(id) { return +document.getElementById(id).value; }
+let _paused = false;
+function paused() { return _paused; }
+function togglePause() {
+  _paused = !_paused;
+  document.getElementById('pause-btn').textContent = _paused ? 'Play' : 'Pause';
+  document.getElementById('laser-svg').style.animationPlayState = _paused ? 'paused' : 'running';
+  document.querySelectorAll('#laser-group line, #glow-group line, #glow-group').forEach(el => {
+    el.style.animationPlayState = _paused ? 'paused' : 'running';
+  });
+  saveToHash();
+  updateJson();
+}
+
+function loadFromHash() {
+  const hash = location.hash.slice(1);
+  if (!hash) return;
+  const pairs = hash.split('&');
+  for (const pair of pairs) {
+    const [k, v] = pair.split('=');
+    if (k === 'pa') { _paused = v === '1'; continue; }
+    if (k === 'sl') { document.getElementById('sl').checked = v === '1'; continue; }
+    if (k === 'st') { document.getElementById('st').checked = v === '1'; continue; }
+    if (k === 'stxt') { document.getElementById('stxt').value = decodeURIComponent(v); continue; }
+    const el = document.getElementById(k);
+    if (el) el.value = v;
+  }
+}
+
+function saveToHash() {
+  const parts = RANGE_PARAMS.map(id => `${id}=${val(id)}`);
+  parts.push(`pa=${paused() ? 1 : 0}`);
+  parts.push(`sl=${document.getElementById('sl').checked ? 1 : 0}`);
+  parts.push(`st=${document.getElementById('st').checked ? 1 : 0}`);
+  parts.push(`stxt=${encodeURIComponent(document.getElementById('stxt').value.trim())}`);
+  history.replaceState(null, '', '#' + parts.join('&'));
+}
+
+function showValues() {
+  for (const id of RANGE_PARAMS) {
+    const span = document.getElementById(id + '-v');
+    if (span) span.textContent = val(id);
+  }
+  updateJson();
+}
+
+function getConfig() {
+  return {
+    lasers: { count: val('c'), width: val('w'), spacing: val('s'), fade: val('f'), dash: val('d'), gap: val('g'), speed: val('sp'), seed: val('sd'), length: val('ll'), paused: paused() },
+    glow: { blur: val('gb'), opacity: val('go'), pulse: val('gp') },
+    frost: { darkness: val('fd'), blur: val('fb') },
+    logo: { size: val('ls'), y: val('ly'), show: document.getElementById('sl').checked },
+    slogan: { text: document.getElementById('stxt').value, size: val('ss'), y: val('sy'), show: document.getElementById('st').checked },
+    colors: ['#3b82f6', '#8b5cf6', '#22d3ee'],
+  };
+}
+
+function updateJson() {
+  const el = document.getElementById('json-output');
+  el.textContent = JSON.stringify(getConfig(), null, 2);
+}
+
+function copyJson() {
+  const text = JSON.stringify(getConfig(), null, 2);
+  navigator.clipboard.writeText(text).catch(() => {
+    const ta = document.createElement('textarea'); ta.value = text;
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+  });
+  const el = document.getElementById('json-output');
+  el.style.borderColor = '#22d3ee';
+  setTimeout(() => el.style.borderColor = '#333', 1000);
+}
+
+function rand(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function randomize() {
+  document.getElementById('c').value = rand(8, 30);
+  document.getElementById('w').value = rand(2, 10);
+  document.getElementById('s').value = rand(30, 120);
+  document.getElementById('f').value = rand(30, 90);
+  document.getElementById('d').value = rand(30, 200);
+  document.getElementById('g').value = rand(40, 200);
+  document.getElementById('sp').value = rand(2, 12);
+  document.getElementById('sd').value = rand(1, 999);
+  document.getElementById('ll').value = rand(50, 150);
+  document.getElementById('gb').value = rand(3, 20);
+  document.getElementById('go').value = rand(30, 80);
+  document.getElementById('gp').value = rand(0, 8);
+  update();
+}
+
+function resetAll() {
+  for (const [k, v] of Object.entries(DEFAULTS)) {
+    if (k === 'pa') { _paused = false; continue; }
+    document.getElementById(k).value = v;
+  }
+  document.getElementById('sl').checked = true;
+  document.getElementById('st').checked = true;
+  document.getElementById('stxt').value = DEFAULT_SLOGAN;
+  document.getElementById('pause-btn').textContent = 'Pause';
+  location.hash = '';
+  update();
+}
+
+function update() {
+  saveToHash();
+  showValues();
+  rebuildLasers();
+  updateGlow();
+  updateFrost();
+  updateLogo();
+}
+
+function rebuildLasers() {
+  const count = val('c'), width = val('w'), spacing = val('s');
+  const fadeStr = val('f') / 100;
+  const dashLen = val('d'), gapLen = val('g');
+  const speed = val('sp'), seed = val('sd');
+
+  const W = 1200, H = 630;
+  const centerX = W / 2;
+  const rng = mulberry32(seed);
+
+  const laserGroup = document.getElementById('laser-group');
+  const glowGroup = document.getElementById('glow-group');
+  laserGroup.innerHTML = '';
+  glowGroup.innerHTML = '';
+
+  // Build offsets: center laser at 0, then +/- spacing, +/- 2*spacing, etc.
+  const offsets = [0];
+  for (let n = 1; offsets.length < count; n++) {
+    offsets.push(n * spacing);
+    if (offsets.length < count) offsets.push(-n * spacing);
+  }
+  offsets.sort((a, b) => a - b);
+
+  const maxDist = Math.max(...offsets.map(Math.abs)) || 1;
+
+  const lines = [];
+  for (let i = 0; i < offsets.length; i++) {
+    const offset = offsets[i];
+
+    // Seeded random per-line (consume from rng in fixed order)
+    const durJitter = rng() * 2 - 1;
+    const delay = rng() * 3;
+    const initialOffset = rng() * (dashLen + gapLen);
+    const lengthRand = 0.5 + rng() * 0.5; // 0.5 to 1.0 random multiplier
+
+    // Exact 45 degrees through poster center (600, 315)
+    // Offset perpendicular to the 45-degree line direction
+    // Perpendicular direction for 45deg (dx=1,dy=-1) is (dx=1,dy=1) normalized
+    const perpX = offset * 0.7071; // cos(45)
+    const perpY = offset * 0.7071; // sin(45)
+
+    const lengthScale = val('ll') / 100;
+    const halfLen = (H * lengthRand * lengthScale) / 2;
+
+    // Center point of this laser on the perpendicular offset from poster center
+    const cx = W / 2 + perpX;
+    const cy = H / 2 + perpY;
+
+    // 45 degree direction: dx=1, dy=-1 (bottom-left to top-right)
+    const x1 = cx - halfLen;
+    const y1 = cy + halfLen;
+    const x2 = cx + halfLen;
+    const y2 = cy - halfLen;
+
+    // Fade from center outward
+    const distFromCenter = Math.abs(offset) / maxDist;
+    const opacity = Math.max(0, 1 - distFromCenter * fadeStr);
+    if (opacity <= 0.02) continue;
+
+    const color = colors[Math.abs(i) % colors.length];
+
+    // Speed decreases going outward from center
+    const speedFactor = 1 + distFromCenter * 2; // center=1x, edge=3x duration (slower)
+
+    lines.push({ x1, y1, x2, y2, opacity, color, width, durJitter, delay: 0, initialOffset, index: i, speedFactor });
+  }
+
+  for (const l of lines) {
+    const dur = (speed * 0.5 + l.durJitter * 0.3) * l.speedFactor;
+
+    const makeLine = (parent, extraWidth) => {
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', l.x1);
+      line.setAttribute('y1', l.y1);
+      line.setAttribute('x2', l.x2);
+      line.setAttribute('y2', l.y2);
+      line.setAttribute('stroke', l.color);
+      line.setAttribute('stroke-width', l.width + extraWidth);
+      line.setAttribute('opacity', l.opacity.toFixed(3));
+      line.setAttribute('stroke-linecap', 'round');
+      if (gapLen > 0) {
+        line.setAttribute('stroke-dasharray', `${dashLen} ${gapLen}`);
+        // Initial offset phases each line differently within the cycle
+        const cycle = dashLen + gapLen;
+        line.setAttribute('stroke-dashoffset', Math.round(l.initialOffset % cycle));
+        if (!paused()) {
+          line.style.animation = `shoot ${dur.toFixed(2)}s linear ${l.delay.toFixed(2)}s infinite`;
+        }
+      }
+      parent.appendChild(line);
+    };
+
+    makeLine(laserGroup, 0);
+    makeLine(glowGroup, l.width * 1.5);
+  }
+
+  updateShootKeyframe();
+  window._lines = lines;
+  window._dashLen = dashLen;
+  window._gapLen = gapLen;
+}
+
+function updateGlow() {
+  document.querySelector('#glow feGaussianBlur').setAttribute('stdDeviation', val('gb'));
+  const glowG = document.getElementById('glow-group');
+  glowG.setAttribute('opacity', (val('go') / 100).toFixed(2));
+  const pulse = val('gp');
+  glowG.style.animation = pulse > 0 ? `glowPulse ${pulse}s ease-in-out infinite` : 'none';
+}
+
+function updateFrost() {
+  const frost = document.getElementById('frost');
+  frost.style.background = `rgba(6,6,14,${val('fd') / 100})`;
+  frost.style.backdropFilter = val('fb') > 0 ? `blur(${val('fb')}px)` : 'none';
+}
+
+function updateLogo() {
+  const logo = document.getElementById('logo-el');
+  const tagline = document.getElementById('tagline-el');
+  const logoSize = val('ls');
+  const logoY = val('ly');
+  logo.style.width = logoSize + 'px';
+  logo.style.height = logoSize + 'px';
+  // Center vertically + apply Y offset
+  logo.style.top = (315 - logoSize / 2 + logoY) + 'px';
+  logo.style.display = document.getElementById('sl').checked ? '' : 'none';
+  tagline.style.display = document.getElementById('st').checked ? '' : 'none';
+  tagline.textContent = document.getElementById('stxt').value;
+  tagline.style.fontSize = val('ss') + 'px';
+  // Position from bottom, adjusted by Y offset
+  tagline.style.bottom = (55 - val('sy')) + 'px';
+  tagline.style.top = 'auto';
+}
+
+function copyHash() {
+  const url = location.href;
+  navigator.clipboard.writeText(url).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = url;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  });
+  const btn = document.querySelector('.export');
+  btn.textContent = 'Copied!';
+  setTimeout(() => btn.textContent = 'Copy URL with settings', 2000);
+}
+
+// Dynamic keyframe - updated when dash/gap changes
+const style = document.createElement('style');
+function updateShootKeyframe() {
+  const cycle = val('d') + val('g');
+  style.textContent = `@keyframes shoot { 0% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: -${cycle}; } }`;
+}
+document.head.appendChild(style);
+
+// Init: load from hash, then render
+loadFromHash();
+update();
+if (_paused) togglePause(); // apply saved pause state
+</script>
+</body>
+</html>

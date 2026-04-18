@@ -421,15 +421,17 @@ function MovieTile({ group, onTrailer }: { group: SearchResultGroup; onTrailer?:
           style={{ position: "absolute", top: 6, right: 6 }}
         />
       </div>
-      <Text size="1" weight="medium" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", marginTop: 4, lineHeight: 1.3 }}>
-        {group.title}
-      </Text>
-      <Flex gap="1" align="center" mt="1">
-        {group.year && <Text size="1" color="gray">{group.year}</Text>}
-        {group.rating != null && group.rating > 0 && (
-          <Text size="1" color="amber">{"\u2605"}{group.rating.toFixed(1)}</Text>
-        )}
-      </Flex>
+      <div style={{ height: 48, marginTop: 4, overflow: "hidden" }}>
+        <Text size="1" weight="medium" style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", lineHeight: 1.3 }}>
+          {group.title}
+        </Text>
+        <Flex gap="1" align="center" mt="1">
+          {group.year && <Text size="1" color="gray">{group.year}</Text>}
+          {group.rating != null && group.rating > 0 && (
+            <Text size="1" color="amber">{"\u2605"}{group.rating.toFixed(1)}</Text>
+          )}
+        </Flex>
+      </div>
     </div>
   );
 }
@@ -542,6 +544,7 @@ function BrowseSection({
           gap: 12,
           overflowX: "auto",
           paddingBottom: 8,
+          minHeight: 230,
           WebkitOverflowScrolling: "touch",
           scrollbarWidth: "none",
         }}
@@ -572,7 +575,7 @@ const SEARCH_QUERY_KEY = "streamx_search_query";
 
 export function Search() {
   const navigate = useNavigate();
-  const { results, isLoading, error, search } = useSearch();
+  const { results, isLoading, isLoadingMore, error, hasMore, search, loadMore } = useSearch();
   const [query, setQuery] = useState(() => {
     return sessionStorage.getItem(SEARCH_QUERY_KEY) || "";
   });
@@ -602,7 +605,8 @@ export function Search() {
       const cached = sessionStorage.getItem(BROWSE_CACHE_KEY);
       if (cached) {
         const { data, ts } = JSON.parse(cached);
-        if (Date.now() - ts < BROWSE_CACHE_TTL) return data;
+        const hasContent = Object.values(data).some((arr: unknown) => Array.isArray(arr) && (arr as unknown[]).length > 0);
+        if (Date.now() - ts < BROWSE_CACHE_TTL && hasContent) return data;
       }
     } catch { /* ignore */ }
     return {};
@@ -629,7 +633,8 @@ export function Search() {
     if (saved && saved.trim() && !isMagnetLink(saved) && results.length === 0) {
       search(saved);
     }
-    if (Object.keys(browseData).length === 0) fetchBrowse();
+    const hasContent = Object.values(browseData).some((arr) => arr.length > 0);
+    if (!hasContent) fetchBrowse();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleClear = () => {
@@ -733,7 +738,7 @@ export function Search() {
       </Flex>
 
       {!query && (
-        <Flex direction="column" gap="5">
+        <Flex direction="column" gap="3">
           {browseSections.map((s) => (
             <BrowseSection
               key={s.category}
@@ -807,6 +812,13 @@ export function Search() {
               onPlayVariant={handlePlayVariant}
             />
           ))}
+          {hasMore && (
+            <Flex justify="center" py="3">
+              <Button variant="soft" size="2" onClick={loadMore} disabled={isLoadingMore}>
+                {isLoadingMore ? "Loading..." : "Load more"}
+              </Button>
+            </Flex>
+          )}
         </Flex>
       )}
 

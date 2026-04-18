@@ -13,6 +13,7 @@ import { useAuth } from "../hooks/useAuth";
 import { useAdminMonitor, useAdminLogs } from "../hooks/useAdminMonitor";
 import type { SystemStats, LogEntry } from "../hooks/useAdminMonitor";
 import { formatBytes, formatSpeed } from "../lib/utils";
+import { api } from "../api/client";
 
 function formatTimeAgo(iso: string): string {
   const d = new Date(iso);
@@ -205,6 +206,11 @@ function DownloadsCard({ stats }: { stats: SystemStats }) {
               </Text>
               <Button variant="ghost" size="1" onClick={() => navigate(`/player/${dl.stream_id}`)}>
                 <PlayIcon width={12} height={12} />
+              </Button>
+              <Button variant="ghost" size="1" color="red" onClick={() => {
+                api.deleteStream(dl.stream_id).catch(() => {});
+              }}>
+                <TrashIcon width={12} height={12} />
               </Button>
             </Flex>
             <Bar pct={dl.progress} color={dl.status === "complete" ? "var(--green-9)" : "var(--amber-9)"} />

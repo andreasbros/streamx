@@ -188,6 +188,19 @@ impl Database {
         Ok(entries)
     }
 
+    pub async fn reset_download(&self, info_hash: &str) -> Result<()> {
+        let conn = self.connection().lock().await;
+        conn.execute(
+            "UPDATE downloads SET status = 'initializing', progress = 0.0, \
+             partial_path = NULL, complete_path = NULL, \
+             updated_at = datetime('now') \
+             WHERE info_hash = ?1",
+            rusqlite::params![info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        Ok(())
+    }
+
     pub async fn delete_download(&self, info_hash: &str) -> Result<()> {
         let conn = self.connection().lock().await;
         conn.execute(

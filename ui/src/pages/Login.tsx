@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Box,
   Card,
@@ -10,21 +11,31 @@ import {
 } from "@radix-ui/themes";
 import { PersonIcon, LockClosedIcon } from "@radix-ui/react-icons";
 import { motion } from "framer-motion";
-import { NeonBackground } from "../components/NeonBackground";
+import { LaserBackground } from "../components/LaserBackground";
 import { useAuth } from "../hooks/useAuth";
+import { LOGO_URL } from "../assets";
 
 export function Login() {
   const { login, register } = useAuth();
-  const [tab, setTab] = useState<"login" | "register">("login");
+  const [searchParams] = useSearchParams();
+  const [tab, setTab] = useState<"login" | "register">(
+    searchParams.get("tab") === "register" ? "register" : "login"
+  );
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  // Speed: 1x default, 3x on typing/focus, 9x on submit
+  const speedMultiplier = submitting ? 9 : focused ? 3 : 1;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setLoading(true);
+    setSubmitting(true);
 
     try {
       if (tab === "login") {
@@ -34,6 +45,7 @@ export function Login() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed");
+      setSubmitting(false);
     } finally {
       setLoading(false);
     }
@@ -49,7 +61,8 @@ export function Login() {
         justifyContent: "center",
       }}
     >
-      <NeonBackground />
+      <LaserBackground speedMultiplier={speedMultiplier} />
+      <div style={{ position: "fixed", inset: 0, zIndex: 0, backdropFilter: "blur(7px)", background: "rgba(6,6,14,0)" }} />
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
@@ -65,12 +78,12 @@ export function Login() {
         >
           <Flex direction="column" gap="4">
             <Flex direction="column" align="center" gap="2">
-              <img src="/icons/logo.svg" alt="StreamX" width={48} height={48} />
+              <img src={LOGO_URL} alt="StreamX" width={144} height={144} />
               <Text size="6" weight="bold">
                 StreamX
               </Text>
               <Text size="2" color="gray">
-                Torrent video streaming
+                Video Streaming Platform
               </Text>
             </Flex>
 
@@ -93,6 +106,8 @@ export function Login() {
                   placeholder="Username"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
+                  onFocus={() => setFocused(true)}
+                  onBlur={() => setFocused(false)}
                   required
                 >
                   <TextField.Slot>
@@ -105,6 +120,8 @@ export function Login() {
                   placeholder="Password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
+                  onFocus={() => setFocused(true)}
+                  onBlur={() => setFocused(false)}
                   required
                 >
                   <TextField.Slot>
