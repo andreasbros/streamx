@@ -40,6 +40,7 @@
           vulkan-loader
           vulkan-headers
           shaderc
+          mesa                      # Mesa provides Vulkan ICDs (Intel/AMD/LVP)
           libxkbcommon
           wayland
           libx11
@@ -91,9 +92,10 @@
             pnpm
             nodejs_22
 
-            # Testing / graphics
+            # Testing / graphics / diagnostics
             playwright-driver.browsers
             imagemagick
+            vulkan-tools      # vulkaninfo, vkcube
           ]
           ++ commonBuildInputs
           ++ commonNativeBuildInputs;
@@ -106,6 +108,53 @@
             export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
             export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
           '' + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            # Runtime library path for GPUI + libmpv on Linux. Without this,
+            # Wayland/X11/Vulkan dlopen fails at app launch with errors like
+            # `NoWaylandLib` or `libvulkan.so.1: cannot open shared object`.
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [
+              pkgs.wayland
+              pkgs.libxkbcommon
+              pkgs.vulkan-loader
+              pkgs.mesa
+              pkgs.libxcb
+              pkgs.libx11
+              pkgs.libxcursor
+              pkgs.libxi
+              pkgs.libxrandr
+              pkgs.dbus
+              pkgs.libGL
+              pkgs.fontconfig
+              pkgs.freetype
+              pkgs.mpv-unwrapped
+              pkgs.ffmpeg-full
+            ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+            # Vulkan ICD discovery. We ship mesa from nix (buildInputs above)
+            # which provides ICDs + matching .so files in the nix store.
+            # Users can override with STREAMX_VK_ICD_OVERRIDE, e.g. to point
+            # at NVIDIA drivers on the host.
+            if [ -n "''${STREAMX_VK_ICD_OVERRIDE:-}" ]; then
+              export VK_DRIVER_FILES="$STREAMX_VK_ICD_OVERRIDE"
+              export VK_ICD_FILENAMES="$STREAMX_VK_ICD_OVERRIDE"
+            else
+              __sxicd=""
+              for d in \
+                "${pkgs.mesa}/share/vulkan/icd.d" \
+                /run/opengl-driver/share/vulkan/icd.d; do
+                if [ -d "$d" ]; then
+                  for f in "$d"/*.json; do
+                    [ -f "$f" ] || continue
+                    if [ -z "$__sxicd" ]; then __sxicd="$f"; else __sxicd="$__sxicd:$f"; fi
+                  done
+                fi
+              done
+              if [ -n "$__sxicd" ]; then
+                export VK_DRIVER_FILES="$__sxicd"
+                export VK_ICD_FILENAMES="$__sxicd"
+              fi
+              unset __sxicd
+            fi
+
             export LIBVA_DRIVERS_PATH="${pkgs.intel-media-driver}/lib/dri:${pkgs.libva}/lib/dri''${LIBVA_DRIVERS_PATH:+:$LIBVA_DRIVERS_PATH}"
             export LIBVA_DRIVER_NAME=iHD
           '' + ''
