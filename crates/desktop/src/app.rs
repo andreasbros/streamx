@@ -6,10 +6,14 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, img, px, App, AppContext, Context, CursorStyle, Entity, FocusHandle, Focusable,
+    div, img, px, App, AppContext, Context, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ObjectFit, ParentElement, Render,
-    ResizeEdge, SharedString, StatefulInteractiveElement, Styled, StyledImage, Window,
+    SharedString, StatefulInteractiveElement, Styled, StyledImage, Window,
 };
+// Resize borders + invisible edge strips only exist on Linux (client-side
+// decorations). Keep the imports scoped to that cfg so Darwin stays warning-free.
+#[cfg(target_os = "linux")]
+use gpui::{CursorStyle, ResizeEdge};
 use parking_lot::Mutex;
 use streamx_api::client::Client;
 

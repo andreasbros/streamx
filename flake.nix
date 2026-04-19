@@ -32,9 +32,13 @@
           ffmpeg-full
           mpv-unwrapped              # libmpv for future desktop video playback
         ] ++ lib.optionals stdenv.isDarwin [
-          apple-sdk_15
+          # Do NOT pin apple-sdk_15 here: nixpkgs stdenv already ships
+          # its own pinned apple-sdk and the cc wrapper will complain
+          # about "conflicting DEVELOPER_DIR" if we add another one.
+          # Legacy stubs like darwin.libobjc and
+          # darwin.apple_sdk.frameworks.* were removed in nixpkgs — see
+          # https://nixos.org/manual/nixpkgs/stable/#sec-darwin-legacy-frameworks
           libiconv
-          darwin.libobjc
         ] ++ lib.optionals stdenv.isLinux [
           # GPUI / graphics
           vulkan-loader
@@ -107,6 +111,35 @@
             export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
             export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
             export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
+          '' + pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+            # Prefer Xcode toolchain over nix-bundled apple-sdk when Xcode
+            # is installed. GPUI's Metal shader compiler ("metal") lives
+            # only in Xcode, so DEVELOPER_DIR must point at it. Safe
+            # fallback: keep nix values if Xcode is absent.
+            if [ -d /Applications/Xcode.app ]; then
+              export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+              if sdkpath=$(xcrun --sdk macosx --show-sdk-path 2>/dev/null); then
+                export SDKROOT="$sdkpath"
+              fi
+            fi
+            # nixpkgs bundles a 2019-era xcbuild `xcrun` that cannot
+            # dispatch the modern Metal Toolchain (which moved to a
+            # cryptex mount in macOS 15). GPUI's build.rs invokes
+            # `xcrun metal`, so we need Apple's real xcrun first on
+            # PATH. /usr/bin is always Apple's stock binaries on macOS.
+            if [ -x /usr/bin/xcrun ]; then
+              export PATH="/usr/bin:$PATH"
+            fi
+            # Belt and braces: also put the Metal Toolchain itself
+            # directly on PATH so a bare `metal` invocation works, and
+            # any future xcrun lookup that happens to point there
+            # resolves correctly.
+            for d in /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain*/Metal.xctoolchain/usr/bin; do
+              if [ -d "$d" ]; then
+                export PATH="$d:$PATH"
+                break
+              fi
+            done
           '' + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
             # Runtime library path for GPUI + libmpv on Linux. Without this,
             # Wayland/X11/Vulkan dlopen fails at app launch with errors like
