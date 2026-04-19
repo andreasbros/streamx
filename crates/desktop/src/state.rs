@@ -206,10 +206,18 @@ impl AppState {
         })
     }
 
+    /// Write to a file under `config_dir`, making sure the directory
+    /// exists first. Silent on failure — persistence is best-effort.
+    fn persist(&self, name: &str, value: &str) {
+        let _ = std::fs::create_dir_all(&self.config_dir);
+        let _ = std::fs::write(self.config_dir.join(name), value);
+    }
+
     pub fn set_token(&self, token: Option<String>) {
         let path = self.config_dir.join("token");
         match &token {
             Some(t) => {
+                let _ = std::fs::create_dir_all(&self.config_dir);
                 let _ = std::fs::write(&path, t);
             }
             None => {
@@ -221,12 +229,12 @@ impl AppState {
     }
 
     pub fn set_mode(&self, mode: Mode) {
-        let _ = std::fs::write(self.config_dir.join("mode"), mode.as_str());
+        self.persist("mode", mode.as_str());
         *self.mode.write() = mode;
     }
 
     pub fn set_server_url(&self, url: String) {
-        let _ = std::fs::write(self.config_dir.join("server_url"), &url);
+        self.persist("server_url", &url);
         *self.server_url.write() = url.clone();
         *self.client.write() = {
             let mut c = Client::new(url);

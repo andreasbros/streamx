@@ -421,6 +421,16 @@ pub fn load_config(cli: &Cli) -> Result<AppConfig> {
         None => default_data_dir()?,
     };
 
+    if data_dir.exists() && !data_dir.is_dir() {
+        return Err(Error::Config {
+            message: format!(
+                "{} exists but is not a directory. Move or remove it \
+                 (e.g. `mv {0} {0}.bak`) and restart.",
+                data_dir.display()
+            ),
+        });
+    }
+
     std::fs::create_dir_all(&data_dir).context(error::IoSnafu)?;
 
     let config_path = match &cli.config {
