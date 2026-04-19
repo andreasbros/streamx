@@ -89,6 +89,11 @@ struct ActiveHandle {
 pub struct TorrentEngine {
     session: Arc<Session>,
     handles: Arc<RwLock<HashMap<String, ActiveHandle>>>,
+    /// Info-hashes currently being added via `spawn_add_torrent` so
+    /// repeated `ensure_active` calls during the librqbit handshake
+    /// don't spin up duplicate add tasks. Sync mutex so the non-async
+    /// `spawn_add_torrent` can insert/remove without `.await`.
+    pending_adds: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     db: Database,
     partial_dir: PathBuf,
     complete_dir: PathBuf,
@@ -152,6 +157,7 @@ impl TorrentEngine {
         let engine = Self {
             session,
             handles: Arc::new(RwLock::new(HashMap::new())),
+            pending_adds: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             db,
             partial_dir,
             complete_dir,
@@ -267,6 +273,15 @@ impl TorrentEngine {
                 return Ok(());
             }
         }
+        // Skip re-spawn while an add is in flight (librqbit handshake
+        // may take 30+ seconds; polling callers would otherwise kick
+        // off one task per poll).
+        {
+            let pending = self.pending_adds.lock().unwrap_or_else(|e| e.into_inner());
+            if pending.contains(info_hash) {
+                return Ok(());
+            }
+        }
 
         let dl = self
             .db
@@ -276,8 +291,25 @@ impl TorrentEngine {
                 message: format!("Download {info_hash} not found"),
             })?;
 
+        // "complete" in the DB might be a lie — the user may have
+        // cleared downloads/{complete,partial}/ or moved files. Verify
+        // the expected on-disk path exists before trusting the row;
+        // otherwise re-activate and let librqbit re-download.
         if dl.status == "complete" {
-            return Ok(());
+            let complete = self.complete_dir.join(&dl.title).join(&dl.file_name);
+            let flat = self.complete_dir.join(&dl.file_name);
+            if !dl.file_name.is_empty()
+                && (tokio::fs::metadata(&complete).await.is_ok()
+                    || tokio::fs::metadata(&flat).await.is_ok())
+            {
+                return Ok(());
+            }
+            tracing::warn!(
+                info_hash = %info_hash,
+                title = %dl.title,
+                "marked complete but file missing; re-activating torrent"
+            );
+            let _ = self.db.update_download_status(info_hash, "downloading").await;
         }
 
         self.spawn_add_torrent(
@@ -481,13 +513,35 @@ impl TorrentEngine {
     }
 
     fn spawn_add_torrent(&self, info_hash: String, magnet_uri: String, file_index: Option<usize>, download_all: bool) {
+        // Mark pending synchronously before returning so the next
+        // ensure_active caller sees it. If another caller already
+        // reserved it, skip — we're racing with them.
+        {
+            let mut pending = self.pending_adds.lock().unwrap_or_else(|e| e.into_inner());
+            if !pending.insert(info_hash.clone()) {
+                return;
+            }
+        }
+
         let session = self.session.clone();
         let handles = self.handles.clone();
+        let pending = self.pending_adds.clone();
         let db = self.db.clone();
         let partial_dir = self.partial_dir.clone();
         let complete_dir = self.complete_dir.clone();
+        let info_hash_for_cleanup = info_hash.clone();
 
         tokio::spawn(async move {
+            // Guard that removes the pending reservation on any exit
+            // path (success, error, panic).
+            struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
+            impl Drop for PendingGuard {
+                fn drop(&mut self) {
+                    let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+                    g.remove(&self.1);
+                }
+            }
+            let _pending_guard = PendingGuard(pending, info_hash_for_cleanup);
             // Adaptive timeout: start at 30s, double on each retry up to 3 attempts
             let _ = db.update_download_status(&info_hash, "initializing").await;
             let mut resp = None;

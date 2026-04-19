@@ -263,10 +263,24 @@ pub struct ResolveMagnetResponse {
 }
 }
 
+ts! {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StreamStatus {
+    pub id: String,
+    pub status: String,
+    pub progress: f32,
+    pub title: String,
+    pub file_name: String,
+    pub file_size: u64,
+    pub peers: u32,
+    pub speed_bps: f64,
+}
+}
+
 // ===================== Streams =====================
 
 ts! {
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateStreamRequest {
     pub magnet_uri: String,
     pub file_index: Option<usize>,

@@ -50,3 +50,21 @@ where
     });
     async move { rx.await.expect("tokio task was cancelled before sending") }
 }
+
+/// Block the current thread on a future running on the tokio runtime.
+/// Safe to call from GPUI's background threads (they are not tokio
+/// worker threads). Used by the AssetSource, whose `load` method is
+/// synchronous but needs to await an async fetch.
+pub fn block_on<F, T>(fut: F) -> T
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let handle = TOKIO_HANDLE.get().expect("runtime::init() not called").clone();
+    let (tx, rx) = std::sync::mpsc::channel::<T>();
+    handle.spawn(async move {
+        let v = fut.await;
+        let _ = tx.send(v);
+    });
+    rx.recv().expect("tokio task was cancelled before sending")
+}

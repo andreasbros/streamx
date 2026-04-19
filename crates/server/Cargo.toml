@@ -16,8 +16,9 @@ path = "src/main.rs"
 ts-export = ["streamx-api/ts-export", "dep:ts-rs"]
 
 [dependencies]
-streamx-api = { path = "../api" }
+streamx-api = { path = "../api", features = ["client"] }
 ts-rs = { version = "10", optional = true }
+async-trait = "0.1"
 
 axum = { version = "0.8", features = ["macros", "ws"] }
 axum-extra = { version = "0.10", features = ["typed-header"] }

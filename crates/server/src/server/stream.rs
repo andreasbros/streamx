@@ -668,38 +668,42 @@ pub async fn list_stream_files(
     let _ = state.torrent_engine.ensure_active(&id).await;
     let mut files = state.torrent_engine.list_torrent_files(&id).await?;
 
-    // For completed downloads with no active handle, scan disk
+    // For completed downloads with no active handle, scan disk.
+    // Only safe when we have a real torrent title — joining an empty
+    // title onto the base dir would scan every past download and
+    // return files from unrelated torrents.
     if files.is_empty() {
         if let Some(ref dl) = download {
-            let partial = state.torrent_engine.partial_dir();
-            let complete = state.torrent_engine.complete_dir();
-            for base in [complete, partial] {
-                let dir = base.join(&dl.title);
-                if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
-                    let mut idx = 0;
-                    while let Ok(Some(entry)) = entries.next_entry().await {
-                        let path = entry.file_name().to_string_lossy().to_string();
-                        if let Ok(meta) = entry.metadata().await {
-                            if meta.is_file() {
-                                files.push(TorrentFile {
-                                    index: idx,
-                                    path: path.clone(),
-                                    size: meta.len(),
-                                    is_video: TorrentFile::detect_video(&path),
-                                    is_audio: TorrentFile::detect_audio(&path),
-                                });
-                                idx += 1;
+            if !dl.title.trim().is_empty() {
+                let partial = state.torrent_engine.partial_dir();
+                let complete = state.torrent_engine.complete_dir();
+                for base in [complete, partial] {
+                    let dir = base.join(&dl.title);
+                    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+                        let mut idx = 0;
+                        while let Ok(Some(entry)) = entries.next_entry().await {
+                            let path = entry.file_name().to_string_lossy().to_string();
+                            if let Ok(meta) = entry.metadata().await {
+                                if meta.is_file() {
+                                    files.push(TorrentFile {
+                                        index: idx,
+                                        path: path.clone(),
+                                        size: meta.len(),
+                                        is_video: TorrentFile::detect_video(&path),
+                                        is_audio: TorrentFile::detect_audio(&path),
+                                    });
+                                    idx += 1;
+                                }
                             }
                         }
                     }
-                }
-                if !files.is_empty() {
-                    // Sort by filename for consistent ordering
-                    files.sort_by(|a, b| a.path.cmp(&b.path));
-                    for (i, f) in files.iter_mut().enumerate() {
-                        f.index = i;
+                    if !files.is_empty() {
+                        files.sort_by(|a, b| a.path.cmp(&b.path));
+                        for (i, f) in files.iter_mut().enumerate() {
+                            f.index = i;
+                        }
+                        break;
                     }
-                    break;
                 }
             }
         }

@@ -264,6 +264,35 @@ pub fn movie_page(state: &AppState, theme: &Theme) -> impl IntoElement {
         .into_any_element()
 }
 
+pub fn stub_page(theme: &Theme, title: &'static str, note: &'static str) -> impl IntoElement {
+    div()
+        .size_full()
+        .p(px(theme.space_5()))
+        .bg(theme.bg_app())
+        .flex()
+        .flex_col()
+        .gap(px(theme.space_2()))
+        .child(
+            div()
+                .text_size(px(theme.fs_1()))
+                .text_color(theme.fg_muted())
+                .child("← Esc to go back"),
+        )
+        .child(
+            div()
+                .text_size(px(theme.fs_6()))
+                .font_weight(FontWeight::BOLD)
+                .text_color(theme.fg_primary())
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(px(theme.fs_2()))
+                .text_color(theme.fg_secondary())
+                .child(note),
+        )
+}
+
 pub fn loading_page(theme: &Theme, text: impl Into<SharedString>) -> impl IntoElement {
     div()
         .size_full()

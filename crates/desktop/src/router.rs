@@ -1,21 +1,42 @@
-//! Minimal page stack router. See also `AppState::navigate` / `back`.
+//! Page stack router. See also `AppState::navigate` / `back`.
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Page {
     Login,
     Search,
-    Movie, // selected_movie held on AppState
+    Movie,
+    Player,
     Loading,
+    History,
+    Favourites,
+    Settings,
+    Admin,
+    MusicSearch,
+    MusicPlayer,
+    TvSearch,
+    TvShow,
+    MusicVideoSearch,
+    SurroundSound,
 }
 
-impl PartialEq for Page {
-    fn eq(&self, other: &Self) -> bool {
-        matches!(
-            (self, other),
-            (Self::Login, Self::Login)
-                | (Self::Search, Self::Search)
-                | (Self::Movie, Self::Movie)
-                | (Self::Loading, Self::Loading)
-        )
+impl Page {
+    pub fn title(self) -> &'static str {
+        match self {
+            Page::Login => "Sign in",
+            Page::Search => "Movies",
+            Page::Movie => "Movie",
+            Page::Player => "Player",
+            Page::Loading => "Loading",
+            Page::History => "History",
+            Page::Favourites => "Favourites",
+            Page::Settings => "Settings",
+            Page::Admin => "Admin",
+            Page::MusicSearch => "Music",
+            Page::MusicPlayer => "Now playing",
+            Page::TvSearch => "TV shows",
+            Page::TvShow => "Show",
+            Page::MusicVideoSearch => "Music videos",
+            Page::SurroundSound => "Surround sound",
+        }
     }
 }

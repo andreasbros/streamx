@@ -34,15 +34,15 @@ pub struct AppState {
     pub log_history: std::sync::Arc<crate::logging::LogHistory>,
 }
 
-pub fn build_router(
+pub fn build_state(
     db: Database,
     config: AppConfig,
-    torrent_engine: TorrentEngine,
-    search_provider: SearchProvider,
-    hls_pipeline: HlsManager,
+    torrent_engine: Arc<TorrentEngine>,
+    search_provider: Arc<SearchProvider>,
+    hls_pipeline: Arc<HlsManager>,
     log_tx: tokio::sync::broadcast::Sender<String>,
     log_history: std::sync::Arc<crate::logging::LogHistory>,
-) -> Router {
+) -> AppState {
     let jwt_secret = config.auth.jwt_secret.clone();
 
     let mut http_builder = reqwest::Client::builder()
@@ -56,20 +56,43 @@ pub fn build_router(
     }
     let http_client = http_builder.build().unwrap_or_default();
 
-    let state = AppState {
+    AppState {
         db,
         config: Arc::new(config),
         jwt_secret,
-        torrent_engine: Arc::new(torrent_engine),
-        search_provider: Arc::new(search_provider),
-        hls_pipeline: Arc::new(hls_pipeline),
+        torrent_engine,
+        search_provider,
+        hls_pipeline,
         rate_limiter: RateLimiter::new(),
         http_client,
         ws_connections: Arc::new(AtomicU32::new(0)),
         log_tx,
         log_history,
-    };
+    }
+}
 
+pub fn build_router(
+    db: Database,
+    config: AppConfig,
+    torrent_engine: TorrentEngine,
+    search_provider: SearchProvider,
+    hls_pipeline: HlsManager,
+    log_tx: tokio::sync::broadcast::Sender<String>,
+    log_history: std::sync::Arc<crate::logging::LogHistory>,
+) -> Router {
+    let state = build_state(
+        db,
+        config,
+        Arc::new(torrent_engine),
+        Arc::new(search_provider),
+        Arc::new(hls_pipeline),
+        log_tx,
+        log_history,
+    );
+    build_router_with_state(state)
+}
+
+pub fn build_router_with_state(state: AppState) -> Router {
     let auth_routes = Router::new()
         .route("/register", post(auth::register))
         .route("/login", post(auth::login))

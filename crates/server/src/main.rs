@@ -2,12 +2,10 @@ use clap::Parser;
 use std::net::SocketAddr;
 use streamx::cli;
 use streamx::config;
-use streamx::db;
 use streamx::error::{self, Result};
 use streamx::logging::BroadcastLayer;
+use streamx::runner;
 use streamx::server;
-use streamx::torrent;
-use streamx::transcode;
 use tracing::info;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -60,73 +58,17 @@ async fn main() -> Result<()> {
         "Starting StreamX"
     );
 
-    let db_dir = config.data_dir.join("db");
-    std::fs::create_dir_all(&db_dir).map_err(|e| error::Error::Config {
-        message: format!("Failed to create database directory: {e}"),
-    })?;
-    let db_path = db_dir.join("streamx.db");
-    let database = db::Database::open(&db_path)?;
-    database.init().await?;
-    info!("Database initialized");
-
-    if let (Some(admin_user), Some(admin_pass)) = (&config.admin_user, &config.admin_password) {
-        match database.find_user_by_username(admin_user).await? {
-            Some(_) => {
-                info!(username = %admin_user, "Admin user already exists, skipping creation");
-            }
-            None => {
-                let password_hash = server::auth::hash_password(admin_pass)?;
-                database.create_user(admin_user, &password_hash).await?;
-                info!(username = %admin_user, "Admin user created");
-            }
-        }
-    }
-
-    database.set_downloading_to_paused().await?;
-    info!("Reset in-flight downloads to paused state");
-
-    let socks5 = config.vpn.as_ref().map(|v| v.resolved_url());
-    if let Some(ref url) = socks5 {
-        // Log without credentials
-        let safe = if let Some(at) = url.find('@') {
-            let proto_end = url.find("://").unwrap_or(0) + 3;
-            format!("{}***@{}", &url[..proto_end], &url[at + 1..])
-        } else {
-            url.clone()
-        };
-        info!(proxy = %safe, "VPN SOCKS5 proxy configured");
-    }
-    let torrent_engine = torrent::TorrentEngine::create(
-        &config.torrent,
-        &config.data_dir,
-        database.clone(),
-        socks5.clone(),
-    )
-    .await?;
-    let search_provider = torrent::SearchProvider::new(config.providers.clone(), socks5);
-    let cache_dir = config.data_dir.join("cache");
-    let hls_pipeline = transcode::HlsManager::new(&config.transcode, cache_dir).await?;
-
     let bind_addr = config.server.bind.clone();
     let port = config.server.port;
     let open_browser = config.open_browser;
 
-    let app = server::build_router(
-        database,
-        config,
-        torrent_engine,
-        search_provider,
-        hls_pipeline,
-        log_tx,
-        log_history,
-    );
+    let components = runner::build_components(config, Some(log_tx), Some(log_history)).await?;
 
-    let addr: SocketAddr =
-        format!("{bind_addr}:{port}")
-            .parse()
-            .map_err(|_| error::Error::Config {
-                message: format!("Invalid bind address: {bind_addr}:{port}"),
-            })?;
+    let addr: SocketAddr = format!("{bind_addr}:{port}")
+        .parse()
+        .map_err(|_| error::Error::Config {
+            message: format!("Invalid bind address: {bind_addr}:{port}"),
+        })?;
 
     // Kill orphaned FFmpeg processes from previous server instances
     kill_orphaned_ffmpeg();
@@ -137,13 +79,6 @@ async fn main() -> Result<()> {
         let url = format!("http://{addr}");
         let _ = open_url(&url);
     }
-
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|source| error::Error::ServerBind {
-            address: addr.to_string(),
-            source,
-        })?;
 
     // Graceful shutdown: catch SIGTERM/SIGINT, kill FFmpeg children
     let shutdown = async {
@@ -160,6 +95,25 @@ async fn main() -> Result<()> {
         info!("Shutting down, killing FFmpeg children...");
         kill_all_streamx_ffmpeg();
     };
+
+    let config_for_state: streamx::config::AppConfig = (*components.config).clone();
+    let state = server::build_state(
+        components.database,
+        config_for_state,
+        components.torrent_engine,
+        components.search_provider,
+        components.hls_pipeline,
+        components.log_tx,
+        components.log_history,
+    );
+    let app = server::build_router_with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|source| error::Error::ServerBind {
+            address: addr.to_string(),
+            source,
+        })?;
 
     axum::serve(
         listener,

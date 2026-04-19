@@ -13,7 +13,7 @@ fn cache_key(url: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn ext_from_path(path: &str) -> &str {
+fn ext_from_path(path: &str) -> &'static str {
     if path.ends_with(".png") {
         "png"
     } else if path.ends_with(".webp") {
@@ -35,10 +35,69 @@ fn content_type_for(ext: &str) -> &str {
 }
 
 pub const CINEMETA_PROXY_ID: u32 = 0;
-const CINEMETA_IMAGE_BASE: &str = "https://images.metahub.space";
+pub const CINEMETA_IMAGE_BASE: &str = "https://images.metahub.space";
 
 fn img_cache_dir(state: &AppState) -> PathBuf {
     state.config.data_dir.join("cache").join("img")
+}
+
+/// Shared proxy fetch logic used by the HTTP handler and the desktop's
+/// in-process AssetSource. Returns `(bytes, extension)`. Serves from disk
+/// cache first, otherwise fetches upstream and caches.
+pub async fn fetch_proxy_bytes(
+    provider_id: u32,
+    path: &str,
+    http_client: &reqwest::Client,
+    data_dir: &std::path::Path,
+    providers: &[crate::config::ProviderConfig],
+) -> std::result::Result<(Vec<u8>, &'static str), Error> {
+    if path.contains("..") {
+        return Err(Error::BadRequest {
+            message: "Invalid path".to_string(),
+        });
+    }
+
+    let base_url = if provider_id == CINEMETA_PROXY_ID {
+        Some(CINEMETA_IMAGE_BASE.to_string())
+    } else {
+        providers.iter().find(|p| p.id == provider_id).map(|p| p.url.clone())
+    }
+    .ok_or_else(|| Error::NotFound {
+        message: "Unknown provider".to_string(),
+    })?;
+
+    let upstream_url = format!("{}/{}", base_url, path);
+    let ext = ext_from_path(path);
+    let key = cache_key(&upstream_url);
+    let cache_dir = data_dir.join("cache").join("img");
+    let cache_path = cache_dir.join(format!("{key}.{ext}"));
+
+    if cache_path.exists() {
+        let bytes = tokio::fs::read(&cache_path)
+            .await
+            .map_err(|e| Error::Io { source: e })?;
+        return Ok((bytes, ext));
+    }
+
+    let resp = http_client
+        .get(&upstream_url)
+        .send()
+        .await
+        .map_err(|_| Error::NotFound {
+            message: "Failed to fetch image".to_string(),
+        })?;
+    if !resp.status().is_success() {
+        return Err(Error::NotFound {
+            message: "Image not found upstream".to_string(),
+        });
+    }
+    let bytes = resp.bytes().await.map_err(|_| Error::Internal {
+        message: "Failed to read image bytes".to_string(),
+    })?;
+
+    let _ = tokio::fs::create_dir_all(&cache_dir).await;
+    let _ = tokio::fs::write(&cache_path, &bytes).await;
+    Ok((bytes.to_vec(), ext))
 }
 
 fn base_url_for_proxy(state: &AppState, provider_id: u32) -> Option<String> {
@@ -56,65 +115,14 @@ pub async fn proxy_image(
     State(state): State<AppState>,
     Path((provider_id, path)): Path<(u32, String)>,
 ) -> std::result::Result<impl IntoResponse, Error> {
-    let base_url = base_url_for_proxy(&state, provider_id).ok_or_else(|| Error::NotFound {
-        message: "Unknown provider".to_string(),
-    })?;
-
-    if path.contains("..") {
-        return Err(Error::BadRequest {
-            message: "Invalid path".to_string(),
-        });
-    }
-
-    let upstream_url = format!("{}/{}", base_url, path);
-    let ext = ext_from_path(&path);
-    let key = cache_key(&upstream_url);
-    let cache_dir = img_cache_dir(&state);
-    let cache_path = cache_dir.join(format!("{key}.{ext}"));
-
-    // Serve from disk cache
-    if cache_path.exists() {
-        let bytes = tokio::fs::read(&cache_path)
-            .await
-            .map_err(|e| Error::Io { source: e })?;
-        return Ok((
-            [
-                (
-                    axum::http::header::CONTENT_TYPE,
-                    content_type_for(ext).to_string(),
-                ),
-                (
-                    axum::http::header::CACHE_CONTROL,
-                    "public, max-age=31536000, immutable".to_string(),
-                ),
-            ],
-            bytes,
-        ));
-    }
-
-    // Fetch upstream
-    let resp = state
-        .http_client
-        .get(&upstream_url)
-        .send()
-        .await
-        .map_err(|_| Error::NotFound {
-            message: "Failed to fetch image".to_string(),
-        })?;
-
-    if !resp.status().is_success() {
-        return Err(Error::NotFound {
-            message: "Image not found upstream".to_string(),
-        });
-    }
-
-    let bytes = resp.bytes().await.map_err(|_| Error::Internal {
-        message: "Failed to read image bytes".to_string(),
-    })?;
-
-    let _ = tokio::fs::create_dir_all(&cache_dir).await;
-    let _ = tokio::fs::write(&cache_path, &bytes).await;
-
+    let (bytes, ext) = fetch_proxy_bytes(
+        provider_id,
+        &path,
+        &state.http_client,
+        &state.config.data_dir,
+        &state.config.providers,
+    )
+    .await?;
     Ok((
         [
             (
@@ -126,7 +134,7 @@ pub async fn proxy_image(
                 "public, max-age=31536000, immutable".to_string(),
             ),
         ],
-        bytes.to_vec(),
+        bytes,
     ))
 }
 

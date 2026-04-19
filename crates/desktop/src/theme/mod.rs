@@ -10,6 +10,22 @@ mod generated;
 pub use generated::*;
 
 use gpui::{Hsla, Rgba};
+use once_cell::sync::Lazy;
+
+/// Global UI scale. Multiplied into every font size + spacing value by
+/// the Theme. Default is 1.0; override with STREAMX_UI_SCALE env var
+/// (e.g. "1.25" for big 4K displays, "0.9" for cramped laptops).
+static UI_SCALE: Lazy<f32> = Lazy::new(|| {
+    std::env::var("STREAMX_UI_SCALE")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .map(|v| v.clamp(0.5, 3.0))
+        .unwrap_or(1.0)
+});
+
+pub fn ui_scale() -> f32 {
+    *UI_SCALE
+}
 
 /// Returns an opaque colour from a packed `0xRRGGBB`.
 pub fn rgb(value: u32) -> Rgba {
@@ -77,26 +93,37 @@ impl Theme {
     pub fn playing(&self) -> Rgba { rgb(COLOR_MEDIA_PLAYING) }
     pub fn trailer(&self) -> Rgba { rgb(COLOR_MEDIA_TRAILER) }
 
-    // --- spacing (px) ---
-    pub fn space_1(&self) -> f32 { SPACE_1 }
-    pub fn space_2(&self) -> f32 { SPACE_2 }
-    pub fn space_3(&self) -> f32 { SPACE_3 }
-    pub fn space_4(&self) -> f32 { SPACE_4 }
-    pub fn space_5(&self) -> f32 { SPACE_5 }
-    pub fn space_6(&self) -> f32 { SPACE_6 }
+    // --- spacing (px) — scaled by UI_SCALE ---
+    pub fn space_1(&self) -> f32 { SPACE_1 * ui_scale() }
+    pub fn space_2(&self) -> f32 { SPACE_2 * ui_scale() }
+    pub fn space_3(&self) -> f32 { SPACE_3 * ui_scale() }
+    pub fn space_4(&self) -> f32 { SPACE_4 * ui_scale() }
+    pub fn space_5(&self) -> f32 { SPACE_5 * ui_scale() }
+    pub fn space_6(&self) -> f32 { SPACE_6 * ui_scale() }
 
-    // --- radius ---
+    // --- radius (unchanged by scale — visual identity) ---
     pub fn radius_sm(&self) -> f32 { RADIUS_SM }
     pub fn radius_md(&self) -> f32 { RADIUS_MD }
     pub fn radius_lg(&self) -> f32 { RADIUS_LG }
     pub fn radius_xl(&self) -> f32 { RADIUS_XL }
 
-    // --- font size ---
-    pub fn fs_1(&self) -> f32 { FONT_SIZE_1 }
-    pub fn fs_2(&self) -> f32 { FONT_SIZE_2 }
-    pub fn fs_3(&self) -> f32 { FONT_SIZE_3 }
-    pub fn fs_5(&self) -> f32 { FONT_SIZE_5 }
-    pub fn fs_6(&self) -> f32 { FONT_SIZE_6 }
+    // --- font size — scaled by UI_SCALE ---
+    pub fn fs_1(&self) -> f32 { FONT_SIZE_1 * ui_scale() }
+    pub fn fs_2(&self) -> f32 { FONT_SIZE_2 * ui_scale() }
+    pub fn fs_3(&self) -> f32 { FONT_SIZE_3 * ui_scale() }
+    pub fn fs_5(&self) -> f32 { FONT_SIZE_5 * ui_scale() }
+    pub fn fs_6(&self) -> f32 { FONT_SIZE_6 * ui_scale() }
+
+    /// Frosted-glass background for text overlays on top of backdrop
+    /// images. GPUI lacks real backdrop-blur, so this is a dark
+    /// translucent rectangle that keeps text legible over any image.
+    pub fn frost(&self) -> Rgba {
+        rgba(0x000000, 0.55)
+    }
+
+    pub fn frost_subtle(&self) -> Rgba {
+        rgba(0x000000, 0.35)
+    }
 }
 
 impl Default for Theme {

@@ -2,7 +2,17 @@
 //! nocapsec pattern where each function returns `impl IntoElement`.
 
 use crate::theme::Theme;
-use gpui::{div, px, FontWeight, InteractiveElement, ParentElement, SharedString, Styled};
+use gpui::{
+    div, img, px, FontWeight, ImageSource, InteractiveElement, ObjectFit, ParentElement, Resource,
+    SharedString, Styled, StyledImage,
+};
+
+/// Movie poster tile dimensions. Sized for readability on desktop
+/// viewports (~1080p+). Keeps the classic 2:3 movie-poster aspect ratio.
+pub const TILE_POSTER_W: f32 = 180.0;
+pub const TILE_POSTER_H: f32 = 270.0;
+pub const TILE_TOTAL_W: f32 = 180.0;
+pub const TILE_TOTAL_H: f32 = 360.0;
 use streamx_api::types::SearchResultGroup;
 
 /// Flat card container. Call `.child(...)` on the returned div.
@@ -13,6 +23,18 @@ pub fn card(theme: &Theme) -> gpui::Div {
         .bg(theme.bg_surface())
         .border_1()
         .border_color(theme.border_subtle())
+}
+
+/// Frosted-glass card: semi-transparent dark background with a subtle
+/// border. Use on top of backdrop images so text stays legible.
+/// GPUI has no real backdrop-blur; the dark tint is the best we can do.
+pub fn frost_card(theme: &Theme) -> gpui::Div {
+    div()
+        .p(px(theme.space_4()))
+        .rounded(px(theme.radius_lg()))
+        .bg(theme.frost())
+        .border_1()
+        .border_color(theme.border_default())
 }
 
 /// Primary button. Click handling is up to the caller via `.on_click(...)`.
@@ -66,31 +88,75 @@ pub fn section_title(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div 
 }
 
 /// Movie tile (120x240). Renders a placeholder poster box + title + year/rating.
+/// The caller provides a globally unique id so identical (section, index)
+/// pairs across rows don't collide in GPUI's interaction routing.
 pub fn movie_tile(
     group: &SearchResultGroup,
     theme: &Theme,
-    idx: usize,
+    id: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
     let title: SharedString = group.title.clone().into();
-    let id = SharedString::from(format!("tile-{}", idx));
+    let id = id.into();
     let year = group.year.map(|y| y.to_string()).unwrap_or_default();
     let rating = group.rating.map(|r| format!("{:.1}", r)).unwrap_or_default();
 
-    // Placeholder for the poster (real image loading is a Phase 5 follow-up;
-    // GPUI needs an async image asset provider).
-    let poster_placeholder = div()
-        .w(px(120.0))
-        .h(px(180.0))
-        .rounded(px(theme.radius_md()))
-        .bg(theme.bg_panel())
-        .border_1()
-        .border_color(theme.border_subtle())
-        .flex()
-        .items_center()
-        .justify_center()
-        .text_size(px(theme.fs_6()))
-        .text_color(theme.fg_muted())
-        .child(div().child("▶"));
+    // Pick the best available poster URL. GPUI's `img()` accepts URLs
+    // and streams them over HTTP with its own cache.
+    let poster_url = group
+        .poster_medium
+        .as_ref()
+        .or(group.poster_large.as_ref())
+        .or(group.poster_small.as_ref())
+        .or(group.poster.as_ref())
+        .cloned();
+
+    // Tile sizing: classic 2:3 movie poster ratio, sized for readability
+    // on desktop viewports. The container below caps text height so the
+    // overall card stays a predictable aspect.
+    let poster_w = TILE_POSTER_W;
+    let poster_h = TILE_POSTER_H;
+    let poster_placeholder = match poster_url {
+        Some(url) => {
+            let fallback_bg = theme.bg_panel();
+            // GPUI's default `From<&str> for ImageSource` treats any
+            // hyper-parseable string as a URI (including relative paths
+            // like "/proxy/..."), which routes it to the HTTP loader
+            // and fails. For /proxy/ we construct the Embedded variant
+            // by hand so our AssetSource is consulted instead.
+            let source: ImageSource = if url.starts_with("/proxy/") {
+                ImageSource::Resource(Resource::Embedded(SharedString::from(url)))
+            } else {
+                ImageSource::from(SharedString::from(url))
+            };
+            div()
+                .w(px(poster_w))
+                .h(px(poster_h))
+                .rounded(px(theme.radius_md()))
+                .overflow_hidden()
+                .bg(fallback_bg)
+                .border_1()
+                .border_color(theme.border_subtle())
+                .child(
+                    img(source)
+                        .w(px(poster_w))
+                        .h(px(poster_h))
+                        .object_fit(ObjectFit::Cover),
+                )
+        }
+        None => div()
+            .w(px(poster_w))
+            .h(px(poster_h))
+            .rounded(px(theme.radius_md()))
+            .bg(theme.bg_panel())
+            .border_1()
+            .border_color(theme.border_subtle())
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(theme.fs_6()))
+            .text_color(theme.fg_muted())
+            .child(div().child("▶")),
+    };
 
     let meta_row = div()
         .flex()
@@ -114,8 +180,8 @@ pub fn movie_tile(
 
     div()
         .id(id)
-        .w(px(120.0))
-        .h(px(250.0))
+        .w(px(TILE_TOTAL_W))
+        .h(px(TILE_TOTAL_H))
         .flex()
         .flex_col()
         .gap(px(theme.space_1()))
@@ -165,7 +231,7 @@ pub fn browse_section(
         }
     } else {
         for (i, g) in groups.iter().enumerate() {
-            row = row.child(movie_tile(g, theme, i));
+            row = row.child(movie_tile(g, theme, format!("bs-{title}-{i}")));
         }
     }
 

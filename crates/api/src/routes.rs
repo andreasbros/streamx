@@ -13,6 +13,13 @@ pub const AUTH_REGISTER: &str = "/api/auth/register";
 /// `GET -> User` (requires auth)
 pub const AUTH_ME: &str = "/api/auth/me";
 
+pub const LOGIN: &str = AUTH_LOGIN;
+pub const REGISTER: &str = AUTH_REGISTER;
+pub const ME: &str = AUTH_ME;
+pub const SEARCH: &str = "/api/search";
+pub const BROWSE: &str = "/api/search/browse";
+pub const CREATE_STREAM: &str = "/api/stream";
+
 /// `GET /api/stream/{id}/files` -> `{ files: [TorrentFile], status }`
 pub fn stream_files(id: &str) -> String {
     format!("/api/stream/{id}/files")
