@@ -179,9 +179,43 @@ flake.nix              Nix flake (dev shell + builds)
 
 - **Port in use:** `ss -tlnp | grep 8999` and kill the process, or pass `--port`.
 - **Frontend not showing:** build the UI first (`cd web && pnpm install && pnpm build`), then restart the backend.
-- **Nix flake not found:** the flake file must be tracked by git (`git add flake.nix`).
 - **Safari HLS shows 401:** the stream token is not attached to segment requests. Open the debug pane (user menu → Debug Mode) and check the last `/api/stream/.../playlist.m3u8` response.
 - **Transcoding fails on GPU:** FFmpeg automatically falls back to CPU. Pass `--log-level debug` and watch the backend logs to see which acceleration was tried.
+- **Experimental Nix feature 'nix-command' is disabled:  add '--extra-experimental-features nix-command' to enable it:** the flake file must be tracked by git (`git add flake.nix`).
+  ```bash
+  mkdir -p ~/.config/nix
+  cat >> ~/.config/nix/nix.conf <<'EOF'                                                                                                                                                                                                                                                                                                                                                                                                                                             
+  experimental-features = nix-command flakes                                                                                                                                                                                                                                                                                                                                                                                                                                        
+  EOF
+  ```
+- **macOS desktop build fails with `tool 'metal' not found`:** GPUI's macOS renderer
+  compiles `shaders.metal` into a `.metallib` at build time via Apple's `metal` shader
+  compiler. That compiler ships only with the **full Xcode.app** — Command Line Tools
+  alone is not enough, and nixpkgs cannot redistribute it.
+
+  Verify:
+  ```bash
+  xcrun --find metal
+  # → xcrun: error: unable to find utility "metal"...
+  ```
+
+  Fix (once per machine, ~10 GB download):
+  1. Install Xcode.app from the Mac App Store.
+  2. Open it once so it installs additional components and accept the licence.
+  3. Point the active developer directory at Xcode instead of CLT:
+     ```bash
+     sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+     sudo xcodebuild -license accept
+     ```
+  4. Verify:
+     ```bash
+     xcrun --find metal
+     # → /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/metal
+     ```
+  5. From a fresh shell, re-run `nix develop --command cargo check -p streamx-desktop`.
+
+  The server (`streamx`) and the web UI build fine without Xcode — only the
+  `streamx-desktop` GPUI crate needs it.
 
 ## Tooling
 
