@@ -698,5 +698,6 @@ fn music_result(r: crate::torrent::provider::MusicVideoResult) -> WireMusic {
         leeches: r.leeches,
         size: r.size,
         detail_url: r.detail_url,
+        date: r.date,
     }
 }

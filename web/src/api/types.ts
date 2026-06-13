@@ -215,6 +215,7 @@ export interface MusicVideoResult {
   leeches: number;
   size: string;
   detail_url: string;
+  date?: string | null;
 }
 
 export interface MusicVideoSearchResponse {

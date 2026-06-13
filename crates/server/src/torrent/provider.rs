@@ -86,7 +86,6 @@ struct ApibayTorrent {
     seeders: String,
     leechers: String,
     size: String,
-    #[allow(dead_code)]
     added: String,
     #[allow(dead_code)]
     category: String,
@@ -1221,6 +1220,7 @@ impl SearchProvider {
                 })
                 .unwrap_or_default();
 
+            let date = extract_date_from_title(&title);
             results.push(MusicVideoResult {
                 title,
                 magnet: None,
@@ -1228,6 +1228,7 @@ impl SearchProvider {
                 leeches,
                 size,
                 detail_url,
+                date,
             });
         }
 
@@ -1451,6 +1452,13 @@ fn apibay_to_music_results(torrents: Vec<ApibayTorrent>) -> Vec<MusicVideoResult
         .map(|t| {
             let magnet = build_magnet(&t.info_hash, &t.name);
             let size_bytes: u64 = t.size.parse().unwrap_or(0);
+            let date = t
+                .added
+                .parse::<i64>()
+                .ok()
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .map(|dt| dt.format("%Y-%m-%d").to_string())
+                .or_else(|| extract_date_from_title(&t.name));
             MusicVideoResult {
                 title: t.name,
                 magnet: Some(magnet),
@@ -1458,9 +1466,64 @@ fn apibay_to_music_results(torrents: Vec<ApibayTorrent>) -> Vec<MusicVideoResult
                 leeches: t.leechers.parse().unwrap_or(0),
                 size: format_size(size_bytes),
                 detail_url: String::new(),
+                date,
             }
         })
         .collect()
+}
+
+/// Best-effort extraction of an ISO date from a torrent title.
+/// Tries `YYYY-MM-DD` / `YYYY.MM.DD`, falls back to a four-digit
+/// year (`(2024)` or whitespace-bounded `2024`) and assumes Jan 1.
+fn extract_date_from_title(title: &str) -> Option<String> {
+    let bytes = title.as_bytes();
+
+    // Look for a 4-digit year followed by month and day, separated
+    // by `.`, `-`, `/`, or `_`.
+    for i in 0..bytes.len().saturating_sub(9) {
+        let slice = &bytes[i..i + 10];
+        if slice[0..4].iter().all(|b| b.is_ascii_digit())
+            && (slice[4] == b'-' || slice[4] == b'.' || slice[4] == b'/' || slice[4] == b'_')
+            && slice[5..7].iter().all(|b| b.is_ascii_digit())
+            && slice[4] == slice[7]
+            && slice[8..10].iter().all(|b| b.is_ascii_digit())
+        {
+            let year: u32 = std::str::from_utf8(&slice[0..4]).ok()?.parse().ok()?;
+            let month: u32 = std::str::from_utf8(&slice[5..7]).ok()?.parse().ok()?;
+            let day: u32 = std::str::from_utf8(&slice[8..10]).ok()?.parse().ok()?;
+            if (1900..=2100).contains(&year)
+                && (1..=12).contains(&month)
+                && (1..=31).contains(&day)
+            {
+                return Some(format!("{year:04}-{month:02}-{day:02}"));
+            }
+        }
+    }
+
+    // Fallback: bare 4-digit year. Anchor on a non-digit boundary
+    // so we don't pick the first half of "20241108".
+    let mut prev_digit = false;
+    for i in 0..bytes.len().saturating_sub(3) {
+        let prev_ok = !prev_digit;
+        let curr_digit = bytes[i].is_ascii_digit();
+        prev_digit = curr_digit;
+        if !prev_ok || !curr_digit {
+            continue;
+        }
+        let next_non_digit = i + 4 == bytes.len() || !bytes[i + 4].is_ascii_digit();
+        if !next_non_digit {
+            continue;
+        }
+        if let Ok(year) = std::str::from_utf8(&bytes[i..i + 4])
+            .unwrap_or("")
+            .parse::<u32>()
+        {
+            if (1950..=2100).contains(&year) {
+                return Some(format!("{year:04}-01-01"));
+            }
+        }
+    }
+    None
 }
 
 fn format_size(bytes: u64) -> String {

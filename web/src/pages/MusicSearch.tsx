@@ -24,7 +24,24 @@ import { api } from "../api/client";
 import type { MusicVideoResult, TorrentFileInfo } from "../api/types";
 import type { AudioTrack } from "../hooks/useAudioPlayer";
 
-const ALBUM_CACHE_PREFIX = "streamx_album_";
+// v2: file_index semantics changed server-side from torrent-native
+// to alphabetical-sequential. Old cached file lists are invalid.
+const ALBUM_CACHE_PREFIX = "streamx_album_v2_";
+
+// One-shot housekeeping: drop stale v1 cache entries the first
+// time this module loads in a session.
+(() => {
+  try {
+    const stale: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("streamx_album_") && !k.startsWith(ALBUM_CACHE_PREFIX)) {
+        stale.push(k);
+      }
+    }
+    for (const k of stale) localStorage.removeItem(k);
+  } catch { /* ignore */ }
+})();
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
@@ -35,6 +52,12 @@ function formatBytes(bytes: number): string {
 function trackTitleFromPath(path: string): string {
   const name = path.split("/").pop() ?? path;
   return name.replace(/\.[^.]+$/, "").replace(/^\d+[\s._-]+/, "");
+}
+
+function formatBrowseDate(iso: string): string {
+  // Server hands us "YYYY-MM-DD" or "YYYY-01-01" when only year is known.
+  if (/^\d{4}-01-01$/.test(iso)) return iso.slice(0, 4);
+  return iso;
 }
 
 function cacheAlbumFiles(streamId: string, files: TorrentFileInfo[]) {
@@ -361,7 +384,17 @@ export function MusicSearch() {
     setExpandedAlbum(null);
   };
 
-  const displayResults = query ? results : browseResults;
+  // Browse view: sort newest-first by date when available.
+  const sortedBrowse = browseResults.slice().sort((a, b) => {
+    const da = a.date ?? "";
+    const db = b.date ?? "";
+    if (da && db) return db.localeCompare(da);
+    if (db) return 1;
+    if (da) return -1;
+    return 0;
+  });
+
+  const displayResults = query ? results : sortedBrowse;
   const displayLoading = query ? isLoading : browseLoading;
 
   const renderAlbumCard = (item: MusicVideoResult, i: number) => {
@@ -388,7 +421,12 @@ export function MusicSearch() {
             <Text size="2" weight="medium" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {item.title}
             </Text>
-            <Text size="1" color="gray">{item.size}</Text>
+            <Flex gap="2" align="center">
+              <Text size="1" color="gray">{item.size}</Text>
+              {item.date && (
+                <Badge size="1" variant="soft" color="gray">{formatBrowseDate(item.date)}</Badge>
+              )}
+            </Flex>
           </Flex>
           <Flex direction="column" align="end" gap="0" style={{ flexShrink: 0 }}>
             <Text size="1" color="green">{item.seeds}</Text>

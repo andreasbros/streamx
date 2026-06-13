@@ -246,6 +246,11 @@ pub struct MusicVideoResult {
     pub leeches: u32,
     pub size: String,
     pub detail_url: String,
+    /// Upload date in ISO `YYYY-MM-DD` form. apibay returns a unix
+    /// timestamp; the 1337x scraper falls back to a regex over the
+    /// torrent title (e.g. "... 2024-08-12 ...", "(2024)").
+    #[serde(default)]
+    pub date: Option<String>,
 }
 }
 

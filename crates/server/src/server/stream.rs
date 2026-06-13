@@ -664,55 +664,126 @@ pub async fn list_stream_files(
     let download = state.torrent_engine.get_download(&id).await?;
     let status = download.as_ref().map(|d| d.status.as_str()).unwrap_or("unknown");
 
-    // Try active torrent first
-    let _ = state.torrent_engine.ensure_active(&id).await;
-    let mut files = state.torrent_engine.list_torrent_files(&id).await?;
-
-    // For completed downloads with no active handle, scan disk.
-    // Only safe when we have a real torrent title — joining an empty
-    // title onto the base dir would scan every past download and
-    // return files from unrelated torrents.
-    if files.is_empty() {
-        if let Some(ref dl) = download {
-            if !dl.title.trim().is_empty() {
-                let partial = state.torrent_engine.partial_dir();
-                let complete = state.torrent_engine.complete_dir();
-                for base in [complete, partial] {
-                    let dir = base.join(&dl.title);
-                    if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
-                        let mut idx = 0;
-                        while let Ok(Some(entry)) = entries.next_entry().await {
-                            let path = entry.file_name().to_string_lossy().to_string();
-                            if let Ok(meta) = entry.metadata().await {
-                                if meta.is_file() {
-                                    files.push(TorrentFile {
-                                        index: idx,
-                                        path: path.clone(),
-                                        size: meta.len(),
-                                        is_video: TorrentFile::detect_video(&path),
-                                        is_audio: TorrentFile::detect_audio(&path),
-                                    });
-                                    idx += 1;
-                                }
-                            }
-                        }
-                    }
-                    if !files.is_empty() {
-                        files.sort_by(|a, b| a.path.cmp(&b.path));
-                        for (i, f) in files.iter_mut().enumerate() {
-                            f.index = i;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    let sorted = sorted_torrent_files(&state, &id, download.as_ref()).await;
+    let files: Vec<TorrentFile> = sorted
+        .into_iter()
+        .map(|s| TorrentFile {
+            index: s.seq_index,
+            path: s.path,
+            size: s.size,
+            is_video: s.is_video,
+            is_audio: s.is_audio,
+        })
+        .collect();
 
     Ok(axum::Json(serde_json::json!({ "files": files, "status": status })))
 }
 
+/// One file within a torrent, addressable by a stable alphabetical
+/// sequential index (`seq_index`). When the torrent is loaded in the
+/// engine, `native_index` is set to the per-torrent metadata index
+/// needed by `librqbit::api_stream`. When resolved via disk scan
+/// only, `native_index` is `None`.
+struct SortedFile {
+    seq_index: usize,
+    native_index: Option<usize>,
+    path: String,
+    size: u64,
+    is_video: bool,
+    is_audio: bool,
+}
+
+/// Build the canonical view of a torrent's files: alphabetical by
+/// path, sequentially indexed. This is the single source of truth
+/// for `file_index` semantics — the same listing that
+/// `list_stream_files` returns and that `resolve_file_disk_path` /
+/// `stream_file_by_index` / `stream_artwork` resolve against.
+async fn sorted_torrent_files(
+    state: &AppState,
+    info_hash: &str,
+    download: Option<&crate::db::downloads::Download>,
+) -> Vec<SortedFile> {
+    use crate::torrent::types::TorrentFile;
+
+    // Try active torrent first.
+    let _ = state.torrent_engine.ensure_active(info_hash).await;
+    let active = state
+        .torrent_engine
+        .list_torrent_files(info_hash)
+        .await
+        .unwrap_or_default();
+
+    if !active.is_empty() {
+        let mut files = active;
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        return files
+            .into_iter()
+            .enumerate()
+            .map(|(seq, f)| SortedFile {
+                seq_index: seq,
+                native_index: Some(f.index),
+                path: f.path,
+                size: f.size,
+                is_video: f.is_video,
+                is_audio: f.is_audio,
+            })
+            .collect();
+    }
+
+    // Fallback: completed download with no active handle. Scan disk.
+    // Only safe when we have a real torrent title — joining an empty
+    // title onto the base dir would scan every past download.
+    let dl = match download {
+        Some(d) if !d.title.trim().is_empty() => d,
+        _ => return Vec::new(),
+    };
+
+    let partial = state.torrent_engine.partial_dir();
+    let complete = state.torrent_engine.complete_dir();
+    let mut collected: Vec<TorrentFile> = Vec::new();
+    for base in [complete, partial] {
+        let dir = base.join(&dl.title);
+        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.file_name().to_string_lossy().to_string();
+                if let Ok(meta) = entry.metadata().await {
+                    if meta.is_file() {
+                        collected.push(TorrentFile {
+                            index: 0,
+                            path: path.clone(),
+                            size: meta.len(),
+                            is_video: TorrentFile::detect_video(&path),
+                            is_audio: TorrentFile::detect_audio(&path),
+                        });
+                    }
+                }
+            }
+        }
+        if !collected.is_empty() {
+            break;
+        }
+    }
+    collected.sort_by(|a, b| a.path.cmp(&b.path));
+    collected
+        .into_iter()
+        .enumerate()
+        .map(|(seq, f)| SortedFile {
+            seq_index: seq,
+            native_index: None,
+            path: f.path,
+            size: f.size,
+            is_video: f.is_video,
+            is_audio: f.is_audio,
+        })
+        .collect()
+}
+
 /// Stream a specific file within a multi-file torrent by index.
+///
+/// `file_index` here is the alphabetical sequential index produced
+/// by `list_stream_files` / `sorted_torrent_files` — not the
+/// torrent metadata's native index. We translate to the native
+/// index when streaming via `librqbit::api_stream`.
 pub async fn stream_file_by_index(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -726,77 +797,82 @@ pub async fn stream_file_by_index(
             message: format!("Stream {id} not found"),
         })?;
 
-    let _ = state.torrent_engine.ensure_active(&id).await;
+    let sorted = sorted_torrent_files(&state, &id, Some(&download)).await;
+    let entry = sorted.iter().find(|s| s.seq_index == file_index);
 
-    // Try streaming from active torrent (works while downloading)
-    if let Ok(Some((torrent_id, _))) = state
-        .torrent_engine
-        .get_stream_file_info_by_index(&id, file_index)
-        .await
-    {
-        let api = librqbit::Api::new(state.torrent_engine.session().clone(), None);
-        if let Ok(mut file_stream) =
-            api.api_stream(librqbit::api::TorrentIdOrHash::Id(torrent_id), file_index)
-        {
-            // Detect MIME from file list
-            let files = state.torrent_engine.list_torrent_files(&id).await.unwrap_or_default();
-            let stream_mime = files
-                .iter()
-                .find(|f| f.index == file_index)
-                .and_then(|f| f.path.rsplit('.').next())
-                .map(mime_for_extension)
-                .unwrap_or("application/octet-stream");
+    // Active path: stream pieces directly via librqbit using the
+    // native index.
+    if let Some(file) = entry {
+        if let Some(native_idx) = file.native_index {
+            if let Ok(Some((torrent_id, _))) = state
+                .torrent_engine
+                .get_stream_file_info_by_index(&id, native_idx)
+                .await
+            {
+                let api = librqbit::Api::new(state.torrent_engine.session().clone(), None);
+                if let Ok(mut file_stream) = api.api_stream(
+                    librqbit::api::TorrentIdOrHash::Id(torrent_id),
+                    native_idx,
+                ) {
+                    let stream_mime = file
+                        .path
+                        .rsplit('.')
+                        .next()
+                        .map(mime_for_extension)
+                        .unwrap_or("application/octet-stream");
 
-            let file_size = file_stream.len();
-            let range = headers
-                .get(header::RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| parse_range(s, file_size));
+                    let file_size = file_stream.len();
+                    let range = headers
+                        .get(header::RANGE)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| parse_range(s, file_size));
 
-            return match range {
-                Some((start, end)) => {
-                    file_stream
-                        .seek(std::io::SeekFrom::Start(start))
-                        .await
-                        .map_err(|e| Error::Io { source: e })?;
-                    let length = end - start + 1;
-                    let stream =
-                        tokio_util::io::ReaderStream::with_capacity(file_stream, 524288);
-                    let body = axum::body::Body::from_stream(stream);
-                    axum::response::Response::builder()
-                        .status(StatusCode::PARTIAL_CONTENT)
-                        .header(header::CONTENT_TYPE, stream_mime)
-                        .header(header::CONTENT_LENGTH, length.to_string())
-                        .header(
-                            header::CONTENT_RANGE,
-                            format!("bytes {start}-{end}/{file_size}"),
-                        )
-                        .header(header::ACCEPT_RANGES, "bytes")
-                        .body(body)
-                        .map_err(|e| Error::Internal {
-                            message: format!("{e}"),
-                        })
+                    return match range {
+                        Some((start, end)) => {
+                            file_stream
+                                .seek(std::io::SeekFrom::Start(start))
+                                .await
+                                .map_err(|e| Error::Io { source: e })?;
+                            let length = end - start + 1;
+                            let stream =
+                                tokio_util::io::ReaderStream::with_capacity(file_stream, 524288);
+                            let body = axum::body::Body::from_stream(stream);
+                            axum::response::Response::builder()
+                                .status(StatusCode::PARTIAL_CONTENT)
+                                .header(header::CONTENT_TYPE, stream_mime)
+                                .header(header::CONTENT_LENGTH, length.to_string())
+                                .header(
+                                    header::CONTENT_RANGE,
+                                    format!("bytes {start}-{end}/{file_size}"),
+                                )
+                                .header(header::ACCEPT_RANGES, "bytes")
+                                .body(body)
+                                .map_err(|e| Error::Internal {
+                                    message: format!("{e}"),
+                                })
+                        }
+                        None => {
+                            let stream =
+                                tokio_util::io::ReaderStream::with_capacity(file_stream, 524288);
+                            let body = axum::body::Body::from_stream(stream);
+                            axum::response::Response::builder()
+                                .status(StatusCode::OK)
+                                .header(header::CONTENT_TYPE, stream_mime)
+                                .header(header::CONTENT_LENGTH, file_size.to_string())
+                                .header(header::ACCEPT_RANGES, "bytes")
+                                .body(body)
+                                .map_err(|e| Error::Internal {
+                                    message: format!("{e}"),
+                                })
+                        }
+                    };
                 }
-                None => {
-                    let stream =
-                        tokio_util::io::ReaderStream::with_capacity(file_stream, 524288);
-                    let body = axum::body::Body::from_stream(stream);
-                    axum::response::Response::builder()
-                        .status(StatusCode::OK)
-                        .header(header::CONTENT_TYPE, stream_mime)
-                        .header(header::CONTENT_LENGTH, file_size.to_string())
-                        .header(header::ACCEPT_RANGES, "bytes")
-                        .body(body)
-                        .map_err(|e| Error::Internal {
-                            message: format!("{e}"),
-                        })
-                }
-            };
+            }
         }
     }
 
     // Fallback: resolve from disk (completed or partially downloaded)
-    if let Some(disk_path) = resolve_file_disk_path(&state.torrent_engine, &id, file_index).await {
+    if let Some(disk_path) = resolve_file_disk_path(&state, &id, file_index).await {
         return serve_file_from_disk(&headers, &disk_path).await;
     }
 
@@ -805,52 +881,33 @@ pub async fn stream_file_by_index(
     })
 }
 
-/// Resolve a file within a multi-file torrent to a disk path.
+/// Resolve a sequential `file_index` (from `list_stream_files`) to
+/// a disk path for the underlying file.
 async fn resolve_file_disk_path(
-    engine: &crate::torrent::TorrentEngine,
+    state: &AppState,
     info_hash: &str,
     file_index: usize,
 ) -> Option<std::path::PathBuf> {
-    let download = engine.get_download(info_hash).await.ok()??;
+    let download = state
+        .torrent_engine
+        .get_download(info_hash)
+        .await
+        .ok()??;
+    let sorted = sorted_torrent_files(state, info_hash, Some(&download)).await;
+    let file = sorted.iter().find(|s| s.seq_index == file_index)?;
 
-    // Try from active torrent metadata first
-    let files = engine.list_torrent_files(info_hash).await.ok().unwrap_or_default();
-    if let Some(file_info) = files.iter().find(|f| f.index == file_index) {
-        let partial = engine.partial_dir();
-        let complete = engine.complete_dir();
-        for base in [complete, partial] {
-            let nested = base.join(&download.title).join(&file_info.path);
-            if tokio::fs::metadata(&nested).await.is_ok() {
-                return Some(nested);
-            }
-            let flat = base.join(&file_info.path);
-            if tokio::fs::metadata(&flat).await.is_ok() {
-                return Some(flat);
-            }
-        }
-    }
-
-    // For completed downloads, scan disk directory by sorted index
-    let partial = engine.partial_dir();
-    let complete = engine.complete_dir();
+    let partial = state.torrent_engine.partial_dir();
+    let complete = state.torrent_engine.complete_dir();
     for base in [complete, partial] {
-        let dir = base.join(&download.title);
-        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
-            let mut paths = Vec::new();
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if let Ok(meta) = entry.metadata().await {
-                    if meta.is_file() {
-                        paths.push(entry.path());
-                    }
-                }
-            }
-            paths.sort();
-            if let Some(path) = paths.get(file_index) {
-                return Some(path.clone());
-            }
+        let nested = base.join(&download.title).join(&file.path);
+        if tokio::fs::metadata(&nested).await.is_ok() {
+            return Some(nested);
+        }
+        let flat = base.join(&file.path);
+        if tokio::fs::metadata(&flat).await.is_ok() {
+            return Some(flat);
         }
     }
-
     None
 }
 
@@ -859,9 +916,7 @@ pub async fn stream_artwork(
     State(state): State<AppState>,
     Path((id, file_index)): Path<(String, usize)>,
 ) -> std::result::Result<axum::response::Response, Error> {
-    let _ = state.torrent_engine.ensure_active(&id).await;
-
-    let disk_path = resolve_file_disk_path(&state.torrent_engine, &id, file_index).await;
+    let disk_path = resolve_file_disk_path(&state, &id, file_index).await;
     let path = match disk_path {
         Some(p) => p,
         None => {
