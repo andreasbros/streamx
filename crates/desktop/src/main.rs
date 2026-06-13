@@ -16,17 +16,20 @@
 
 use std::sync::{Arc, OnceLock};
 
+use gpui::{px, AppContext, Application, SharedString, WindowBounds, WindowKind, WindowOptions};
 use streamx_desktop::{
-    app::MainView, asset_source::LocalApiAssetSource, runtime,
+    app::MainView,
+    asset_source::LocalApiAssetSource,
+    runtime,
     state::{AppState, Mode},
 };
-use gpui::{px, AppContext, Application, SharedString, WindowBounds, WindowKind, WindowOptions};
 
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,streamx_desktop=debug,streamx=info")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("info,streamx_desktop=debug,streamx=info")
+            }),
         )
         .init();
 
@@ -88,10 +91,7 @@ fn main() {
     });
 }
 
-fn spawn_embedded(
-    state: &Arc<AppState>,
-    local_api_slot: Arc<OnceLock<Arc<streamx::LocalApi>>>,
-) {
+fn spawn_embedded(state: &Arc<AppState>, local_api_slot: Arc<OnceLock<Arc<streamx::LocalApi>>>) {
     let state = state.clone();
     let _ = runtime::spawn(async move {
         let cli = streamx::cli::Cli {
@@ -132,9 +132,18 @@ fn spawn_embedded(
 
         // Install the in-process backend for both the Client (API calls)
         // and the AssetSource (poster image fetches).
-        let local_api = Arc::new(streamx::LocalApi::new(components.clone(), loopback_url.clone()));
-        state.install_in_process_client(local_api.clone());
-        let _ = local_api_slot.set(local_api);
+        let local_api = Arc::new(streamx::LocalApi::new(
+            components.clone(),
+            loopback_url.clone(),
+        ));
+        // Fill the asset slot BEFORE installing the data client. Browse
+        // data only flows once the client is installed, and the first
+        // render that draws posters happens right after. If the slot
+        // were set second, an in-process browse fetch could return and
+        // render posters in the gap, caching blank images (GPUI never
+        // retries a failed asset load).
+        let _ = local_api_slot.set(local_api.clone());
+        state.install_in_process_client(local_api);
         tracing::info!(base_url = %loopback_url, "embedded server: in-process Api installed");
 
         // Start the HTTP listener for other clients (web UI, phone, etc.)

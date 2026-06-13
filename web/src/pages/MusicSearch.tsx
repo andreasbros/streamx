@@ -24,11 +24,13 @@ import { api } from "../api/client";
 import type { MusicVideoResult, TorrentFileInfo } from "../api/types";
 import type { AudioTrack } from "../hooks/useAudioPlayer";
 
-// v2: file_index semantics changed server-side from torrent-native
-// to alphabetical-sequential. Old cached file lists are invalid.
-const ALBUM_CACHE_PREFIX = "streamx_album_v2_";
+// v3: file_index is now backed by a stable server-side manifest
+// (alphabetical, includes non-audio files). Caches from v1/v2 could
+// hold indices computed from a disk scan that omitted files, so they
+// must be dropped.
+const ALBUM_CACHE_PREFIX = "streamx_album_v3_";
 
-// One-shot housekeeping: drop stale v1 cache entries the first
+// One-shot housekeeping: drop stale older cache entries the first
 // time this module loads in a session.
 (() => {
   try {

@@ -226,6 +226,7 @@ impl TorrentEngine {
             complete_path: None,
             created_at: now.clone(),
             updated_at: now,
+            files_json: None,
         };
         self.db.upsert_download(&dl).await?;
 
@@ -731,6 +732,44 @@ impl TorrentEngine {
                 )
                 .await;
 
+            // Persist the stable file manifest: alphabetical by path,
+            // sequentially indexed, keeping each file's native librqbit
+            // index. This is the single source of truth for per-file
+            // streaming and never shifts as files move on disk.
+            let manifest = handle.with_metadata(|meta| {
+                let mut files: Vec<crate::db::downloads::ManifestFile> = meta
+                    .file_infos
+                    .iter()
+                    .enumerate()
+                    .map(|(native_index, fi)| {
+                        let path = sanitize_filename(&fi.relative_filename.to_string_lossy());
+                        crate::db::downloads::ManifestFile {
+                            seq_index: 0,
+                            native_index,
+                            is_audio: TorrentFile::detect_audio(&path),
+                            is_video: TorrentFile::detect_video(&path),
+                            path,
+                            size: fi.len,
+                        }
+                    })
+                    .collect();
+                files.sort_by(|a, b| a.path.cmp(&b.path));
+                for (seq, f) in files.iter_mut().enumerate() {
+                    f.seq_index = seq;
+                }
+                files
+            });
+            if let Ok(files) = manifest {
+                if let Ok(json) = serde_json::to_string(&files) {
+                    let _ = db.update_download_files(&info_hash, &json).await;
+                    info!(
+                        info_hash = %info_hash,
+                        files = files.len(),
+                        "Persisted file manifest"
+                    );
+                }
+            }
+
             handles.write().await.insert(
                 info_hash.clone(),
                 ActiveHandle {
@@ -782,86 +821,103 @@ impl TorrentEngine {
 
                 info!(info_hash = %info_hash, "Download complete, moving to complete directory");
 
-                let move_result = handle.with_metadata(|meta| {
-                    let fi = match meta.file_infos.get(file_index) {
-                        Some(f) => f,
-                        None => return None,
-                    };
-                    let raw_rel = fi.relative_filename.to_string_lossy().to_string();
-                    let rel = sanitize_filename(&raw_rel);
+                // Build a move list for EVERY file in the torrent. For a
+                // single-file movie this is one entry; for an album it is
+                // every track. Moving only the primary file (the old
+                // behavior) left the rest stranded in partial/, which
+                // broke per-file streaming after completion.
+                let moves = handle.with_metadata(|meta| {
                     let raw_name = meta.name.as_deref().unwrap_or("");
                     let name = sanitize_filename(raw_name);
-
-                    // Find the actual source file (try nested then flat, using both raw and sanitized names)
-                    let src = if !raw_name.is_empty() {
-                        let nested_raw = partial_dir.join(raw_name).join(&raw_rel);
-                        let nested_san = partial_dir.join(&name).join(&rel);
-                        let flat_raw = partial_dir.join(&raw_rel);
-                        let flat_san = partial_dir.join(&rel);
-                        if nested_raw.exists() {
-                            nested_raw
-                        } else if nested_san.exists() {
-                            nested_san
-                        } else if flat_raw.exists() {
-                            flat_raw
-                        } else if flat_san.exists() {
-                            flat_san
-                        } else {
-                            nested_raw
-                        }
-                    } else {
-                        partial_dir.join(&rel)
-                    };
-                    let dst = complete_dir.join(&rel);
-                    Some((src, dst))
+                    meta.file_infos
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, fi)| {
+                            let raw_rel = fi.relative_filename.to_string_lossy().to_string();
+                            let rel = sanitize_filename(&raw_rel);
+                            // Try nested (raw/sanitized) then flat layouts.
+                            let src = if !raw_name.is_empty() {
+                                let candidates = [
+                                    partial_dir.join(raw_name).join(&raw_rel),
+                                    partial_dir.join(&name).join(&rel),
+                                    partial_dir.join(&raw_rel),
+                                    partial_dir.join(&rel),
+                                ];
+                                candidates
+                                    .iter()
+                                    .find(|p| p.exists())
+                                    .cloned()
+                                    .unwrap_or_else(|| partial_dir.join(raw_name).join(&raw_rel))
+                            } else {
+                                partial_dir.join(&rel)
+                            };
+                            (idx, src, complete_dir.join(&rel))
+                        })
+                        .collect::<Vec<_>>()
                 });
 
-                let (src, dst) = match move_result {
-                    Ok(Some(pair)) => pair,
+                let moves = match moves {
+                    Ok(m) if !m.is_empty() => m,
                     _ => {
                         let _ = db.update_download_status(&info_hash, "complete").await;
                         break;
                     }
                 };
 
-                if !src.exists() {
-                    let _ = db.update_download_status(&info_hash, "complete").await;
-                    break;
-                }
-
-                if let Some(parent) = dst.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-
-                let complete_path = dst.to_string_lossy().to_string();
-
-                if std::fs::rename(&src, &dst).is_ok() {
-                    info!(info_hash = %info_hash, path = %complete_path, "File moved to complete directory");
-                    let _ = db
-                        .update_download_paths(&info_hash, None, Some(&complete_path))
-                        .await;
-                } else {
-                    match std::fs::copy(&src, &dst) {
-                        Ok(_) => {
-                            let _ = std::fs::remove_file(&src);
-                            info!(info_hash = %info_hash, path = %complete_path, "File copied to complete directory");
-                            let _ = db
-                                .update_download_paths(&info_hash, None, Some(&complete_path))
-                                .await;
+                // complete_path/partial_path track the PRIMARY file only
+                // (movies rely on it; albums resolve per-file via the
+                // manifest + disk lookup, so the others need no row).
+                let mut resolved_complete: Option<String> = None;
+                let mut resolved_partial: Option<String> = None;
+                let mut moved = 0usize;
+                for (idx, src, dst) in &moves {
+                    let is_primary = *idx == file_index;
+                    if !src.exists() {
+                        if is_primary && dst.exists() {
+                            resolved_complete = Some(dst.to_string_lossy().to_string());
                         }
-                        Err(e) => {
-                            warn!(info_hash = %info_hash, "Failed to move file to complete: {e}");
-                            let _ = db
-                                .update_download_paths(
-                                    &info_hash,
-                                    Some(&src.to_string_lossy()),
-                                    None,
-                                )
-                                .await;
+                        continue;
+                    }
+                    if let Some(parent) = dst.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let moved_ok = if std::fs::rename(src, dst).is_ok() {
+                        true
+                    } else if std::fs::copy(src, dst).is_ok() {
+                        let _ = std::fs::remove_file(src);
+                        true
+                    } else {
+                        false
+                    };
+                    if moved_ok {
+                        moved += 1;
+                        if is_primary {
+                            resolved_complete = Some(dst.to_string_lossy().to_string());
+                        }
+                    } else {
+                        warn!(info_hash = %info_hash, src = %src.display(), "Failed to move file to complete");
+                        if is_primary {
+                            resolved_partial = Some(src.to_string_lossy().to_string());
                         }
                     }
                 }
 
+                info!(
+                    info_hash = %info_hash,
+                    moved,
+                    total = moves.len(),
+                    "Moved files to complete directory"
+                );
+
+                if resolved_complete.is_some() || resolved_partial.is_some() {
+                    let _ = db
+                        .update_download_paths(
+                            &info_hash,
+                            resolved_partial.as_deref(),
+                            resolved_complete.as_deref(),
+                        )
+                        .await;
+                }
                 let _ = db.update_download_status(&info_hash, "complete").await;
                 break;
             }

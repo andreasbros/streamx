@@ -22,12 +22,40 @@ pub struct Download {
     pub complete_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// JSON-encoded `Vec<ManifestFile>` (stable file list). `None`
+    /// until the torrent metadata has been read at least once.
+    pub files_json: Option<String>,
+}
+
+/// One file in a torrent, with a stable alphabetical `seq_index` used
+/// by the streaming API and the `native_index` librqbit needs to
+/// stream pieces. Persisted as JSON in `downloads.files_json` so the
+/// mapping survives restarts and never shifts when files move between
+/// the partial and complete directories.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestFile {
+    pub seq_index: usize,
+    pub native_index: usize,
+    pub path: String,
+    pub size: u64,
+    pub is_audio: bool,
+    pub is_video: bool,
+}
+
+impl Download {
+    /// Parse the persisted file manifest, if any.
+    pub fn manifest(&self) -> Option<Vec<ManifestFile>> {
+        let json = self.files_json.as_deref()?;
+        serde_json::from_str(json).ok()
+    }
 }
 
 impl Database {
     pub async fn upsert_download(&self, dl: &Download) -> Result<()> {
         let conn = self.connection().lock().await;
         conn.execute(
+            // files_json is intentionally not touched on conflict: it is
+            // owned by update_download_files and must survive re-adds.
             "INSERT INTO downloads (info_hash, magnet_uri, title, file_name, file_index, file_size, \
              status, progress, partial_path, complete_path, created_at, updated_at, download_all) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
@@ -60,7 +88,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT info_hash, magnet_uri, title, file_name, file_index, file_size, \
-                 status, progress, partial_path, complete_path, created_at, updated_at, download_all \
+                 status, progress, partial_path, complete_path, created_at, updated_at, download_all, files_json \
                  FROM downloads WHERE info_hash = ?1",
             )
             .context(error::DatabaseSnafu)?;
@@ -80,6 +108,7 @@ impl Database {
                 created_at: row.get(10)?,
                 updated_at: row.get(11)?,
                 download_all: row.get::<_, i64>(12)? != 0,
+                files_json: row.get(13)?,
             })
         });
 
@@ -145,6 +174,18 @@ impl Database {
         Ok(())
     }
 
+    /// Persist the stable file manifest (JSON `Vec<ManifestFile>`).
+    pub async fn update_download_files(&self, info_hash: &str, files_json: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connection().lock().await;
+        conn.execute(
+            "UPDATE downloads SET files_json = ?1, updated_at = ?2 WHERE info_hash = ?3",
+            rusqlite::params![files_json, now, info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        Ok(())
+    }
+
     pub async fn update_download_paths(
         &self,
         info_hash: &str,
@@ -166,7 +207,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT info_hash, magnet_uri, title, file_name, file_index, file_size, \
-                 status, progress, partial_path, complete_path, created_at, updated_at, download_all \
+                 status, progress, partial_path, complete_path, created_at, updated_at, download_all, files_json \
                  FROM downloads ORDER BY updated_at DESC",
             )
             .context(error::DatabaseSnafu)?;
@@ -187,6 +228,7 @@ impl Database {
                     created_at: row.get(10)?,
                     updated_at: row.get(11)?,
                     download_all: row.get::<_, i64>(12)? != 0,
+                    files_json: row.get(13)?,
                 })
             })
             .context(error::DatabaseSnafu)?

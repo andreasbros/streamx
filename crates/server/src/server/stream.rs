@@ -750,9 +750,30 @@ async fn sorted_torrent_files(
             .collect();
     }
 
-    // Fallback: completed download with no active handle. Scan disk.
-    // Only safe when we have a real torrent title — joining an empty
-    // title onto the base dir would scan every past download.
+    // Next: the persisted manifest. Stable across restarts and across
+    // files moving between partial/ and complete/, so the seq_index the
+    // UI cached always maps to the same file even before a re-added
+    // torrent's metadata is ready.
+    if let Some(manifest) = download.and_then(|d| d.manifest()) {
+        if !manifest.is_empty() {
+            return manifest
+                .into_iter()
+                .map(|m| SortedFile {
+                    seq_index: m.seq_index,
+                    native_index: Some(m.native_index),
+                    path: m.path,
+                    size: m.size,
+                    is_video: m.is_video,
+                    is_audio: m.is_audio,
+                })
+                .collect();
+        }
+    }
+
+    // Last resort: scan disk (legacy downloads with no manifest). Union
+    // both complete/ and partial/ so a download split across the two
+    // directories still yields the full, stably-ordered file set. Only
+    // safe with a real title — an empty title would scan every download.
     let dl = match download {
         Some(d) if !d.title.trim().is_empty() => d,
         _ => return Vec::new(),
@@ -760,7 +781,8 @@ async fn sorted_torrent_files(
 
     let partial = state.torrent_engine.partial_dir();
     let complete = state.torrent_engine.complete_dir();
-    let mut collected: Vec<TorrentFile> = Vec::new();
+    let mut by_path: std::collections::BTreeMap<String, TorrentFile> =
+        std::collections::BTreeMap::new();
     for base in [complete, partial] {
         let dir = base.join(&dl.title);
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
@@ -768,7 +790,7 @@ async fn sorted_torrent_files(
                 let path = entry.file_name().to_string_lossy().to_string();
                 if let Ok(meta) = entry.metadata().await {
                     if meta.is_file() {
-                        collected.push(TorrentFile {
+                        by_path.entry(path.clone()).or_insert_with(|| TorrentFile {
                             index: 0,
                             path: path.clone(),
                             size: meta.len(),
@@ -779,13 +801,9 @@ async fn sorted_torrent_files(
                 }
             }
         }
-        if !collected.is_empty() {
-            break;
-        }
     }
-    collected.sort_by(|a, b| a.path.cmp(&b.path));
-    collected
-        .into_iter()
+    by_path
+        .into_values()
         .enumerate()
         .map(|(seq, f)| SortedFile {
             seq_index: seq,

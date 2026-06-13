@@ -134,6 +134,12 @@ const MIGRATIONS: &[&str] = &[
     // so re-activation after a restart restores the full file set
     // instead of falling back to the single default file_index.
     "ALTER TABLE downloads ADD COLUMN download_all INTEGER NOT NULL DEFAULT 0;",
+    // Migration 11: Persist the torrent's file manifest (JSON array of
+    // {seq_index, native_index, path, size, is_audio, is_video}, sorted
+    // by path). This is the stable source of truth for per-file
+    // streaming, independent of what is currently on disk or whether
+    // the torrent is loaded in the session.
+    "ALTER TABLE downloads ADD COLUMN files_json TEXT;",
 ];
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {
