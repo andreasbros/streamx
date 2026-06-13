@@ -130,6 +130,10 @@ const MIGRATIONS: &[&str] = &[
         created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_playlist_tracks ON playlist_tracks(playlist_id, position);",
+    // Migration 10: Track whether a download selected all files (album)
+    // so re-activation after a restart restores the full file set
+    // instead of falling back to the single default file_index.
+    "ALTER TABLE downloads ADD COLUMN download_all INTEGER NOT NULL DEFAULT 0;",
 ];
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

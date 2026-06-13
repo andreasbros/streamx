@@ -12,6 +12,10 @@ pub struct Download {
     pub file_name: String,
     pub file_index: usize,
     pub file_size: u64,
+    /// All files in the torrent were selected for download (album).
+    /// Persisted so `ensure_active` can restore the full file set
+    /// after the torrent leaves the live session.
+    pub download_all: bool,
     pub status: String,
     pub progress: f64,
     pub partial_path: Option<String>,
@@ -25,11 +29,12 @@ impl Database {
         let conn = self.connection().lock().await;
         conn.execute(
             "INSERT INTO downloads (info_hash, magnet_uri, title, file_name, file_index, file_size, \
-             status, progress, partial_path, complete_path, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+             status, progress, partial_path, complete_path, created_at, updated_at, download_all) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
              ON CONFLICT(info_hash) DO UPDATE SET \
              magnet_uri = ?2, title = ?3, file_name = ?4, file_index = ?5, file_size = ?6, \
-             status = ?7, progress = ?8, partial_path = ?9, complete_path = ?10, updated_at = ?12",
+             status = ?7, progress = ?8, partial_path = ?9, complete_path = ?10, updated_at = ?12, \
+             download_all = ?13",
             rusqlite::params![
                 dl.info_hash,
                 dl.magnet_uri,
@@ -43,6 +48,7 @@ impl Database {
                 dl.complete_path,
                 dl.created_at,
                 dl.updated_at,
+                dl.download_all as i64,
             ],
         )
         .context(error::DatabaseSnafu)?;
@@ -54,7 +60,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT info_hash, magnet_uri, title, file_name, file_index, file_size, \
-                 status, progress, partial_path, complete_path, created_at, updated_at \
+                 status, progress, partial_path, complete_path, created_at, updated_at, download_all \
                  FROM downloads WHERE info_hash = ?1",
             )
             .context(error::DatabaseSnafu)?;
@@ -73,6 +79,7 @@ impl Database {
                 complete_path: row.get(9)?,
                 created_at: row.get(10)?,
                 updated_at: row.get(11)?,
+                download_all: row.get::<_, i64>(12)? != 0,
             })
         });
 
@@ -159,7 +166,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT info_hash, magnet_uri, title, file_name, file_index, file_size, \
-                 status, progress, partial_path, complete_path, created_at, updated_at \
+                 status, progress, partial_path, complete_path, created_at, updated_at, download_all \
                  FROM downloads ORDER BY updated_at DESC",
             )
             .context(error::DatabaseSnafu)?;
@@ -179,6 +186,7 @@ impl Database {
                     complete_path: row.get(9)?,
                     created_at: row.get(10)?,
                     updated_at: row.get(11)?,
+                    download_all: row.get::<_, i64>(12)? != 0,
                 })
             })
             .context(error::DatabaseSnafu)?

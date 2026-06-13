@@ -7,9 +7,9 @@ use axum::extract::{Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect};
 use bytes::Bytes;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use lofty::file::TaggedFileExt;
-use tracing::debug;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tracing::{debug, info};
 
 pub async fn stream_ws(
     State(state): State<AppState>,
@@ -166,7 +166,10 @@ pub async fn url_playlist(
     let url = params.get("url").ok_or_else(|| Error::BadRequest {
         message: "Missing 'url' parameter".to_string(),
     })?;
-    let quality = params.get("quality").map(|s| s.as_str()).unwrap_or("source");
+    let quality = params
+        .get("quality")
+        .map(|s| s.as_str())
+        .unwrap_or("source");
 
     // Use a hash of the URL as stream_id
     let stream_id = format!("url-{:x}", md5_hash(url));
@@ -179,10 +182,15 @@ pub async fn url_playlist(
         tracing::warn!(stream_id = %stream_id, "Failed to start URL transcode: {e}");
     }
 
-    let response = state.hls_pipeline.generate_playlist(&stream_id, quality).await?;
+    let response = state
+        .hls_pipeline
+        .generate_playlist(&stream_id, quality)
+        .await?;
 
     match response {
-        PlaylistResponse::Redirect(redir_url) => Ok(Redirect::temporary(&redir_url).into_response()),
+        PlaylistResponse::Redirect(redir_url) => {
+            Ok(Redirect::temporary(&redir_url).into_response())
+        }
         PlaylistResponse::Content(content) => Ok((
             [
                 (header::CONTENT_TYPE, "application/vnd.apple.mpegurl"),
@@ -207,7 +215,10 @@ pub async fn playlist(
     Path(id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> std::result::Result<axum::response::Response, Error> {
-    let quality = params.get("quality").map(|s| s.as_str()).unwrap_or("source");
+    let quality = params
+        .get("quality")
+        .map(|s| s.as_str())
+        .unwrap_or("source");
 
     let download = state
         .torrent_engine
@@ -277,10 +288,18 @@ pub async fn playlist(
                     {
                         tracing::warn!(stream_id = %id, "Failed to start piped HLS transcode: {e}");
                     }
-                } else if let Err(e) = state.hls_pipeline.start_stream(&id, probe_path, quality).await {
+                } else if let Err(e) = state
+                    .hls_pipeline
+                    .start_stream(&id, probe_path, quality)
+                    .await
+                {
                     tracing::warn!(stream_id = %id, "Failed to start HLS transcode (fallback): {e}");
                 }
-            } else if let Err(e) = state.hls_pipeline.start_stream(&id, probe_path, quality).await {
+            } else if let Err(e) = state
+                .hls_pipeline
+                .start_stream(&id, probe_path, quality)
+                .await
+            {
                 tracing::warn!(stream_id = %id, "Failed to start HLS transcode: {e}");
             }
         }
@@ -580,10 +599,11 @@ pub async fn stream_vlc(
     Path((id, token)): Path<(String, String)>,
 ) -> std::result::Result<axum::response::Response, Error> {
     // Validate token from path
-    let _claims = crate::server::auth::validate_jwt(&token, &state.jwt_secret)
-        .map_err(|_| Error::Unauthorized {
+    let _claims = crate::server::auth::validate_jwt(&token, &state.jwt_secret).map_err(|_| {
+        Error::Unauthorized {
             message: "Invalid token".to_string(),
-        })?;
+        }
+    })?;
 
     let download = state
         .torrent_engine
@@ -594,11 +614,7 @@ pub async fn stream_vlc(
         })?;
 
     let file_name = download.file_name.clone();
-    let ext = file_name
-        .rsplit('.')
-        .next()
-        .unwrap_or("mp4")
-        .to_lowercase();
+    let ext = file_name.rsplit('.').next().unwrap_or("mp4").to_lowercase();
     let content_type = mime_for_extension(&ext);
 
     match download.status.as_str() {
@@ -629,8 +645,7 @@ pub async fn stream_vlc(
                 if let Ok(file_stream) =
                     api.api_stream(librqbit::api::TorrentIdOrHash::Id(torrent_id), file_index)
                 {
-                    let stream =
-                        tokio_util::io::ReaderStream::with_capacity(file_stream, 524288);
+                    let stream = tokio_util::io::ReaderStream::with_capacity(file_stream, 524288);
                     let body = axum::body::Body::from_stream(stream);
                     // No Content-Length: VLC treats as live stream, waits for more data
                     return axum::response::Response::builder()
@@ -662,7 +677,10 @@ pub async fn list_stream_files(
     use crate::torrent::types::TorrentFile;
 
     let download = state.torrent_engine.get_download(&id).await?;
-    let status = download.as_ref().map(|d| d.status.as_str()).unwrap_or("unknown");
+    let status = download
+        .as_ref()
+        .map(|d| d.status.as_str())
+        .unwrap_or("unknown");
 
     let sorted = sorted_torrent_files(&state, &id, download.as_ref()).await;
     let files: Vec<TorrentFile> = sorted
@@ -676,7 +694,9 @@ pub async fn list_stream_files(
         })
         .collect();
 
-    Ok(axum::Json(serde_json::json!({ "files": files, "status": status })))
+    Ok(axum::Json(
+        serde_json::json!({ "files": files, "status": status }),
+    ))
 }
 
 /// One file within a torrent, addressable by a stable alphabetical
@@ -800,6 +820,16 @@ pub async fn stream_file_by_index(
     let sorted = sorted_torrent_files(&state, &id, Some(&download)).await;
     let entry = sorted.iter().find(|s| s.seq_index == file_index);
 
+    info!(
+        stream_id = %id,
+        file_index,
+        native_index = ?entry.and_then(|e| e.native_index),
+        path = ?entry.map(|e| e.path.as_str()),
+        total_files = sorted.len(),
+        download_all = download.download_all,
+        "stream_file_by_index: request"
+    );
+
     // Active path: stream pieces directly via librqbit using the
     // native index.
     if let Some(file) = entry {
@@ -809,11 +839,16 @@ pub async fn stream_file_by_index(
                 .get_stream_file_info_by_index(&id, native_idx)
                 .await
             {
-                let api = librqbit::Api::new(state.torrent_engine.session().clone(), None);
-                if let Ok(mut file_stream) = api.api_stream(
-                    librqbit::api::TorrentIdOrHash::Id(torrent_id),
+                info!(
+                    stream_id = %id,
+                    file_index,
                     native_idx,
-                ) {
+                    "stream_file_by_index: serving via active librqbit stream"
+                );
+                let api = librqbit::Api::new(state.torrent_engine.session().clone(), None);
+                if let Ok(mut file_stream) =
+                    api.api_stream(librqbit::api::TorrentIdOrHash::Id(torrent_id), native_idx)
+                {
                     let stream_mime = file
                         .path
                         .rsplit('.')
@@ -873,9 +908,20 @@ pub async fn stream_file_by_index(
 
     // Fallback: resolve from disk (completed or partially downloaded)
     if let Some(disk_path) = resolve_file_disk_path(&state, &id, file_index).await {
+        info!(
+            stream_id = %id,
+            file_index,
+            path = %disk_path.display(),
+            "stream_file_by_index: serving from disk"
+        );
         return serve_file_from_disk(&headers, &disk_path).await;
     }
 
+    info!(
+        stream_id = %id,
+        file_index,
+        "stream_file_by_index: not found (not active and not on disk)"
+    );
     Err(Error::NotFound {
         message: format!("File index {file_index} not found for stream {id}"),
     })
@@ -888,11 +934,7 @@ async fn resolve_file_disk_path(
     info_hash: &str,
     file_index: usize,
 ) -> Option<std::path::PathBuf> {
-    let download = state
-        .torrent_engine
-        .get_download(info_hash)
-        .await
-        .ok()??;
+    let download = state.torrent_engine.get_download(info_hash).await.ok()??;
     let sorted = sorted_torrent_files(state, info_hash, Some(&download)).await;
     let file = sorted.iter().find(|s| s.seq_index == file_index)?;
 

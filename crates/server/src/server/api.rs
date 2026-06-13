@@ -2,7 +2,7 @@ use crate::db::favourites::AddFavouriteRequest;
 use crate::db::metadata::MediaMetadata;
 use crate::db::playlists::AddTrackRequest;
 use crate::error::Error;
-use crate::server::auth::{AuthenticatedUser, create_guest_token};
+use crate::server::auth::{create_guest_token, AuthenticatedUser};
 use crate::server::proxy;
 use crate::server::AppState;
 use axum::extract::{Path, State};
@@ -10,9 +10,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 
-pub use streamx_api::types::{
-    CreateStreamRequest, SearchRequest, SearchResponse,
-};
+pub use streamx_api::types::{CreateStreamRequest, SearchRequest, SearchResponse};
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateHistoryRequest {
@@ -206,6 +204,13 @@ pub async fn create_music_stream(
 
     let download = state.torrent_engine.add_magnet_album(magnet_uri).await?;
 
+    tracing::info!(
+        stream_id = %download.info_hash,
+        status = %download.status,
+        download_all = download.download_all,
+        "create_music_stream: album stream requested"
+    );
+
     Ok(Json(serde_json::json!({
         "stream_id": download.info_hash,
         "status": download.status,
@@ -276,11 +281,17 @@ pub async fn delete_stream(
     Path(id): Path<String>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     // Admin only
-    let user = state.db.find_user_by_id(&claims.user_id).await?.ok_or_else(|| Error::Unauthorized {
-        message: "User not found".to_string(),
-    })?;
+    let user = state
+        .db
+        .find_user_by_id(&claims.user_id)
+        .await?
+        .ok_or_else(|| Error::Unauthorized {
+            message: "User not found".to_string(),
+        })?;
     if !user.is_admin {
-        return Err(Error::Unauthorized { message: "Admin access required".to_string() });
+        return Err(Error::Unauthorized {
+            message: "Admin access required".to_string(),
+        });
     }
 
     cleanup_stream(&state, &id).await?;
@@ -770,7 +781,10 @@ pub async fn create_playlist(
     AuthenticatedUser(claims): AuthenticatedUser,
     Json(body): Json<CreatePlaylistRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
-    let playlist = state.db.create_playlist(&claims.user_id, &body.name).await?;
+    let playlist = state
+        .db
+        .create_playlist(&claims.user_id, &body.name)
+        .await?;
     Ok(Json(playlist))
 }
 
@@ -793,7 +807,10 @@ pub async fn rename_playlist(
     Path(id): Path<String>,
     Json(body): Json<RenamePlaylistRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
-    state.db.rename_playlist(&id, &claims.user_id, &body.name).await?;
+    state
+        .db
+        .rename_playlist(&id, &claims.user_id, &body.name)
+        .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -831,6 +848,9 @@ pub async fn remove_playlist_track(
     Path((playlist_id, track_id)): Path<(String, String)>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     let _ = playlist_id; // validated by route
-    state.db.remove_playlist_track(&track_id, &claims.user_id).await?;
+    state
+        .db
+        .remove_playlist_track(&track_id, &claims.user_id)
+        .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

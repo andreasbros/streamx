@@ -60,7 +60,8 @@ fn sanitize_filename(raw: &str) -> String {
     let collapsed: String = result
         .chars()
         .filter(|&c| {
-            let dominated = (c == ' ' || c == '_' || c == '.') && (prev == ' ' || prev == '_' || prev == '.');
+            let dominated =
+                (c == ' ' || c == '_' || c == '.') && (prev == ' ' || prev == '_' || prev == '.');
             if !dominated || (c == '.' && prev != '.') {
                 prev = c;
                 true
@@ -177,10 +178,7 @@ impl TorrentEngine {
     }
 
     /// Add a magnet and download ALL files (for music albums).
-    pub async fn add_magnet_album(
-        &self,
-        magnet_uri: &str,
-    ) -> Result<Download> {
+    pub async fn add_magnet_album(&self, magnet_uri: &str) -> Result<Download> {
         self.add_magnet_inner(magnet_uri, None, true).await
     }
 
@@ -196,9 +194,22 @@ impl TorrentEngine {
 
         if let Some(existing) = self.db.get_download(&hash).await? {
             if existing.status != "error" {
+                info!(
+                    info_hash = %hash,
+                    status = %existing.status,
+                    download_all = existing.download_all,
+                    "add_magnet: returning existing download (no re-add)"
+                );
                 return Ok(existing);
             }
         }
+
+        info!(
+            info_hash = %hash,
+            file_index = ?file_index,
+            download_all,
+            "add_magnet: creating new download"
+        );
 
         let now = Utc::now().to_rfc3339();
         let dl = Download {
@@ -208,6 +219,7 @@ impl TorrentEngine {
             file_name: String::new(),
             file_index: file_index.unwrap_or(0),
             file_size: 0,
+            download_all,
             status: "initializing".to_string(),
             progress: 0.0,
             partial_path: None,
@@ -217,7 +229,12 @@ impl TorrentEngine {
         };
         self.db.upsert_download(&dl).await?;
 
-        self.spawn_add_torrent(hash.clone(), magnet_uri.to_string(), file_index, download_all);
+        self.spawn_add_torrent(
+            hash.clone(),
+            magnet_uri.to_string(),
+            file_index,
+            download_all,
+        );
 
         Ok(dl)
     }
@@ -270,6 +287,7 @@ impl TorrentEngine {
         {
             let handles = self.handles.read().await;
             if handles.contains_key(info_hash) {
+                info!(info_hash = %info_hash, "ensure_active: already live in session");
                 return Ok(());
             }
         }
@@ -279,6 +297,7 @@ impl TorrentEngine {
         {
             let pending = self.pending_adds.lock().unwrap_or_else(|e| e.into_inner());
             if pending.contains(info_hash) {
+                info!(info_hash = %info_hash, "ensure_active: add already in flight");
                 return Ok(());
             }
         }
@@ -302,6 +321,11 @@ impl TorrentEngine {
                 && (tokio::fs::metadata(&complete).await.is_ok()
                     || tokio::fs::metadata(&flat).await.is_ok())
             {
+                info!(
+                    info_hash = %info_hash,
+                    download_all = dl.download_all,
+                    "ensure_active: complete on disk, not re-adding (only checked default file_index)"
+                );
                 return Ok(());
             }
             tracing::warn!(
@@ -309,14 +333,24 @@ impl TorrentEngine {
                 title = %dl.title,
                 "marked complete but file missing; re-activating torrent"
             );
-            let _ = self.db.update_download_status(info_hash, "downloading").await;
+            let _ = self
+                .db
+                .update_download_status(info_hash, "downloading")
+                .await;
         }
 
+        info!(
+            info_hash = %info_hash,
+            file_index = dl.file_index,
+            download_all = dl.download_all,
+            status = %dl.status,
+            "ensure_active: re-adding torrent to session"
+        );
         self.spawn_add_torrent(
             dl.info_hash.clone(),
             dl.magnet_uri.clone(),
             Some(dl.file_index),
-            false,
+            dl.download_all,
         );
         Ok(())
     }
@@ -326,7 +360,10 @@ impl TorrentEngine {
         let handle = self.handles.write().await.remove(info_hash);
         if let Some(active) = handle {
             let tid = active.handle.id();
-            let _ = self.session.delete(librqbit::api::TorrentIdOrHash::Id(tid), false).await;
+            let _ = self
+                .session
+                .delete(librqbit::api::TorrentIdOrHash::Id(tid), false)
+                .await;
             info!(info_hash = %info_hash, "Torrent stopped and removed from engine");
         }
         Ok(())
@@ -386,7 +423,7 @@ impl TorrentEngine {
                     dl.info_hash.clone(),
                     dl.magnet_uri.clone(),
                     Some(dl.file_index),
-                    false,
+                    dl.download_all,
                 );
             }
         }
@@ -512,7 +549,13 @@ impl TorrentEngine {
         &self.complete_dir
     }
 
-    fn spawn_add_torrent(&self, info_hash: String, magnet_uri: String, file_index: Option<usize>, download_all: bool) {
+    fn spawn_add_torrent(
+        &self,
+        info_hash: String,
+        magnet_uri: String,
+        file_index: Option<usize>,
+        download_all: bool,
+    ) {
         // Mark pending synchronously before returning so the next
         // ensure_active caller sees it. If another caller already
         // reserved it, skip — we're racing with them.
@@ -534,7 +577,10 @@ impl TorrentEngine {
         tokio::spawn(async move {
             // Guard that removes the pending reservation on any exit
             // path (success, error, panic).
-            struct PendingGuard(Arc<std::sync::Mutex<std::collections::HashSet<String>>>, String);
+            struct PendingGuard(
+                Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+                String,
+            );
             impl Drop for PendingGuard {
                 fn drop(&mut self) {
                     let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -542,22 +588,29 @@ impl TorrentEngine {
                 }
             }
             let _pending_guard = PendingGuard(pending, info_hash_for_cleanup);
+            info!(
+                info_hash = %info_hash,
+                download_all,
+                only_files = ?if download_all { None } else { file_index.map(|i| vec![i]) },
+                "spawn_add_torrent: adding to librqbit session"
+            );
             // Adaptive timeout: start at 30s, double on each retry up to 3 attempts
             let _ = db.update_download_status(&info_hash, "initializing").await;
             let mut resp = None;
             for attempt in 0..3u32 {
                 let opts = AddTorrentOptions {
                     overwrite: true,
-                    only_files: if download_all { None } else { file_index.map(|i| vec![i]) },
+                    only_files: if download_all {
+                        None
+                    } else {
+                        file_index.map(|i| vec![i])
+                    },
                     ..Default::default()
                 };
                 let timeout_secs = 30u64 << attempt; // 30s, 60s, 120s
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(timeout_secs),
-                    session.add_torrent(
-                        AddTorrent::from_url(&magnet_uri),
-                        Some(opts),
-                    ),
+                    session.add_torrent(AddTorrent::from_url(&magnet_uri), Some(opts)),
                 )
                 .await;
 
@@ -609,7 +662,9 @@ impl TorrentEngine {
                         meta.file_infos
                             .iter()
                             .enumerate()
-                            .find(|(_, f)| TorrentFile::detect_audio(&f.relative_filename.to_string_lossy()))
+                            .find(|(_, f)| {
+                                TorrentFile::detect_audio(&f.relative_filename.to_string_lossy())
+                            })
                             .or_else(|| meta.file_infos.iter().enumerate().next())
                             .map(|(idx, _)| idx)
                     })
@@ -685,7 +740,17 @@ impl TorrentEngine {
                 },
             );
 
-            info!(info_hash = %info_hash, title = %title, "Torrent added to session");
+            let file_count = handle
+                .with_metadata(|meta| meta.file_infos.len())
+                .unwrap_or(0);
+            info!(
+                info_hash = %info_hash,
+                title = %title,
+                file_count,
+                resolved_file_index = resolved_fi,
+                download_all,
+                "Torrent added to session"
+            );
 
             Self::watch_completion(
                 info_hash,
@@ -733,11 +798,17 @@ impl TorrentEngine {
                         let nested_san = partial_dir.join(&name).join(&rel);
                         let flat_raw = partial_dir.join(&raw_rel);
                         let flat_san = partial_dir.join(&rel);
-                        if nested_raw.exists() { nested_raw }
-                        else if nested_san.exists() { nested_san }
-                        else if flat_raw.exists() { flat_raw }
-                        else if flat_san.exists() { flat_san }
-                        else { nested_raw }
+                        if nested_raw.exists() {
+                            nested_raw
+                        } else if nested_san.exists() {
+                            nested_san
+                        } else if flat_raw.exists() {
+                            flat_raw
+                        } else if flat_san.exists() {
+                            flat_san
+                        } else {
+                            nested_raw
+                        }
                     } else {
                         partial_dir.join(&rel)
                     };
@@ -836,4 +907,3 @@ pub fn extract_info_hash(magnet_uri: &str) -> Option<String> {
         .find_map(|p| p.strip_prefix("xt=urn:btih:"))
         .map(|h| h.to_lowercase())
 }
-
