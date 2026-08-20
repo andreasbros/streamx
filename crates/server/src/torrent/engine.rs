@@ -87,8 +87,52 @@ struct ActiveHandle {
     file_index: usize,
 }
 
+/// Build a librqbit session with the engine's standard options. Shared
+/// by initial startup and `restart_session`.
+async fn build_session(
+    config: &TorrentConfig,
+    partial_dir: &Path,
+    dht_dir: &Path,
+    socks5: Option<String>,
+) -> Result<Arc<Session>> {
+    let dht_config = PersistentDhtConfig {
+        config_filename: Some(dht_dir.join("dht.json")),
+        ..Default::default()
+    };
+
+    let peer_opts = PeerConnectionOptions {
+        connect_timeout: Some(std::time::Duration::from_secs(5)),
+        read_write_timeout: Some(std::time::Duration::from_secs(10)),
+        ..Default::default()
+    };
+
+    let opts = SessionOptions {
+        disable_dht: !config.dht,
+        disable_dht_persistence: false,
+        dht_config: Some(dht_config),
+        listen_port_range: Some(4240..4300),
+        enable_upnp_port_forwarding: true,
+        socks_proxy_url: socks5,
+        peer_opts: Some(peer_opts),
+        fastresume: true,
+        ..Default::default()
+    };
+
+    Session::new_with_opts(partial_dir.to_path_buf(), opts)
+        .await
+        .map_err(|e| Error::Torrent {
+            message: format!("Failed to initialize torrent session: {e}"),
+        })
+}
+
 pub struct TorrentEngine {
-    session: Arc<Session>,
+    /// Swappable so `restart_session` can tear down every connection and
+    /// bootstrap a fresh session (and DHT) without rebuilding the engine.
+    /// Sync lock: held only long enough to clone the Arc.
+    session: std::sync::RwLock<Arc<Session>>,
+    torrent_config: TorrentConfig,
+    socks5: Option<String>,
+    dht_dir: PathBuf,
     handles: Arc<RwLock<HashMap<String, ActiveHandle>>>,
     /// Info-hashes currently being added via `spawn_add_torrent` so
     /// repeated `ensure_active` calls during the librqbit handshake
@@ -121,34 +165,7 @@ impl TorrentEngine {
             message: format!("Failed to create dht directory: {e}"),
         })?;
 
-        let dht_config = PersistentDhtConfig {
-            config_filename: Some(dht_dir.join("dht.json")),
-            ..Default::default()
-        };
-
-        let peer_opts = PeerConnectionOptions {
-            connect_timeout: Some(std::time::Duration::from_secs(5)),
-            read_write_timeout: Some(std::time::Duration::from_secs(10)),
-            ..Default::default()
-        };
-
-        let opts = SessionOptions {
-            disable_dht: !config.dht,
-            disable_dht_persistence: false,
-            dht_config: Some(dht_config),
-            listen_port_range: Some(4240..4300),
-            enable_upnp_port_forwarding: true,
-            socks_proxy_url: socks5,
-            peer_opts: Some(peer_opts),
-            fastresume: true,
-            ..Default::default()
-        };
-
-        let session = Session::new_with_opts(partial_dir.clone(), opts)
-            .await
-            .map_err(|e| Error::Torrent {
-                message: format!("Failed to initialize torrent session: {e}"),
-            })?;
+        let session = build_session(config, &partial_dir, &dht_dir, socks5.clone()).await?;
 
         info!(
             "Torrent engine initialized with librqbit {}",
@@ -156,7 +173,10 @@ impl TorrentEngine {
         );
 
         let engine = Self {
-            session,
+            session: std::sync::RwLock::new(session),
+            torrent_config: config.clone(),
+            socks5,
+            dht_dir,
             handles: Arc::new(RwLock::new(HashMap::new())),
             pending_adds: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             db,
@@ -167,6 +187,68 @@ impl TorrentEngine {
         engine.spawn_progress_updater();
 
         Ok(engine)
+    }
+
+    /// Restart the torrent client: drop every live torrent handle, stop
+    /// the librqbit session (closing all peer connections and listeners),
+    /// wipe the persisted DHT table so discovery bootstraps from fresh
+    /// seed nodes, start a new session and re-add whatever was active or
+    /// pinned. Returns the number of re-added torrents.
+    pub async fn restart_session(&self) -> Result<usize> {
+        let previously_live: Vec<String> = {
+            let mut handles = self.handles.write().await;
+            handles.drain().map(|(hash, _)| hash).collect()
+        };
+        self.pending_adds
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
+        let old_session = self.session();
+        old_session.stop().await;
+        info!("Torrent session stopped for restart");
+
+        // Fresh DHT bootstrap: without the persisted routing table the
+        // new session discovers peers from the seed nodes again.
+        let _ = tokio::fs::remove_file(self.dht_dir.join("dht.json")).await;
+
+        let new_session = build_session(
+            &self.torrent_config,
+            &self.partial_dir,
+            &self.dht_dir,
+            self.socks5.clone(),
+        )
+        .await?;
+        {
+            let mut slot = self.session.write().unwrap_or_else(|e| e.into_inner());
+            *slot = new_session;
+        }
+        info!("Torrent session restarted");
+
+        // Re-add: everything that was live plus pinned incomplete rows.
+        let mut to_readd: Vec<String> = previously_live;
+        if let Ok(pinned) = self.db.get_pinned_incomplete().await {
+            for hash in pinned {
+                if !to_readd.contains(&hash) {
+                    to_readd.push(hash);
+                }
+            }
+        }
+        let mut readded = 0usize;
+        for hash in to_readd {
+            if let Ok(Some(dl)) = self.db.get_download(&hash).await {
+                if dl.status != "complete" && !dl.magnet_uri.is_empty() {
+                    self.spawn_add_torrent(
+                        dl.info_hash.clone(),
+                        dl.magnet_uri.clone(),
+                        Some(dl.file_index),
+                        dl.download_all,
+                    );
+                    readded += 1;
+                }
+            }
+        }
+        Ok(readded)
     }
 
     pub async fn add_magnet(
@@ -227,6 +309,7 @@ impl TorrentEngine {
             created_at: now.clone(),
             updated_at: now,
             files_json: None,
+            pinned: false,
         };
         self.db.upsert_download(&dl).await?;
 
@@ -362,7 +445,7 @@ impl TorrentEngine {
         if let Some(active) = handle {
             let tid = active.handle.id();
             let _ = self
-                .session
+                .session()
                 .delete(librqbit::api::TorrentIdOrHash::Id(tid), false)
                 .await;
             info!(info_hash = %info_hash, "Torrent stopped and removed from engine");
@@ -383,7 +466,7 @@ impl TorrentEngine {
         if let Some(active) = handles.get(info_hash) {
             let stats = active.handle.stats();
             if matches!(stats.state, TorrentStatsState::Live) {
-                if let Err(e) = self.session.pause(&active.handle).await {
+                if let Err(e) = self.session().pause(&active.handle).await {
                     warn!(info_hash = %info_hash, "Pause failed (non-fatal): {e}");
                 } else {
                     info!(info_hash = %info_hash, "Torrent paused");
@@ -410,7 +493,7 @@ impl TorrentEngine {
         if let Some(active) = handles.get(info_hash) {
             let stats = active.handle.stats();
             if matches!(stats.state, TorrentStatsState::Paused) {
-                if let Err(e) = self.session.unpause(&active.handle).await {
+                if let Err(e) = self.session().unpause(&active.handle).await {
                     warn!(info_hash = %info_hash, "Resume failed (non-fatal): {e}");
                 } else {
                     info!(info_hash = %info_hash, "Torrent resumed");
@@ -538,8 +621,11 @@ impl TorrentEngine {
         Ok(Some((active.torrent_id, file_index)))
     }
 
-    pub fn session(&self) -> &Arc<Session> {
-        &self.session
+    pub fn session(&self) -> Arc<Session> {
+        self.session
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub fn partial_dir(&self) -> &PathBuf {
@@ -567,7 +653,7 @@ impl TorrentEngine {
             }
         }
 
-        let session = self.session.clone();
+        let session = self.session();
         let handles = self.handles.clone();
         let pending = self.pending_adds.clone();
         let db = self.db.clone();
@@ -920,6 +1006,89 @@ impl TorrentEngine {
                 }
                 let _ = db.update_download_status(&info_hash, "complete").await;
                 break;
+            }
+        });
+    }
+
+    /// Auto-heal stalled downloads. Every 30s:
+    /// - an active row (`downloading`/`initializing`) with no live session
+    ///   handle and no pending add is re-added — covers adds that failed
+    ///   after their retries and would otherwise sit dead until a client
+    ///   reconnects or the server restarts;
+    /// - a live, unfinished torrent stuck at zero peers and zero speed
+    ///   for three consecutive scans (~90s) is removed and re-added,
+    ///   forcing a fresh tracker announce and DHT lookup — the same
+    ///   effect a restart had, without restarting.
+    pub fn spawn_stall_watchdog(self: &Arc<Self>) {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let mut zero_peer_scans: HashMap<String, u32> = HashMap::new();
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                let downloads = match engine.db.list_downloads().await {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                for dl in downloads
+                    .iter()
+                    .filter(|d| d.status == "downloading" || d.status == "initializing")
+                {
+                    let has_handle = engine.handles.read().await.contains_key(&dl.info_hash);
+                    let is_pending = engine
+                        .pending_adds
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .contains(&dl.info_hash);
+
+                    if !has_handle {
+                        zero_peer_scans.remove(&dl.info_hash);
+                        if !is_pending && !dl.magnet_uri.is_empty() {
+                            info!(
+                                info_hash = %dl.info_hash,
+                                status = %dl.status,
+                                "watchdog: active download has no session handle; re-adding"
+                            );
+                            engine.spawn_add_torrent(
+                                dl.info_hash.clone(),
+                                dl.magnet_uri.clone(),
+                                Some(dl.file_index),
+                                dl.download_all,
+                            );
+                        }
+                        continue;
+                    }
+
+                    let (peers, speed) = engine.get_live_stats(&dl.info_hash).await;
+                    if peers == 0 && speed <= 0.0 && dl.progress < 100.0 {
+                        let scans = zero_peer_scans.entry(dl.info_hash.clone()).or_insert(0);
+                        *scans += 1;
+                        if *scans >= 3 {
+                            zero_peer_scans.remove(&dl.info_hash);
+                            warn!(
+                                info_hash = %dl.info_hash,
+                                progress = dl.progress,
+                                "watchdog: no peers for ~90s; re-adding to refresh announce + DHT"
+                            );
+                            let _ = engine.stop_and_remove(&dl.info_hash).await;
+                            engine.spawn_add_torrent(
+                                dl.info_hash.clone(),
+                                dl.magnet_uri.clone(),
+                                Some(dl.file_index),
+                                dl.download_all,
+                            );
+                        }
+                    } else {
+                        zero_peer_scans.remove(&dl.info_hash);
+                    }
+                }
+                zero_peer_scans.retain(|hash, _| {
+                    downloads.iter().any(|d| {
+                        d.info_hash == *hash
+                            && (d.status == "downloading" || d.status == "initializing")
+                    })
+                });
             }
         });
     }

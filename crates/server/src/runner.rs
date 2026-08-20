@@ -104,9 +104,30 @@ pub async fn build_components(
         )
         .await?,
     );
+    torrent_engine.spawn_stall_watchdog();
     let search_provider = Arc::new(SearchProvider::new(config.providers.clone(), socks5));
     let cache_dir = config.data_dir.join("cache");
     let hls_pipeline = Arc::new(HlsManager::new(&config.transcode, cache_dir).await?);
+
+    // Pinned (background) downloads resume on their own at boot; the
+    // paused reset above only applies to viewer-driven downloads.
+    {
+        let engine = torrent_engine.clone();
+        let db = database.clone();
+        tokio::spawn(async move {
+            match db.get_pinned_incomplete().await {
+                Ok(hashes) => {
+                    for hash in hashes {
+                        info!(info_hash = %hash, "Resuming pinned download at boot");
+                        if let Err(e) = engine.resume(&hash).await {
+                            tracing::warn!(info_hash = %hash, "Pinned resume failed: {e}");
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("Could not list pinned downloads: {e}"),
+            }
+        });
+    }
 
     let (log_tx, log_history) = match (log_tx, log_history) {
         (Some(tx), Some(h)) => (tx, h),

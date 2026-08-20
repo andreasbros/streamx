@@ -7,6 +7,7 @@ import {
 } from "@radix-ui/themes";
 import {
   CounterClockwiseClockIcon,
+  DownloadIcon,
   GearIcon,
   ExitIcon,
   CodeIcon,
@@ -216,6 +217,7 @@ export function DrawerMenu({ open, onClose }: DrawerMenuProps) {
               <Separator size="4" my="2" />
 
               <MenuLink to="/favourites" icon={<StarFilledIcon />} label="Favourites" onClose={onClose} />
+              <MenuLink to="/downloads" icon={<DownloadIcon />} label="Downloads" onClose={onClose} />
               <MenuLink to="/history" icon={<CounterClockwiseClockIcon />} label="History" onClose={onClose} />
 
               <Separator size="4" my="2" />

@@ -35,7 +35,8 @@ pub async fn search(
     }
 
     let page = body.page.max(1);
-    let results = state.search_provider.search(query, page).await?;
+    let mut results = state.search_provider.search(query, page).await?;
+    filter_web_only(&state, &mut results).await;
     let result_count = results.len() as i32;
 
     state
@@ -67,12 +68,62 @@ pub async fn browse(
         .and_then(|s| s.parse().ok())
         .unwrap_or(1u32);
 
-    let results = state
+    let mut results = state
         .search_provider
         .browse(sort_by, genre, minimum_rating, limit, page)
         .await?;
+    filter_web_only(&state, &mut results).await;
 
     Ok(Json(serde_json::json!({ "results": results })))
+}
+
+/// When the `web_only` server setting is on, keep only WEB source
+/// variants and drop titles that have none.
+async fn filter_web_only(
+    state: &AppState,
+    results: &mut Vec<streamx_api::types::SearchResultGroup>,
+) {
+    let web_only = state
+        .db
+        .get_server_settings()
+        .await
+        .map(|s| s.web_only)
+        .unwrap_or(false);
+    if !web_only {
+        return;
+    }
+    for group in results.iter_mut() {
+        group
+            .variants
+            .retain(|v| v.source_type.as_deref() == Some("web"));
+    }
+    results.retain(|g| !g.variants.is_empty());
+}
+
+/// GET /api/settings/server — visible to every authenticated user so the
+/// UI can gate Play buttons and the transcode selector.
+pub async fn get_server_settings(
+    State(state): State<AppState>,
+    _claims: AuthenticatedUser,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let settings = state.db.get_server_settings().await?;
+    Ok(Json(settings))
+}
+
+/// PUT /api/admin/settings — admin-managed server-wide settings.
+pub async fn update_server_settings(
+    State(state): State<AppState>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+    Json(body): Json<crate::db::settings::ServerSettings>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    crate::server::admin::require_admin(&state, &claims.user_id).await?;
+    state.db.set_server_settings(&body).await?;
+    tracing::info!(
+        disable_transcode = body.disable_transcode,
+        web_only = body.web_only,
+        "Admin updated server settings"
+    );
+    Ok(Json(body))
 }
 
 pub async fn search_history(
@@ -93,6 +144,25 @@ pub async fn create_stream(
         return Err(Error::BadRequest {
             message: "Invalid magnet URI".to_string(),
         });
+    }
+
+    // WEB-only mode blocks new movie downloads of other source types.
+    // Requests without a source type (music, TV, raw magnets) pass.
+    if let Some(src) = body.source_type.as_deref() {
+        if src != "web" {
+            let web_only = state
+                .db
+                .get_server_settings()
+                .await
+                .map(|s| s.web_only)
+                .unwrap_or(false);
+            if web_only {
+                return Err(Error::BadRequest {
+                    message: "WEB-only mode is enabled: this release is not a WEB source"
+                        .to_string(),
+                });
+            }
+        }
     }
 
     let download = state
@@ -295,13 +365,19 @@ pub async fn delete_stream(
     }
 
     cleanup_stream(&state, &id).await?;
-    state.db.reset_download(&id).await?;
-    tracing::info!(stream_id = %id, "Admin reset stream for re-download");
+    state.db.delete_download(&id).await?;
+    tracing::info!(stream_id = %id, "Admin deleted stream: files and DB records removed");
     Ok(Json(serde_json::json!({ "status": "deleted" })))
 }
 
-/// Full cleanup: stop download, kill transcodes, delete files
+/// Full cleanup: stop download, kill transcodes, delete every file the
+/// torrent put on disk (manifest files, torrent folders, legacy paths)
+/// plus the downloaded poster. DB rows are the caller's concern.
 pub async fn cleanup_stream(state: &AppState, id: &str) -> std::result::Result<(), Error> {
+    // Read the row first: stop_and_remove and the deletes below don't
+    // change it, but the manifest is needed to locate all files.
+    let dl = state.torrent_engine.get_download(id).await.ok().flatten();
+
     // Stop and remove torrent from engine (prevents stale progress reporting)
     let _ = state.torrent_engine.stop_and_remove(id).await;
 
@@ -310,9 +386,39 @@ pub async fn cleanup_stream(state: &AppState, id: &str) -> std::result::Result<(
         tracing::warn!(stream_id = %id, "HLS cleanup failed (non-fatal): {e}");
     }
 
-    // Delete files on disk
-    if let Ok(Some(dl)) = state.torrent_engine.get_download(id).await {
-        if let Some(ref p) = dl.partial_path {
+    if let Some(dl) = dl {
+        let downloads_dir = state.config.data_dir.join("downloads");
+        let partial_dir = downloads_dir.join("partial");
+        let complete_dir = downloads_dir.join("complete");
+
+        // Manifest-driven deletion covers every file of multi-file
+        // torrents. Nested torrents live under a root folder that can be
+        // removed recursively; flat files are removed one by one.
+        let mut roots: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for f in dl.manifest().unwrap_or_default() {
+            let rel = std::path::Path::new(&f.path);
+            if rel.components().count() > 1 {
+                if let Some(std::path::Component::Normal(root)) = rel.components().next() {
+                    roots.insert(root.to_string_lossy().to_string());
+                }
+            } else {
+                let _ = tokio::fs::remove_file(partial_dir.join(rel)).await;
+                let _ = tokio::fs::remove_file(complete_dir.join(rel)).await;
+            }
+        }
+        for root in roots {
+            if root == ".." || root.is_empty() {
+                continue;
+            }
+            let _ = tokio::fs::remove_dir_all(partial_dir.join(&root)).await;
+            let _ = tokio::fs::remove_dir_all(complete_dir.join(&root)).await;
+        }
+
+        // Legacy explicit paths (pre-manifest rows).
+        for p in [dl.partial_path.as_ref(), dl.complete_path.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             let path = std::path::PathBuf::from(p);
             if path.exists() {
                 let parent = path.parent().map(|p| p.to_path_buf());
@@ -322,14 +428,90 @@ pub async fn cleanup_stream(state: &AppState, id: &str) -> std::result::Result<(
                 }
             }
         }
-        if let Some(ref p) = dl.complete_path {
-            let path = std::path::PathBuf::from(p);
-            if path.exists() {
-                let _ = tokio::fs::remove_file(&path).await;
-            }
-        }
+
+        // Downloaded poster.
+        let poster = downloads_dir.join("posters").join(format!("{id}.jpg"));
+        let _ = tokio::fs::remove_file(&poster).await;
     }
     Ok(())
+}
+
+/// POST /api/stream/{id}/download — pin a download so it keeps going
+/// after every client disconnects, and survives server restarts.
+pub async fn pin_download(
+    State(state): State<AppState>,
+    _claims: AuthenticatedUser,
+    Path(id): Path<String>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let dl = state
+        .torrent_engine
+        .get_download(&id)
+        .await?
+        .ok_or_else(|| Error::NotFound {
+            message: format!("Stream {id} not found"),
+        })?;
+    state.db.set_download_pinned(&id, true).await?;
+    if dl.status != "complete" {
+        state.torrent_engine.resume(&id).await?;
+    }
+    tracing::info!(stream_id = %id, "Download pinned (background download)");
+    Ok(Json(serde_json::json!({ "status": "pinned" })))
+}
+
+/// DELETE /api/stream/{id}/download — cancel a background download:
+/// unpin and pause. Files stay on disk for later resume.
+pub async fn unpin_download(
+    State(state): State<AppState>,
+    _claims: AuthenticatedUser,
+    Path(id): Path<String>,
+) -> std::result::Result<impl IntoResponse, Error> {
+    state.db.set_download_pinned(&id, false).await?;
+    let _ = state.torrent_engine.pause(&id).await;
+    tracing::info!(stream_id = %id, "Download unpinned (cancelled background download)");
+    Ok(Json(serde_json::json!({ "status": "cancelled" })))
+}
+
+/// GET /api/downloads — the download queue for any authenticated user:
+/// every known download with progress and live stats.
+pub async fn list_downloads(
+    State(state): State<AppState>,
+    _claims: AuthenticatedUser,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let downloads = state.db.list_downloads().await?;
+    let mut items = Vec::with_capacity(downloads.len());
+    for dl in downloads {
+        let (peers, speed) = state.torrent_engine.get_live_stats(&dl.info_hash).await;
+        // Torrent metadata takes a while to resolve; fall back to the
+        // rich metadata title captured at stream creation.
+        let title = if dl.title.is_empty() {
+            state
+                .db
+                .get_metadata(&dl.info_hash)
+                .await
+                .ok()
+                .flatten()
+                .map(|m| m.title)
+                .filter(|t| !t.is_empty())
+                .unwrap_or_default()
+        } else {
+            dl.title.clone()
+        };
+        items.push(serde_json::json!({
+            "info_hash": dl.info_hash,
+            "title": title,
+            "file_name": dl.file_name,
+            "file_size": dl.file_size,
+            "status": dl.status,
+            "progress": dl.progress,
+            "pinned": dl.pinned,
+            "download_all": dl.download_all,
+            "created_at": dl.created_at,
+            "updated_at": dl.updated_at,
+            "peers": peers,
+            "speed": speed,
+        }));
+    }
+    Ok(Json(serde_json::json!({ "downloads": items })))
 }
 
 pub async fn share_stream(
@@ -351,8 +533,7 @@ pub async fn share_stream(
         .get("duration_hours")
         .and_then(|v| v.as_i64())
         .unwrap_or(24 * 30)
-        .min(24 * 90)
-        .max(1);
+        .clamp(1, 24 * 90);
 
     let token = create_guest_token(&id, &state.jwt_secret, duration_hours)?;
     let url = format!("/player/{id}?guest={token}");
@@ -569,6 +750,36 @@ pub async fn add_favourite(
         });
     }
     let item = state.db.add_favourite(&claims.user_id, &body).await?;
+
+    // Favourited music (albums/playlists) must become fully available:
+    // start a pinned full-album download in the background so every
+    // track lands on disk and survives disconnects and restarts.
+    if body.content_type.as_deref() == Some("music") {
+        let magnet = body
+            .metadata_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
+            .and_then(|v| v.get("magnet").and_then(|m| m.as_str()).map(String::from));
+        if let Some(magnet) = magnet {
+            let state = state.clone();
+            tokio::spawn(async move {
+                match state.torrent_engine.add_magnet_album(&magnet).await {
+                    Ok(dl) => {
+                        let _ = state.db.set_download_pinned(&dl.info_hash, true).await;
+                        let _ = state.torrent_engine.resume(&dl.info_hash).await;
+                        tracing::info!(
+                            info_hash = %dl.info_hash,
+                            "Favourited music pinned for full download"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Favourite music download failed to start: {e}");
+                    }
+                }
+            });
+        }
+    }
+
     Ok(Json(item))
 }
 
@@ -823,21 +1034,38 @@ pub async fn delete_playlist(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// 404 unless the playlist exists and belongs to the caller. Not-found
+/// (rather than 401) so playlist ids of other users are unguessable.
+async fn ensure_playlist_owner(
+    state: &AppState,
+    playlist_id: &str,
+    user_id: &str,
+) -> std::result::Result<(), Error> {
+    if !state.db.playlist_owned_by(playlist_id, user_id).await? {
+        return Err(Error::NotFound {
+            message: "Playlist not found".to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub async fn get_playlist_tracks(
     State(state): State<AppState>,
-    AuthenticatedUser(_claims): AuthenticatedUser,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> std::result::Result<impl IntoResponse, Error> {
+    ensure_playlist_owner(&state, &id, &claims.user_id).await?;
     let tracks = state.db.get_playlist_tracks(&id).await?;
     Ok(Json(serde_json::json!({ "tracks": tracks })))
 }
 
 pub async fn add_playlist_track(
     State(state): State<AppState>,
-    AuthenticatedUser(_claims): AuthenticatedUser,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Path(id): Path<String>,
     Json(body): Json<AddTrackRequest>,
 ) -> std::result::Result<impl IntoResponse, Error> {
+    ensure_playlist_owner(&state, &id, &claims.user_id).await?;
     let track = state.db.add_playlist_track(&id, &body).await?;
     Ok(Json(track))
 }

@@ -71,6 +71,26 @@ pub fn build_state(
     }
 }
 
+impl AppState {
+    /// State view over already-built components. Lets LocalApi reuse
+    /// HTTP-handler logic (e.g. cleanup_stream) in-process.
+    pub fn from_components(c: &crate::runner::ServerComponents) -> Self {
+        Self {
+            db: c.database.clone(),
+            config: c.config.clone(),
+            jwt_secret: c.config.auth.jwt_secret.clone(),
+            torrent_engine: c.torrent_engine.clone(),
+            search_provider: c.search_provider.clone(),
+            hls_pipeline: c.hls_pipeline.clone(),
+            rate_limiter: RateLimiter::new(),
+            http_client: c.http_client.clone(),
+            ws_connections: Arc::new(AtomicU32::new(0)),
+            log_tx: c.log_tx.clone(),
+            log_history: c.log_history.clone(),
+        }
+    }
+}
+
 pub fn build_router(
     db: Database,
     config: AppConfig,
@@ -111,6 +131,8 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .route("/{id}", delete(api::delete_stream))
         .route("/{id}/pause", put(api::pause_stream))
         .route("/{id}/resume", put(api::resume_stream))
+        .route("/{id}/download", post(api::pin_download))
+        .route("/{id}/download", delete(api::unpin_download))
         .route("/{id}/share", post(api::share_stream))
         .route("/{id}/ws", get(stream::stream_ws))
         .route("/{id}/playlist.m3u8", get(stream::playlist))
@@ -133,7 +155,8 @@ pub fn build_router_with_state(state: AppState) -> Router {
 
     let settings_routes = Router::new()
         .route("/", get(api::get_settings))
-        .route("/", put(api::update_settings));
+        .route("/", put(api::update_settings))
+        .route("/server", get(api::get_server_settings));
 
     let favourites_routes = Router::new()
         .route("/", post(api::add_favourite))
@@ -162,7 +185,10 @@ pub fn build_router_with_state(state: AppState) -> Router {
         .route("/{id}", delete(api::delete_playlist))
         .route("/{id}/tracks", get(api::get_playlist_tracks))
         .route("/{id}/tracks", post(api::add_playlist_track))
-        .route("/{id}/tracks/{track_id}", delete(api::remove_playlist_track));
+        .route(
+            "/{id}/tracks/{track_id}",
+            delete(api::remove_playlist_track),
+        );
 
     let trailer_routes = Router::new().route("/search", get(api::trailer_search));
 
@@ -181,7 +207,10 @@ pub fn build_router_with_state(state: AppState) -> Router {
     let admin_routes = Router::new()
         .route("/monitor", get(admin::admin_monitor_ws))
         .route("/logs", get(admin::admin_logs_ws))
-        .route("/kill/{stream_id}", delete(admin::kill_transcode));
+        .route("/kill/{stream_id}", delete(admin::kill_transcode))
+        .route("/restart-torrent", post(admin::restart_torrent))
+        .route("/restart-server", post(admin::restart_server))
+        .route("/settings", put(api::update_server_settings));
 
     let version_handler = || async {
         axum::Json(serde_json::json!({
@@ -192,6 +221,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
 
     let api_routes = Router::new()
         .route("/version", get(version_handler))
+        .route("/downloads", get(api::list_downloads))
         .nest("/admin", admin_routes)
         .nest("/auth", auth_routes)
         .nest("/search", search_routes)

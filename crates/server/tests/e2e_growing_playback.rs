@@ -40,25 +40,48 @@ async fn start_server() -> GrowingServer {
 
     let config = streamx::config::AppConfig {
         server: streamx::config::ServerConfig {
-            port, bind: "127.0.0.1".to_string(), open_browser: false,
+            port,
+            bind: "127.0.0.1".to_string(),
+            open_browser: false,
             log_level: None,
-},
+        },
         torrent: streamx::config::TorrentConfig {
-            max_connections: 10, sequential: true, seed_after_complete: false, dht: false, pex: false,
+            max_connections: 10,
+            sequential: true,
+            seed_after_complete: false,
+            dht: false,
+            pex: false,
         },
         transcode: streamx::config::TranscodeConfig {
-            hls_segment_duration: 2, video_codec: "h264".to_string(), audio_codec: "aac".to_string(),
-            preset: "ultrafast".to_string(), max_concurrent_transcodes: 2, crf: 28,
-            max_bitrate: None, audio_bitrate: "128k".to_string(), threads: Some(2),
-            gpu: false, hls_downscale: true, hls_max_height: 1080, hls_force_stereo: true,
+            hls_segment_duration: 2,
+            video_codec: "h264".to_string(),
+            audio_codec: "aac".to_string(),
+            preset: "ultrafast".to_string(),
+            max_concurrent_transcodes: 2,
+            crf: 28,
+            max_bitrate: None,
+            audio_bitrate: "128k".to_string(),
+            threads: Some(2),
+            gpu: false,
+            hls_downscale: true,
+            hls_max_height: 1080,
+            hls_force_stereo: true,
         },
         auth: streamx::config::AuthConfig {
-            jwt_secret: "e2e_growing_test_secret".to_string(), session_duration: "24h".to_string(),
+            jwt_secret: "e2e_growing_test_secret".to_string(),
+            session_duration: "24h".to_string(),
         },
-        providers: vec![], vpn: None, data_dir: data_dir_path.clone(),
-        log_dir: None, log_level: "warn".to_string(), open_browser: false,
-        admin_user: None, admin_password: None,
-        ui: streamx::config::UiConfig { default_theme: "dark".to_string() },
+        providers: vec![],
+        vpn: None,
+        data_dir: data_dir_path.clone(),
+        log_dir: None,
+        log_level: "warn".to_string(),
+        open_browser: false,
+        admin_user: None,
+        admin_password: None,
+        ui: streamx::config::UiConfig {
+            default_theme: "dark".to_string(),
+        },
     };
 
     let db_path = data_dir_path.join("db/streamx.db");
@@ -68,29 +91,49 @@ async fn start_server() -> GrowingServer {
     database.create_user("admin", &hash).await.ok();
 
     let torrent_engine = streamx::torrent::TorrentEngine::create(
-        &config.torrent, &data_dir_path, database.clone(), None,
-    ).await.expect("engine");
+        &config.torrent,
+        &data_dir_path,
+        database.clone(),
+        None,
+    )
+    .await
+    .expect("engine");
     let search_provider = streamx::torrent::SearchProvider::new(vec![], None);
     let cache_dir = data_dir_path.join("cache");
-    let hls = streamx::transcode::HlsManager::new(&config.transcode, cache_dir).await.expect("hls");
+    let hls = streamx::transcode::HlsManager::new(&config.transcode, cache_dir)
+        .await
+        .expect("hls");
 
     let (log_tx, _) = tokio::sync::broadcast::channel::<String>(100);
     let (_, log_history) = streamx::logging::BroadcastLayer::new(log_tx.clone());
     let app = streamx::server::build_router(
-        database.clone(), config, torrent_engine, search_provider, hls, log_tx, log_history,
+        database.clone(),
+        config,
+        torrent_engine,
+        search_provider,
+        hls,
+        log_tx,
+        log_history,
     );
 
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
     tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .await.ok();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .ok();
     });
 
     let client = reqwest::Client::new();
-    let login = client.post(format!("http://127.0.0.1:{port}/api/auth/login"))
+    let login = client
+        .post(format!("http://127.0.0.1:{port}/api/auth/login"))
         .json(&serde_json::json!({"username": "admin", "password": "password"}))
-        .send().await.expect("login");
+        .send()
+        .await
+        .expect("login");
     let body: serde_json::Value = login.json().await.expect("json");
     let token = body["token"].as_str().expect("token").to_string();
 
@@ -99,7 +142,13 @@ async fn start_server() -> GrowingServer {
     let _ = std::fs::remove_dir_all(&artifact_dir);
     std::fs::create_dir_all(&artifact_dir).expect("artifacts dir");
 
-    GrowingServer { base_url: format!("http://127.0.0.1:{port}"), port, token, data_dir: tmp, artifact_dir }
+    GrowingServer {
+        base_url: format!("http://127.0.0.1:{port}"),
+        port,
+        token,
+        data_dir: tmp,
+        artifact_dir,
+    }
 }
 
 impl GrowingServer {
@@ -108,11 +157,9 @@ impl GrowingServer {
         let db = streamx::db::Database::open(&db_path).expect("db");
         db.init().await.ok();
         db.update_download_status(stream_id, "complete").await.ok();
-        db.update_download_paths(
-            stream_id,
-            None,
-            Some(file_path.to_str().unwrap()),
-        ).await.ok();
+        db.update_download_paths(stream_id, None, Some(file_path.to_str().unwrap()))
+            .await
+            .ok();
     }
 
     async fn seed_downloading(&self, stream_id: &str, growing_path: &Path, file_size: u64) {
@@ -123,7 +170,11 @@ impl GrowingServer {
             info_hash: stream_id.to_string(),
             magnet_uri: format!("magnet:?xt=urn:btih:{stream_id}"),
             title: "Growing File Test".to_string(),
-            file_name: growing_path.file_name().unwrap().to_string_lossy().to_string(),
+            file_name: growing_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
             file_index: 0,
             file_size,
             status: "downloading".to_string(),
@@ -132,7 +183,9 @@ impl GrowingServer {
             complete_path: None,
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
-        }).await.expect("seed");
+        })
+        .await
+        .expect("seed");
     }
 }
 
@@ -141,7 +194,10 @@ impl GrowingServer {
 // ============================================================
 
 fn ui_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("ui")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("ui")
 }
 
 async fn run_growing_playwright(
@@ -154,7 +210,8 @@ async fn run_growing_playwright(
     let ui_tests_dir = ui_dir().join("tests");
     let screenshot_path = artifact_dir.join("playback_screenshot.png");
 
-    let config_content = format!(r#"
+    let config_content = format!(
+        r#"
 import {{ defineConfig }} from "@playwright/test";
 export default defineConfig({{
   testDir: "{test_dir}",
@@ -215,8 +272,9 @@ fn collect_files(dir: &Path, ext: &str) -> Vec<PathBuf> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() { walk(&path, ext, files); }
-                else if path.extension().map(|e| e == ext).unwrap_or(false) {
+                if path.is_dir() {
+                    walk(&path, ext, files);
+                } else if path.extension().map(|e| e == ext).unwrap_or(false) {
                     files.push(path);
                 }
             }
@@ -244,14 +302,30 @@ fn create_writer(pattern: &str, source: &Path, output: PathBuf) -> Writer {
     // 64KB pieces (typical torrent piece size for small files)
     let piece_size = 64 * 1024;
     match pattern {
-        "fast_sequential" => Writer::Sequential(MockTorrentWriter::fast(source, output).expect("writer")),
-        "slow_start" => Writer::Sequential(MockTorrentWriter::slow_start(source, output).expect("writer")),
-        "stalling" => Writer::Sequential(MockTorrentWriter::stalling(source, output, 3000).expect("writer")),
-        "burst" => Writer::Sequential(MockTorrentWriter::burst(source, output, 2000).expect("writer")),
-        "sparse_sequential" => Writer::Sparse(SparseTorrentWriter::sequential(source, output, piece_size, 50).expect("writer")),
-        "sparse_out_of_order" => Writer::Sparse(SparseTorrentWriter::out_of_order(source, output, piece_size, 50).expect("writer")),
-        "sparse_slow_start" => Writer::Sparse(SparseTorrentWriter::sequential_slow_start(source, output, piece_size).expect("writer")),
-        "sparse_stalling" => Writer::Sparse(SparseTorrentWriter::stalling(source, output, piece_size, 3000).expect("writer")),
+        "fast_sequential" => {
+            Writer::Sequential(MockTorrentWriter::fast(source, output).expect("writer"))
+        }
+        "slow_start" => {
+            Writer::Sequential(MockTorrentWriter::slow_start(source, output).expect("writer"))
+        }
+        "stalling" => {
+            Writer::Sequential(MockTorrentWriter::stalling(source, output, 3000).expect("writer"))
+        }
+        "burst" => {
+            Writer::Sequential(MockTorrentWriter::burst(source, output, 2000).expect("writer"))
+        }
+        "sparse_sequential" => Writer::Sparse(
+            SparseTorrentWriter::sequential(source, output, piece_size, 50).expect("writer"),
+        ),
+        "sparse_out_of_order" => Writer::Sparse(
+            SparseTorrentWriter::out_of_order(source, output, piece_size, 50).expect("writer"),
+        ),
+        "sparse_slow_start" => Writer::Sparse(
+            SparseTorrentWriter::sequential_slow_start(source, output, piece_size).expect("writer"),
+        ),
+        "sparse_stalling" => Writer::Sparse(
+            SparseTorrentWriter::stalling(source, output, piece_size, 3000).expect("writer"),
+        ),
         _ => panic!("Unknown pattern: {pattern}"),
     }
 }
@@ -274,10 +348,7 @@ fn create_writer(pattern: &str, source: &Path, output: PathBuf) -> Writer {
 #[case::sparse_slow_source("sparse_slow_start", "source")]
 #[case::sparse_stall_source("sparse_stalling", "source")]
 #[tokio::test]
-async fn growing_hls_playback(
-    #[case] pattern: &str,
-    #[case] quality: &str,
-) {
+async fn growing_hls_playback(#[case] pattern: &str, #[case] quality: &str) {
     // Check Playwright available
     let pw = std::process::Command::new("pnpm")
         .args(["exec", "playwright", "--version"])
@@ -296,7 +367,10 @@ async fn growing_hls_playback(
 
     let clip = match get_clip("h264_ac3_mkv") {
         Some(c) => c,
-        None => { eprintln!("SKIP: test clip not generated"); return; }
+        None => {
+            eprintln!("SKIP: test clip not generated");
+            return;
+        }
     };
 
     let test_name = format!("{pattern}_{quality}");
@@ -304,13 +378,17 @@ async fn growing_hls_playback(
     let stream_id = format!("grow_{test_name}_00000000000000000000000000");
 
     // Growing file location inside server's partial dir
-    let growing_path = server.data_dir.path()
+    let growing_path = server
+        .data_dir
+        .path()
         .join("downloads/partial/growing_test.mkv");
 
     let file_size = std::fs::metadata(&clip).map(|m| m.len()).unwrap_or(0);
 
     // Seed DB with downloading status
-    server.seed_downloading(&stream_id, &growing_path, file_size).await;
+    server
+        .seed_downloading(&stream_id, &growing_path, file_size)
+        .await;
 
     // Write the file completely first, then start Playwright.
     // The mock torrent writer simulates the download timing pattern,
@@ -328,8 +406,13 @@ async fn growing_hls_playback(
     let start = std::time::Instant::now();
 
     let (passed, stdout, videos, screenshots) = run_growing_playwright(
-        server.port, &server.artifact_dir, &stream_id, &server.token, quality,
-    ).await;
+        server.port,
+        &server.artifact_dir,
+        &stream_id,
+        &server.token,
+        quality,
+    )
+    .await;
 
     let elapsed = start.elapsed();
     eprintln!("[{test_name}] Playwright finished in {elapsed:.1?}");
@@ -342,7 +425,10 @@ async fn growing_hls_playback(
         if let Ok(state) = serde_json::from_str::<serde_json::Value>(json_str) {
             let ct = state["currentTime"].as_f64().unwrap_or(0.0);
             eprintln!("[{test_name}] Final currentTime: {ct:.1}s");
-            assert!(ct > 5.0, "[{test_name}] Video didn't play far enough: {ct}s");
+            assert!(
+                ct > 5.0,
+                "[{test_name}] Video didn't play far enough: {ct}s"
+            );
         }
     }
 
@@ -362,7 +448,9 @@ async fn growing_hls_playback(
                     eprintln!("[{test_name}] FRAME MISMATCH: {diff_pct:.1}% (non-fatal, playback verified by currentTime)");
                 }
             } else {
-                eprintln!("[{test_name}] WARNING: Could not compare images (ImageMagick not available?)");
+                eprintln!(
+                    "[{test_name}] WARNING: Could not compare images (ImageMagick not available?)"
+                );
             }
         }
     } else {
@@ -370,7 +458,8 @@ async fn growing_hls_playback(
     }
 
     if !passed {
-        eprintln!("[{test_name}] Playwright FAILED but continuing (growing file tests are fragile)");
+        eprintln!(
+            "[{test_name}] Playwright FAILED but continuing (growing file tests are fragile)"
+        );
     }
-
 }

@@ -64,11 +64,12 @@ async fn main() -> Result<()> {
 
     let components = runner::build_components(config, Some(log_tx), Some(log_history)).await?;
 
-    let addr: SocketAddr = format!("{bind_addr}:{port}")
-        .parse()
-        .map_err(|_| error::Error::Config {
-            message: format!("Invalid bind address: {bind_addr}:{port}"),
-        })?;
+    let addr: SocketAddr =
+        format!("{bind_addr}:{port}")
+            .parse()
+            .map_err(|_| error::Error::Config {
+                message: format!("Invalid bind address: {bind_addr}:{port}"),
+            })?;
 
     // Kill orphaned FFmpeg processes from previous server instances
     kill_orphaned_ffmpeg();
@@ -82,12 +83,10 @@ async fn main() -> Result<()> {
 
     // Graceful shutdown: catch SIGTERM/SIGINT, kill FFmpeg children
     let shutdown = async {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler");
-        let mut sigint =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                .expect("failed to install SIGINT handler");
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("failed to install SIGINT handler");
         tokio::select! {
             _ = sigterm.recv() => info!("Received SIGTERM"),
             _ = sigint.recv() => info!("Received SIGINT"),
@@ -157,7 +156,9 @@ fn kill_orphaned_ffmpeg() {
                 }
             }
             tracing::warn!(pid, "Killing orphaned FFmpeg process");
-            unsafe { libc::kill(pid as i32, libc::SIGTERM); }
+            unsafe {
+                libc::kill(pid as i32, libc::SIGTERM);
+            }
         }
     }
 }
@@ -180,7 +181,9 @@ fn kill_all_streamx_ffmpeg() {
             };
             if cmdline.contains("ffmpeg") && cmdline.contains(".streamx/cache") {
                 tracing::info!(pid, "Sending SIGTERM to FFmpeg process");
-                unsafe { libc::kill(pid, libc::SIGTERM); }
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
             }
         }
     }

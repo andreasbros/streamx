@@ -416,7 +416,15 @@ fn load_providers_file(data_dir: &Path) -> Vec<ProviderConfig> {
 }
 
 pub fn load_config(cli: &Cli) -> Result<AppConfig> {
-    let data_dir = match &cli.data_dir {
+    // CLI flags win; STREAMX_DATA_DIR / STREAMX_CONFIG env vars cover
+    // processes that can't take flags (desktop app, test harnesses), so
+    // tests can redirect every on-disk path (db, torrents, cache,
+    // posters, dht, logs all live under the data dir).
+    let data_dir = match cli.data_dir.clone().or_else(|| {
+        std::env::var("STREAMX_DATA_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }) {
         Some(d) => PathBuf::from(d),
         None => default_data_dir()?,
     };
@@ -433,7 +441,11 @@ pub fn load_config(cli: &Cli) -> Result<AppConfig> {
 
     std::fs::create_dir_all(&data_dir).context(error::IoSnafu)?;
 
-    let config_path = match &cli.config {
+    let config_path = match cli.config.clone().or_else(|| {
+        std::env::var("STREAMX_CONFIG")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }) {
         Some(p) => PathBuf::from(p),
         None => data_dir.join("config.toml"),
     };
@@ -455,12 +467,17 @@ pub fn load_config(cli: &Cli) -> Result<AppConfig> {
     // Load additional providers from providers.toml
     let extra_providers = load_providers_file(&data_dir);
     if !extra_providers.is_empty() {
-        tracing::info!("Loaded {} providers from providers.toml", extra_providers.len());
+        tracing::info!(
+            "Loaded {} providers from providers.toml",
+            extra_providers.len()
+        );
         config.providers.extend(extra_providers);
     }
 
     config.data_dir = data_dir.clone();
-    config.log_level = cli.log_level.clone()
+    config.log_level = cli
+        .log_level
+        .clone()
         .or_else(|| config.server.log_level.clone())
         .unwrap_or_else(|| "info".to_string());
     config.log_dir = cli

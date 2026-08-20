@@ -27,6 +27,7 @@ import {
 import { TrailerModal } from "../components/TrailerModal";
 import { FavouriteButton } from "../components/FavouriteButton";
 import { useSearch } from "../hooks/useSearch";
+import { useServerSettings } from "../hooks/useServerSettings";
 import { api } from "../api/client";
 import { isMagnetLink, formatBytes, formatRuntime } from "../lib/utils";
 import type { SearchResultGroup, SearchResult } from "../api/types";
@@ -98,6 +99,8 @@ function GroupCard({
 }) {
   const [imgError, setImgError] = useState(false);
   const poster = group.poster_small ?? group.poster;
+  const serverSettings = useServerSettings();
+  const transcodeDisabled = serverSettings?.disable_transcode ?? true;
 
   return (
     <Card size="2">
@@ -302,7 +305,10 @@ function GroupCard({
                   overflow: "hidden",
                 }}
               >
-                {group.variants.map((variant, idx) => (
+                {group.variants.map((variant, idx) => {
+                  const notWebCompatible =
+                    transcodeDisabled && variant.source_type !== "web";
+                  return (
                   <Flex
                     key={variant.magnet}
                     align="center"
@@ -311,10 +317,14 @@ function GroupCard({
                     py="2"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onPlayVariant(variant, group);
+                      if (!notWebCompatible) onPlayVariant(variant, group);
+                    }}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      if (notWebCompatible) onPlayVariant(variant, group);
                     }}
                     style={{
-                      cursor: "pointer",
+                      cursor: notWebCompatible ? "default" : "pointer",
                       borderTop:
                         idx > 0
                           ? "1px solid var(--gray-a4)"
@@ -350,9 +360,22 @@ function GroupCard({
                         {variant.leeches}
                       </Text>
                     )}
-                    <PlayIcon width={14} height={14} style={{ flexShrink: 0 }} />
+                    {notWebCompatible ? (
+                      <Badge
+                        size="1"
+                        variant="soft"
+                        color="gray"
+                        style={{ flexShrink: 0 }}
+                        title="Server transcoding is disabled; double-click to try direct playback"
+                      >
+                        Not WEB compatible
+                      </Badge>
+                    ) : (
+                      <PlayIcon width={14} height={14} style={{ flexShrink: 0 }} />
+                    )}
                   </Flex>
-                ))}
+                  );
+                })}
               </Box>
             </Flex>
           </Flex>

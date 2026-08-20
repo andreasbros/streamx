@@ -41,15 +41,26 @@ pub fn hevc_4k_clip() -> Option<PathBuf> {
     }
     let ok = Command::new("ffmpeg")
         .args([
-            "-y", "-hide_banner", "-loglevel", "error",
-            "-i", src.to_str().unwrap_or(""),
-            "-t", "5", "-c", "copy",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            src.to_str().unwrap_or(""),
+            "-t",
+            "5",
+            "-c",
+            "copy",
         ])
         .arg(dst.to_str().unwrap_or(""))
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
-    if ok { Some(dst) } else { None }
+    if ok {
+        Some(dst)
+    } else {
+        None
+    }
 }
 
 fn generate_fixtures(dir: &Path) {
@@ -58,12 +69,30 @@ fn generate_fixtures(dir: &Path) {
     if !h264.exists() {
         let _ = Command::new("ffmpeg")
             .args([
-                "-y", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "testsrc=duration=10:size=1280x720:rate=24",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
-                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
-                "-c:a", "aac", "-b:a", "64k",
-                "-pix_fmt", "yuv420p",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=10:size=1280x720:rate=24",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=10",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "28",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+                "-pix_fmt",
+                "yuv420p",
             ])
             .arg(&h264)
             .status();
@@ -74,12 +103,30 @@ fn generate_fixtures(dir: &Path) {
     if !hevc.exists() {
         let _ = Command::new("ffmpeg")
             .args([
-                "-y", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "testsrc=duration=10:size=1280x720:rate=24",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
-                "-c:v", "libx265", "-preset", "ultrafast", "-crf", "32",
-                "-c:a", "aac", "-b:a", "64k",
-                "-pix_fmt", "yuv420p",
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=10:size=1280x720:rate=24",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=10",
+                "-c:v",
+                "libx265",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "32",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+                "-pix_fmt",
+                "yuv420p",
             ])
             .arg(&hevc)
             .status();
@@ -110,9 +157,11 @@ pub fn is_valid_fmp4(path: &Path) -> bool {
     }
     let box_type = &data[4..8];
     // Valid box types for fMP4 init and media segments
-    [b"ftyp", b"moov", b"moof", b"styp", b"sidx", b"mdat", b"free"]
-        .iter()
-        .any(|t| box_type == *t)
+    [
+        b"ftyp", b"moov", b"moof", b"styp", b"sidx", b"mdat", b"free",
+    ]
+    .iter()
+    .any(|t| box_type == *t)
 }
 
 /// Count EXTINF entries in an HLS playlist
@@ -133,15 +182,18 @@ pub fn has_endlist(playlist: &Path) -> bool {
 /// Check if playlist segment paths include quality prefix
 pub fn segments_have_prefix(playlist: &Path, prefix: &str) -> bool {
     let content = std::fs::read_to_string(playlist).unwrap_or_default();
-    content.lines().any(|line| {
-        !line.starts_with('#') && !line.is_empty() && line.starts_with(prefix)
-    })
+    content
+        .lines()
+        .any(|line| !line.starts_with('#') && !line.is_empty() && line.starts_with(prefix))
 }
 
 /// Run FFmpeg with args, return (success, stderr)
 pub fn run_ffmpeg(args: &[&str]) -> (bool, String) {
     match Command::new("ffmpeg").args(args).output() {
-        Ok(out) => (out.status.success(), String::from_utf8_lossy(&out.stderr).to_string()),
+        Ok(out) => (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        ),
         Err(e) => (false, format!("spawn failed: {e}")),
     }
 }
@@ -162,13 +214,24 @@ pub fn has_vaapi() -> bool {
     // Quick test: try to init VAAPI device
     Command::new("ffmpeg")
         .args([
-            "-hide_banner", "-loglevel", "error",
-            "-init_hw_device", "vaapi=va:/dev/dri/renderD128",
-            "-f", "lavfi", "-i", "nullsrc=s=64x64:d=0.1",
-            "-vf", "format=nv12,hwupload",
-            "-c:v", "h264_vaapi",
-            "-frames:v", "1",
-            "-f", "null", "/dev/null",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-init_hw_device",
+            "vaapi=va:/dev/dri/renderD128",
+            "-f",
+            "lavfi",
+            "-i",
+            "nullsrc=s=64x64:d=0.1",
+            "-vf",
+            "format=nv12,hwupload",
+            "-c:v",
+            "h264_vaapi",
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "/dev/null",
         ])
         .output()
         .map(|o| o.status.success())

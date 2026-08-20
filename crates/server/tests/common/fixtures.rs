@@ -33,45 +33,80 @@ pub struct ClipDef {
 pub const ALL_CLIPS: &[ClipDef] = &[
     ClipDef {
         id: "h264_aac_mp4",
-        video_codec: "libx264", audio_codec: "aac", container: "mp4",
-        resolution: "1280x720", audio_channels: 2, duration_secs: 15,
-        browser_compatible: true, needs_hls_transcode: false,
+        video_codec: "libx264",
+        audio_codec: "aac",
+        container: "mp4",
+        resolution: "1280x720",
+        audio_channels: 2,
+        duration_secs: 15,
+        browser_compatible: true,
+        needs_hls_transcode: false,
     },
     ClipDef {
         id: "h264_ac3_mkv",
-        video_codec: "libx264", audio_codec: "ac3", container: "matroska",
-        resolution: "1280x720", audio_channels: 6, duration_secs: 15,
-        browser_compatible: false, needs_hls_transcode: true,
+        video_codec: "libx264",
+        audio_codec: "ac3",
+        container: "matroska",
+        resolution: "1280x720",
+        audio_channels: 6,
+        duration_secs: 15,
+        browser_compatible: false,
+        needs_hls_transcode: true,
     },
     ClipDef {
         id: "hevc_aac_mkv",
-        video_codec: "libx265", audio_codec: "aac", container: "matroska",
-        resolution: "1920x1080", audio_channels: 2, duration_secs: 15,
-        browser_compatible: false, needs_hls_transcode: true,
+        video_codec: "libx265",
+        audio_codec: "aac",
+        container: "matroska",
+        resolution: "1920x1080",
+        audio_channels: 2,
+        duration_secs: 15,
+        browser_compatible: false,
+        needs_hls_transcode: true,
     },
     ClipDef {
         id: "hevc_eac3_mkv",
-        video_codec: "libx265", audio_codec: "eac3", container: "matroska",
-        resolution: "1920x1080", audio_channels: 6, duration_secs: 10,
-        browser_compatible: false, needs_hls_transcode: true,
+        video_codec: "libx265",
+        audio_codec: "eac3",
+        container: "matroska",
+        resolution: "1920x1080",
+        audio_channels: 6,
+        duration_secs: 10,
+        browser_compatible: false,
+        needs_hls_transcode: true,
     },
     ClipDef {
         id: "vp9_opus_webm",
-        video_codec: "libvpx-vp9", audio_codec: "libopus", container: "webm",
-        resolution: "1280x720", audio_channels: 2, duration_secs: 15,
-        browser_compatible: false, needs_hls_transcode: true,
+        video_codec: "libvpx-vp9",
+        audio_codec: "libopus",
+        container: "webm",
+        resolution: "1280x720",
+        audio_channels: 2,
+        duration_secs: 15,
+        browser_compatible: false,
+        needs_hls_transcode: true,
     },
     ClipDef {
         id: "h264_aac_ts",
-        video_codec: "libx264", audio_codec: "aac", container: "mpegts",
-        resolution: "1280x720", audio_channels: 2, duration_secs: 15,
-        browser_compatible: false, needs_hls_transcode: true,
+        video_codec: "libx264",
+        audio_codec: "aac",
+        container: "mpegts",
+        resolution: "1280x720",
+        audio_channels: 2,
+        duration_secs: 15,
+        browser_compatible: false,
+        needs_hls_transcode: true,
     },
     ClipDef {
         id: "hevc_aac_mp4",
-        video_codec: "libx265", audio_codec: "aac", container: "mp4",
-        resolution: "1920x1080", audio_channels: 2, duration_secs: 15,
-        browser_compatible: false, needs_hls_transcode: true,
+        video_codec: "libx265",
+        audio_codec: "aac",
+        container: "mp4",
+        resolution: "1920x1080",
+        audio_channels: 2,
+        duration_secs: 15,
+        browser_compatible: false,
+        needs_hls_transcode: true,
     },
 ];
 
@@ -115,7 +150,10 @@ fn generate_clip(def: &ClipDef, output: &Path) -> bool {
 
     let video_filter = if def.video_codec == "libvpx-vp9" {
         // VP9 doesn't support drawtext easily, use simple testsrc
-        format!("testsrc=duration={}:size={}x{}:rate=24", def.duration_secs, w, h)
+        format!(
+            "testsrc=duration={}:size={}x{}:rate=24",
+            def.duration_secs, w, h
+        )
     } else {
         format!(
             "testsrc2=duration={}:size={}x{}:rate=24,{drawtext},format=yuv420p",
@@ -126,29 +164,52 @@ fn generate_clip(def: &ClipDef, output: &Path) -> bool {
     let audio_src = format!("sine=frequency=440:duration={}", def.duration_secs);
 
     let mut args: Vec<String> = vec![
-        "-y".into(), "-hide_banner".into(), "-loglevel".into(), "error".into(),
-        "-f".into(), "lavfi".into(), "-i".into(), video_filter,
-        "-f".into(), "lavfi".into(), "-i".into(), audio_src,
+        "-y".into(),
+        "-hide_banner".into(),
+        "-loglevel".into(),
+        "error".into(),
+        "-f".into(),
+        "lavfi".into(),
+        "-i".into(),
+        video_filter,
+        "-f".into(),
+        "lavfi".into(),
+        "-i".into(),
+        audio_src,
     ];
 
     // Video encoder settings
     args.extend(["-c:v".into(), def.video_codec.into()]);
     match def.video_codec {
         "libx264" => {
-            args.extend(["-preset".into(), "ultrafast".into(), "-crf".into(), "28".into()]);
+            args.extend([
+                "-preset".into(),
+                "ultrafast".into(),
+                "-crf".into(),
+                "28".into(),
+            ]);
         }
         "libx265" => {
-            args.extend(["-preset".into(), "ultrafast".into(), "-crf".into(), "32".into()]);
+            args.extend([
+                "-preset".into(),
+                "ultrafast".into(),
+                "-crf".into(),
+                "32".into(),
+            ]);
             if def.resolution == "1920x1080" || def.resolution.contains("2160") {
                 args.extend(["-pix_fmt".into(), "yuv420p".into()]);
             }
         }
         "libvpx-vp9" => {
             args.extend([
-                "-b:v".into(), "1M".into(),
-                "-crf".into(), "30".into(),
-                "-deadline".into(), "realtime".into(),
-                "-cpu-used".into(), "8".into(),
+                "-b:v".into(),
+                "1M".into(),
+                "-crf".into(),
+                "30".into(),
+                "-deadline".into(),
+                "realtime".into(),
+                "-cpu-used".into(),
+                "8".into(),
             ]);
         }
         _ => {}
@@ -158,9 +219,15 @@ fn generate_clip(def: &ClipDef, output: &Path) -> bool {
     args.extend(["-c:a".into(), def.audio_codec.into()]);
     args.extend(["-ac".into(), def.audio_channels.to_string()]);
     match def.audio_codec {
-        "aac" => { args.extend(["-b:a".into(), "128k".into()]); }
-        "ac3" | "eac3" => { args.extend(["-b:a".into(), "384k".into()]); }
-        "libopus" => { args.extend(["-b:a".into(), "128k".into()]); }
+        "aac" => {
+            args.extend(["-b:a".into(), "128k".into()]);
+        }
+        "ac3" | "eac3" => {
+            args.extend(["-b:a".into(), "384k".into()]);
+        }
+        "libopus" => {
+            args.extend(["-b:a".into(), "128k".into()]);
+        }
         _ => {}
     }
 
@@ -171,8 +238,11 @@ fn generate_clip(def: &ClipDef, output: &Path) -> bool {
     let status = Command::new("ffmpeg").args(&args).status();
     match status {
         Ok(s) if s.success() => {
-            eprintln!("  Generated clip: {} ({} bytes)", def.id,
-                std::fs::metadata(output).map(|m| m.len()).unwrap_or(0));
+            eprintln!(
+                "  Generated clip: {} ({} bytes)",
+                def.id,
+                std::fs::metadata(output).map(|m| m.len()).unwrap_or(0)
+            );
             true
         }
         Ok(s) => {
@@ -197,8 +267,12 @@ pub fn ensure_all_clips() {
 pub fn extract_golden_frame(clip_path: &Path, timestamp_secs: f64, output: &Path) -> bool {
     Command::new("ffmpeg")
         .args([
-            "-y", "-hide_banner", "-loglevel", "error",
-            "-ss", &format!("{timestamp_secs:.3}"),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            &format!("{timestamp_secs:.3}"),
             "-i",
         ])
         .arg(clip_path)
@@ -222,7 +296,9 @@ pub fn compare_images(a: &Path, b: &Path) -> Option<f64> {
     // ImageMagick outputs RMSE to stderr
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Format: "1234.56 (0.0189)" - we want the normalized value in parens
-    stderr.split('(').nth(1)
+    stderr
+        .split('(')
+        .nth(1)
         .and_then(|s| s.trim_end_matches(')').trim().parse::<f64>().ok())
         .map(|v| v * 100.0) // convert to percentage
 }
@@ -246,23 +322,42 @@ pub struct ChunkWrite {
 
 impl MockTorrentWriter {
     /// Create from a source file with a predefined write schedule.
-    pub fn new(source_path: &Path, output_path: PathBuf, schedule: Vec<ChunkWrite>) -> std::io::Result<Self> {
+    pub fn new(
+        source_path: &Path,
+        output_path: PathBuf,
+        schedule: Vec<ChunkWrite>,
+    ) -> std::io::Result<Self> {
         let source_data = std::fs::read(source_path)?;
-        Ok(Self { source_data, output_path, schedule })
+        Ok(Self {
+            source_data,
+            output_path,
+            schedule,
+        })
     }
 
     /// Create with evenly-spaced chunks.
-    pub fn uniform(source_path: &Path, output_path: PathBuf, chunk_count: usize, delay_ms: u64) -> std::io::Result<Self> {
+    pub fn uniform(
+        source_path: &Path,
+        output_path: PathBuf,
+        chunk_count: usize,
+        delay_ms: u64,
+    ) -> std::io::Result<Self> {
         let source_data = std::fs::read(source_path)?;
         let chunk_size = source_data.len() / chunk_count;
-        let schedule: Vec<ChunkWrite> = (0..chunk_count).map(|i| {
-            let remaining = source_data.len() - (i * chunk_size);
-            ChunkWrite {
-                delay_ms,
-                byte_count: chunk_size.min(remaining),
-            }
-        }).collect();
-        Ok(Self { source_data, output_path, schedule })
+        let schedule: Vec<ChunkWrite> = (0..chunk_count)
+            .map(|i| {
+                let remaining = source_data.len() - (i * chunk_size);
+                ChunkWrite {
+                    delay_ms,
+                    byte_count: chunk_size.min(remaining),
+                }
+            })
+            .collect();
+        Ok(Self {
+            source_data,
+            output_path,
+            schedule,
+        })
     }
 
     /// Preset: fast torrent (100ms between chunks)
@@ -275,41 +370,106 @@ impl MockTorrentWriter {
         let data = std::fs::read(source_path)?;
         let chunk = data.len() / 10;
         let schedule = vec![
-            ChunkWrite { delay_ms: 900, byte_count: chunk },
-            ChunkWrite { delay_ms: 300, byte_count: chunk },
-            ChunkWrite { delay_ms: 500, byte_count: chunk },
-            ChunkWrite { delay_ms: 100, byte_count: chunk },
-            ChunkWrite { delay_ms: 100, byte_count: chunk },
-            ChunkWrite { delay_ms: 100, byte_count: chunk },
-            ChunkWrite { delay_ms: 100, byte_count: chunk },
-            ChunkWrite { delay_ms: 100, byte_count: chunk },
-            ChunkWrite { delay_ms: 100, byte_count: chunk },
-            ChunkWrite { delay_ms: 100, byte_count: data.len() - 9 * chunk },
+            ChunkWrite {
+                delay_ms: 900,
+                byte_count: chunk,
+            },
+            ChunkWrite {
+                delay_ms: 300,
+                byte_count: chunk,
+            },
+            ChunkWrite {
+                delay_ms: 500,
+                byte_count: chunk,
+            },
+            ChunkWrite {
+                delay_ms: 100,
+                byte_count: chunk,
+            },
+            ChunkWrite {
+                delay_ms: 100,
+                byte_count: chunk,
+            },
+            ChunkWrite {
+                delay_ms: 100,
+                byte_count: chunk,
+            },
+            ChunkWrite {
+                delay_ms: 100,
+                byte_count: chunk,
+            },
+            ChunkWrite {
+                delay_ms: 100,
+                byte_count: chunk,
+            },
+            ChunkWrite {
+                delay_ms: 100,
+                byte_count: chunk,
+            },
+            ChunkWrite {
+                delay_ms: 100,
+                byte_count: data.len() - 9 * chunk,
+            },
         ];
-        Ok(Self { source_data: data, output_path, schedule })
+        Ok(Self {
+            source_data: data,
+            output_path,
+            schedule,
+        })
     }
 
     /// Preset: stalling download (writes half, pauses, then completes)
-    pub fn stalling(source_path: &Path, output_path: PathBuf, stall_ms: u64) -> std::io::Result<Self> {
+    pub fn stalling(
+        source_path: &Path,
+        output_path: PathBuf,
+        stall_ms: u64,
+    ) -> std::io::Result<Self> {
         let data = std::fs::read(source_path)?;
         let half = data.len() / 2;
         let schedule = vec![
-            ChunkWrite { delay_ms: 100, byte_count: half },
-            ChunkWrite { delay_ms: stall_ms, byte_count: 0 }, // stall (write nothing)
-            ChunkWrite { delay_ms: 100, byte_count: data.len() - half },
+            ChunkWrite {
+                delay_ms: 100,
+                byte_count: half,
+            },
+            ChunkWrite {
+                delay_ms: stall_ms,
+                byte_count: 0,
+            }, // stall (write nothing)
+            ChunkWrite {
+                delay_ms: 100,
+                byte_count: data.len() - half,
+            },
         ];
-        Ok(Self { source_data: data, output_path, schedule })
+        Ok(Self {
+            source_data: data,
+            output_path,
+            schedule,
+        })
     }
 
     /// Preset: burst (nothing for N ms, then entire file at once)
-    pub fn burst(source_path: &Path, output_path: PathBuf, initial_delay_ms: u64) -> std::io::Result<Self> {
+    pub fn burst(
+        source_path: &Path,
+        output_path: PathBuf,
+        initial_delay_ms: u64,
+    ) -> std::io::Result<Self> {
         let data = std::fs::read(source_path)?;
         let len = data.len();
         let schedule = vec![
-            ChunkWrite { delay_ms: initial_delay_ms, byte_count: 0 },
-            ChunkWrite { delay_ms: 0, byte_count: len },
+            ChunkWrite {
+                delay_ms: initial_delay_ms,
+                byte_count: 0,
+            },
+            ChunkWrite {
+                delay_ms: 0,
+                byte_count: len,
+            },
         ];
-        Ok(Self { source_data: data, output_path, schedule })
+        Ok(Self {
+            source_data: data,
+            output_path,
+            schedule,
+        })
     }
 
     /// Execute the write schedule asynchronously (sequential append).
@@ -360,57 +520,122 @@ pub struct PieceWrite {
 
 impl SparseTorrentWriter {
     /// Create with explicit piece schedule.
-    pub fn new(source_path: &Path, output_path: PathBuf, piece_size: usize, schedule: Vec<PieceWrite>) -> std::io::Result<Self> {
+    pub fn new(
+        source_path: &Path,
+        output_path: PathBuf,
+        piece_size: usize,
+        schedule: Vec<PieceWrite>,
+    ) -> std::io::Result<Self> {
         let source_data = std::fs::read(source_path)?;
-        Ok(Self { source_data, output_path, piece_size, piece_schedule: schedule })
+        Ok(Self {
+            source_data,
+            output_path,
+            piece_size,
+            piece_schedule: schedule,
+        })
     }
 
     /// Sequential order with delays (like torrent with sequential preference).
-    pub fn sequential(source_path: &Path, output_path: PathBuf, piece_size: usize, delay_ms: u64) -> std::io::Result<Self> {
-        let data = std::fs::read(source_path)?;
-        let piece_count = (data.len() + piece_size - 1) / piece_size;
-        let schedule: Vec<PieceWrite> = (0..piece_count)
-            .map(|i| PieceWrite { piece_index: i, delay_ms })
-            .collect();
-        Ok(Self { source_data: data, output_path, piece_size, piece_schedule: schedule })
-    }
-
-    /// Sequential with variable delays (slow start pattern).
-    pub fn sequential_slow_start(source_path: &Path, output_path: PathBuf, piece_size: usize) -> std::io::Result<Self> {
+    pub fn sequential(
+        source_path: &Path,
+        output_path: PathBuf,
+        piece_size: usize,
+        delay_ms: u64,
+    ) -> std::io::Result<Self> {
         let data = std::fs::read(source_path)?;
         let piece_count = (data.len() + piece_size - 1) / piece_size;
         let schedule: Vec<PieceWrite> = (0..piece_count)
             .map(|i| PieceWrite {
                 piece_index: i,
-                delay_ms: if i == 0 { 900 } else if i == 1 { 300 } else if i == 2 { 500 } else { 50 },
+                delay_ms,
             })
             .collect();
-        Ok(Self { source_data: data, output_path, piece_size, piece_schedule: schedule })
+        Ok(Self {
+            source_data: data,
+            output_path,
+            piece_size,
+            piece_schedule: schedule,
+        })
+    }
+
+    /// Sequential with variable delays (slow start pattern).
+    pub fn sequential_slow_start(
+        source_path: &Path,
+        output_path: PathBuf,
+        piece_size: usize,
+    ) -> std::io::Result<Self> {
+        let data = std::fs::read(source_path)?;
+        let piece_count = (data.len() + piece_size - 1) / piece_size;
+        let schedule: Vec<PieceWrite> = (0..piece_count)
+            .map(|i| PieceWrite {
+                piece_index: i,
+                delay_ms: if i == 0 {
+                    900
+                } else if i == 1 {
+                    300
+                } else if i == 2 {
+                    500
+                } else {
+                    50
+                },
+            })
+            .collect();
+        Ok(Self {
+            source_data: data,
+            output_path,
+            piece_size,
+            piece_schedule: schedule,
+        })
     }
 
     /// Out-of-order pieces (realistic torrent without sequential preference).
     /// Writes first piece, then last, then middle pieces in random-ish order.
-    pub fn out_of_order(source_path: &Path, output_path: PathBuf, piece_size: usize, delay_ms: u64) -> std::io::Result<Self> {
+    pub fn out_of_order(
+        source_path: &Path,
+        output_path: PathBuf,
+        piece_size: usize,
+        delay_ms: u64,
+    ) -> std::io::Result<Self> {
         let data = std::fs::read(source_path)?;
         let piece_count = (data.len() + piece_size - 1) / piece_size;
         let mut order: Vec<usize> = Vec::with_capacity(piece_count);
         // First piece (needed for container header)
         order.push(0);
         // Last piece
-        if piece_count > 1 { order.push(piece_count - 1); }
+        if piece_count > 1 {
+            order.push(piece_count - 1);
+        }
         // Even-indexed pieces
-        for i in (2..piece_count - 1).step_by(2) { order.push(i); }
+        for i in (2..piece_count - 1).step_by(2) {
+            order.push(i);
+        }
         // Odd-indexed pieces
-        for i in (1..piece_count - 1).step_by(2) { order.push(i); }
+        for i in (1..piece_count - 1).step_by(2) {
+            order.push(i);
+        }
 
-        let schedule: Vec<PieceWrite> = order.into_iter()
-            .map(|i| PieceWrite { piece_index: i, delay_ms })
+        let schedule: Vec<PieceWrite> = order
+            .into_iter()
+            .map(|i| PieceWrite {
+                piece_index: i,
+                delay_ms,
+            })
             .collect();
-        Ok(Self { source_data: data, output_path, piece_size, piece_schedule: schedule })
+        Ok(Self {
+            source_data: data,
+            output_path,
+            piece_size,
+            piece_schedule: schedule,
+        })
     }
 
     /// Stalling pattern: first few pieces fast, then long pause, then rest.
-    pub fn stalling(source_path: &Path, output_path: PathBuf, piece_size: usize, stall_ms: u64) -> std::io::Result<Self> {
+    pub fn stalling(
+        source_path: &Path,
+        output_path: PathBuf,
+        piece_size: usize,
+        stall_ms: u64,
+    ) -> std::io::Result<Self> {
         let data = std::fs::read(source_path)?;
         let piece_count = (data.len() + piece_size - 1) / piece_size;
         let stall_at = piece_count / 3;
@@ -420,7 +645,12 @@ impl SparseTorrentWriter {
                 delay_ms: if i == stall_at { stall_ms } else { 50 },
             })
             .collect();
-        Ok(Self { source_data: data, output_path, piece_size, piece_schedule: schedule })
+        Ok(Self {
+            source_data: data,
+            output_path,
+            piece_size,
+            piece_schedule: schedule,
+        })
     }
 
     /// Execute: pre-allocate sparse file, then write pieces at offsets.
@@ -439,7 +669,9 @@ impl SparseTorrentWriter {
             }
 
             let offset = pw.piece_index * self.piece_size;
-            if offset >= self.source_data.len() { continue; }
+            if offset >= self.source_data.len() {
+                continue;
+            }
             let end = (offset + self.piece_size).min(self.source_data.len());
             let piece_data = &self.source_data[offset..end];
 
@@ -476,7 +708,11 @@ pub struct SegmentDelay {
 impl SegmentDelayController {
     pub fn new(staging_dir: PathBuf, served_dir: PathBuf, schedule: Vec<SegmentDelay>) -> Self {
         std::fs::create_dir_all(&served_dir).ok();
-        Self { staging_dir, served_dir, schedule }
+        Self {
+            staging_dir,
+            served_dir,
+            schedule,
+        }
     }
 
     /// Run the delay controller - moves segments from staging to served on schedule.

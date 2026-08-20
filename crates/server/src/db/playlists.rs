@@ -8,6 +8,19 @@ use uuid::Uuid;
 pub use streamx_api::types::{AddTrackRequest, Playlist, PlaylistTrack};
 
 impl Database {
+    /// True when the playlist exists and belongs to `user_id`.
+    pub async fn playlist_owned_by(&self, playlist_id: &str, user_id: &str) -> Result<bool> {
+        let conn = self.connection().lock().await;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM playlists WHERE id = ?1 AND user_id = ?2",
+                rusqlite::params![playlist_id, user_id],
+                |row| row.get(0),
+            )
+            .context(error::DatabaseSnafu)?;
+        Ok(count > 0)
+    }
+
     pub async fn create_playlist(&self, user_id: &str, name: &str) -> Result<Playlist> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
@@ -135,25 +148,31 @@ impl Database {
             .context(error::DatabaseSnafu)?;
         let position = max_pos + 1;
 
-        conn.execute(
-            "INSERT INTO playlist_tracks (id, playlist_id, info_hash, file_index, title, artist, album, \
-             duration_seconds, artwork_url, position, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            rusqlite::params![
-                id,
-                playlist_id,
-                req.info_hash,
-                req.file_index.unwrap_or(0),
-                req.title,
-                req.artist,
-                req.album,
-                req.duration_seconds,
-                req.artwork_url,
-                position,
-                now,
-            ],
-        )
-        .context(error::DatabaseSnafu)?;
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO playlist_tracks (id, playlist_id, info_hash, file_index, title, artist, album, \
+                 duration_seconds, artwork_url, position, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                rusqlite::params![
+                    id,
+                    playlist_id,
+                    req.info_hash,
+                    req.file_index.unwrap_or(0),
+                    req.title,
+                    req.artist,
+                    req.album,
+                    req.duration_seconds,
+                    req.artwork_url,
+                    position,
+                    now,
+                ],
+            )
+            .context(error::DatabaseSnafu)?;
+        if inserted == 0 {
+            return Err(crate::error::Error::BadRequest {
+                message: "Track is already in this playlist".to_string(),
+            });
+        }
 
         // Touch playlist updated_at
         let _ = conn.execute(

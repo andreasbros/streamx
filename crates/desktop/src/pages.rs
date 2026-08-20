@@ -159,22 +159,16 @@ pub fn movie_page(state: &AppState, theme: &Theme) -> impl IntoElement {
                     m.year.map(|y| y.to_string()).unwrap_or_default(),
                 ))
                 .child(SharedString::from(
-                    m.rating
-                        .map(|r| format!("★ {:.1}", r))
-                        .unwrap_or_default(),
+                    m.rating.map(|r| format!("★ {:.1}", r)).unwrap_or_default(),
                 ))
                 .child(SharedString::from(
-                    m.runtime
-                        .map(|r| format!("{} min", r))
-                        .unwrap_or_default(),
+                    m.runtime.map(|r| format!("{} min", r)).unwrap_or_default(),
                 ))
-                .child(SharedString::from(
-                    if m.genres.is_empty() {
-                        "".to_string()
-                    } else {
-                        m.genres.join(" · ")
-                    },
-                )),
+                .child(SharedString::from(if m.genres.is_empty() {
+                    "".to_string()
+                } else {
+                    m.genres.join(" · ")
+                })),
         );
 
     // Summary
@@ -232,13 +226,11 @@ pub fn movie_page(state: &AppState, theme: &Theme) -> impl IntoElement {
                     .text_color(theme.error())
                     .child(SharedString::from(format!("↓{}", v.leeches))),
             )
-            .child(
-                primary_button(
-                    SharedString::from(format!("play-variant-{}", i)),
-                    "Play",
-                    theme,
-                ),
-            );
+            .child(primary_button(
+                SharedString::from(format!("play-variant-{}", i)),
+                "Play",
+                theme,
+            ));
         variants_col = variants_col.child(row);
     }
 
@@ -257,9 +249,7 @@ pub fn movie_page(state: &AppState, theme: &Theme) -> impl IntoElement {
                 .max_w(px(680.0))
                 .child(summary),
         )
-        .child(
-            section_title("Variants", theme).mt(px(theme.space_5())),
-        )
+        .child(section_title("Variants", theme).mt(px(theme.space_5())))
         .child(variants_col)
         .into_any_element()
 }
@@ -318,8 +308,12 @@ fn fallback(theme: &Theme, text: &'static str) -> impl IntoElement {
 }
 
 // Picking a tile by index from the browse grid: returns the group if found.
-pub fn tile_at(browse: &BrowseData, section: BrowseSection, idx: usize) -> Option<SearchResultGroup> {
-    let row: &[SearchResultGroup] = match section {
+pub fn tile_at(
+    browse: &BrowseData,
+    section: BrowseSection,
+    idx: usize,
+) -> Option<std::sync::Arc<SearchResultGroup>> {
+    let row: &[std::sync::Arc<SearchResultGroup>] = match section {
         BrowseSection::Latest => &browse.latest,
         BrowseSection::Popular => &browse.popular,
         BrowseSection::TopRated => &browse.top_rated,

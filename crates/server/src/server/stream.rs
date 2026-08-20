@@ -75,7 +75,7 @@ async fn handle_stream_ws(mut socket: WebSocket, state: AppState, id: String) {
             .await
             .is_err()
         {
-            let _ = state.torrent_engine.pause(&id).await;
+            pause_unless_pinned(&state, &id).await;
             return;
         }
 
@@ -155,7 +155,25 @@ async fn handle_stream_ws(mut socket: WebSocket, state: AppState, id: String) {
     state
         .ws_connections
         .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-    let _ = state.torrent_engine.pause(&id).await;
+    pause_unless_pinned(&state, &id).await;
+}
+
+/// Pause a torrent when its viewer disconnects — unless the download is
+/// pinned (background download), which keeps going with no client.
+async fn pause_unless_pinned(state: &AppState, id: &str) {
+    let pinned = state
+        .torrent_engine
+        .get_download(id)
+        .await
+        .ok()
+        .flatten()
+        .map(|d| d.pinned)
+        .unwrap_or(false);
+    if pinned {
+        debug!(stream_id = %id, "client disconnected; pinned download keeps running");
+        return;
+    }
+    let _ = state.torrent_engine.pause(id).await;
 }
 
 pub async fn url_playlist(
@@ -209,6 +227,25 @@ fn md5_hash(s: &str) -> u64 {
     hasher.finish()
 }
 
+/// With the `disable_transcode` server setting on, no server-side
+/// transcode is started: WEB-compatible releases play directly via
+/// `/api/stream/{id}/file`, everything else is download-only.
+async fn ensure_transcode_allowed(state: &AppState, id: &str) -> std::result::Result<(), Error> {
+    let disabled = state
+        .db
+        .get_server_settings()
+        .await
+        .map(|s| s.disable_transcode)
+        .unwrap_or(true);
+    if disabled {
+        tracing::debug!(stream_id = %id, "transcode request rejected: disabled by server setting");
+        return Err(Error::BadRequest {
+            message: "Server-side transcoding is disabled".to_string(),
+        });
+    }
+    Ok(())
+}
+
 pub async fn playlist(
     State(state): State<AppState>,
     _claims: Claims,
@@ -219,6 +256,8 @@ pub async fn playlist(
         .get("quality")
         .map(|s| s.as_str())
         .unwrap_or("source");
+
+    ensure_transcode_allowed(&state, &id).await?;
 
     let download = state
         .torrent_engine
@@ -277,7 +316,7 @@ pub async fn playlist(
             if let Ok(Some((torrent_id, file_index))) =
                 state.torrent_engine.get_stream_file_info(&id).await
             {
-                let api = librqbit::Api::new(state.torrent_engine.session().clone(), None);
+                let api = librqbit::Api::new(state.torrent_engine.session(), None);
                 if let Ok(file_stream) =
                     api.api_stream(librqbit::api::TorrentIdOrHash::Id(torrent_id), file_index)
                 {
@@ -447,7 +486,7 @@ pub async fn stream_file(
             if let Ok(Some((torrent_id, file_index))) =
                 state.torrent_engine.get_stream_file_info(&id).await
             {
-                let api = librqbit::Api::new(state.torrent_engine.session().clone(), None);
+                let api = librqbit::Api::new(state.torrent_engine.session(), None);
                 if let Ok(mut file_stream) =
                     api.api_stream(librqbit::api::TorrentIdOrHash::Id(torrent_id), file_index)
                 {
@@ -641,7 +680,7 @@ pub async fn stream_vlc(
             if let Ok(Some((torrent_id, file_index))) =
                 state.torrent_engine.get_stream_file_info(&id).await
             {
-                let api = librqbit::Api::new(state.torrent_engine.session().clone(), None);
+                let api = librqbit::Api::new(state.torrent_engine.session(), None);
                 if let Ok(file_stream) =
                     api.api_stream(librqbit::api::TorrentIdOrHash::Id(torrent_id), file_index)
                 {
@@ -863,7 +902,7 @@ pub async fn stream_file_by_index(
                     native_idx,
                     "stream_file_by_index: serving via active librqbit stream"
                 );
-                let api = librqbit::Api::new(state.torrent_engine.session().clone(), None);
+                let api = librqbit::Api::new(state.torrent_engine.session(), None);
                 if let Ok(mut file_stream) =
                     api.api_stream(librqbit::api::TorrentIdOrHash::Id(torrent_id), native_idx)
                 {

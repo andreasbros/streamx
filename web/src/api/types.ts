@@ -117,6 +117,30 @@ export interface StreamStatus {
   video_codec?: string;
 }
 
+export interface ServerSettings {
+  disable_transcode: boolean;
+  web_only: boolean;
+}
+
+export interface DownloadItem {
+  info_hash: string;
+  title: string;
+  file_name: string;
+  file_size: number;
+  status: string;
+  progress: number;
+  pinned: boolean;
+  download_all: boolean;
+  created_at: string;
+  updated_at: string;
+  peers: number;
+  speed: number;
+}
+
+export interface DownloadsResponse {
+  downloads: DownloadItem[];
+}
+
 export interface WatchHistoryItem {
   id: string;
   magnet_uri: string;

@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 
 struct TestServer {
     base_url: String,
+    data_dir: std::path::PathBuf,
+    db: streamx::db::Database,
     _tmp: tempfile::TempDir,
 }
 
@@ -22,7 +24,7 @@ async fn start_test_server() -> TestServer {
             bind: "127.0.0.1".to_string(),
             open_browser: false,
             log_level: None,
-},
+        },
         torrent: streamx::config::TorrentConfig {
             max_connections: 200,
             sequential: true,
@@ -42,7 +44,8 @@ async fn start_test_server() -> TestServer {
             threads: None,
             gpu: false,
             hls_downscale: true,
-            hls_max_height: 1080, hls_force_stereo: true,
+            hls_max_height: 1080,
+            hls_force_stereo: true,
         },
         auth: streamx::config::AuthConfig {
             jwt_secret: "test-secret-key-for-integration-tests".to_string(),
@@ -64,6 +67,7 @@ async fn start_test_server() -> TestServer {
     let db_path = data_dir.join("streamx.db");
     let database = streamx::db::Database::open(&db_path).unwrap();
     database.init().await.unwrap();
+    let db_for_tests = database.clone();
 
     database.set_downloading_to_paused().await.unwrap();
     let torrent_engine =
@@ -104,6 +108,8 @@ async fn start_test_server() -> TestServer {
 
     TestServer {
         base_url: format!("http://127.0.0.1:{port}"),
+        data_dir,
+        db: db_for_tests,
         _tmp: tmp,
     }
 }
@@ -315,47 +321,230 @@ async fn get_stream_status() {
     assert_eq!(body["status"], "initializing");
 }
 
-#[tokio::test]
-async fn delete_stream() {
-    let server = start_test_server().await;
-    let token = get_token(&server.base_url, "delstreamuser", "password123").await;
-
+async fn create_stream_with_hash(base_url: &str, token: &str, hash: &str) -> String {
     let client = reqwest::Client::new();
-
-    let create_resp = client
-        .post(format!("{}/api/stream", server.base_url))
+    let resp = client
+        .post(format!("{base_url}/api/stream"))
         .header("Authorization", format!("Bearer {token}"))
         .json(&serde_json::json!({
-            "magnet_uri": "magnet:?xt=urn:btih:2222222222222222222222222222222222222222&dn=test",
+            "magnet_uri": format!("magnet:?xt=urn:btih:{hash}&dn=test"),
         }))
         .send()
         .await
         .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    body["stream_id"].as_str().unwrap().to_string()
+}
 
-    let create_body: Value = create_resp.json().await.unwrap();
-    let stream_id = create_body["stream_id"].as_str().unwrap();
+#[tokio::test]
+async fn delete_stream_removes_files_and_db_rows() {
+    let server = start_test_server().await;
+    // First registered user is admin.
+    let token = get_token(&server.base_url, "delstreamuser", "password123").await;
+    let hash = "2222222222222222222222222222222222222222";
+    let stream_id = create_stream_with_hash(&server.base_url, &token, hash).await;
+    assert_eq!(stream_id, hash);
 
+    // Simulate a partially downloaded multi-file torrent on disk plus
+    // dependent DB rows, then verify everything is removed.
+    let manifest = serde_json::json!([
+        {"seq_index": 0, "native_index": 0, "path": "Album/01.mp3", "size": 10, "is_audio": true, "is_video": false},
+        {"seq_index": 1, "native_index": 1, "path": "Album/02.mp3", "size": 10, "is_audio": true, "is_video": false},
+        {"seq_index": 2, "native_index": 2, "path": "flat.mkv", "size": 10, "is_audio": false, "is_video": true},
+    ]);
+    server
+        .db
+        .update_download_files(hash, &manifest.to_string())
+        .await
+        .unwrap();
+
+    let partial = server.data_dir.join("downloads").join("partial");
+    let complete = server.data_dir.join("downloads").join("complete");
+    let posters = server.data_dir.join("downloads").join("posters");
+    std::fs::create_dir_all(partial.join("Album")).unwrap();
+    std::fs::create_dir_all(complete.join("Album")).unwrap();
+    std::fs::create_dir_all(&posters).unwrap();
+    std::fs::write(partial.join("Album/01.mp3"), b"x").unwrap();
+    std::fs::write(complete.join("Album/02.mp3"), b"x").unwrap();
+    std::fs::write(complete.join("flat.mkv"), b"x").unwrap();
+    std::fs::write(posters.join(format!("{hash}.jpg")), b"x").unwrap();
+
+    {
+        let conn = server.db.connection().lock().await;
+        conn.execute(
+            "INSERT OR IGNORE INTO users (id, username, password_hash, created_at, is_admin) \
+             VALUES ('u1', 'seeduser', 'x', '2026-01-01', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO watch_history (id, user_id, magnet_uri, title, watched_at) \
+             VALUES ('wh1', 'u1', ?1, 't', '2026-01-01')",
+            rusqlite::params![format!("magnet:?xt=urn:btih:{hash}&dn=test")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO favourites (id, user_id, content_type, title, info_hash, created_at) \
+             VALUES ('f1', 'u1', 'movie', 't', ?1, '2026-01-01')",
+            rusqlite::params![hash],
+        )
+        .unwrap();
+    }
+
+    let client = reqwest::Client::new();
     let resp = client
         .delete(format!("{}/api/stream/{stream_id}", server.base_url))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-
     assert_eq!(resp.status(), StatusCode::OK);
-
     let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["status"], "stopped");
+    assert_eq!(body["status"], "deleted");
 
+    // DB rows gone.
+    assert!(server.db.get_download(hash).await.unwrap().is_none());
+    {
+        let conn = server.db.connection().lock().await;
+        let wh: i64 = conn
+            .query_row("SELECT COUNT(*) FROM watch_history", [], |r| r.get(0))
+            .unwrap();
+        let fav: i64 = conn
+            .query_row("SELECT COUNT(*) FROM favourites", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(wh, 0, "watch_history row should be deleted");
+        assert_eq!(fav, 0, "favourites row should be deleted");
+    }
+
+    // Files gone (torrent folders removed recursively, flat file removed,
+    // poster removed).
+    assert!(!partial.join("Album").exists());
+    assert!(!complete.join("Album").exists());
+    assert!(!complete.join("flat.mkv").exists());
+    assert!(!posters.join(format!("{hash}.jpg")).exists());
+
+    // Stream no longer known.
     let get_resp = client
         .get(format!("{}/api/stream/{stream_id}", server.base_url))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
+}
 
-    // Download persists in DB after HLS cleanup
-    assert_eq!(get_resp.status(), StatusCode::OK);
+#[tokio::test]
+async fn delete_stream_requires_admin() {
+    let server = start_test_server().await;
+    let admin_token = get_token(&server.base_url, "firstadmin", "password123").await;
+    let user_token = get_token(&server.base_url, "seconduser", "password123").await;
+    let hash = "3333333333333333333333333333333333333333";
+    let stream_id = create_stream_with_hash(&server.base_url, &admin_token, hash).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .delete(format!("{}/api/stream/{stream_id}", server.base_url))
+        .header("Authorization", format!("Bearer {user_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Row untouched.
+    assert!(server.db.get_download(hash).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn pin_and_unpin_download() {
+    let server = start_test_server().await;
+    let token = get_token(&server.base_url, "pinuser", "password123").await;
+    let hash = "4444444444444444444444444444444444444444";
+    let stream_id = create_stream_with_hash(&server.base_url, &token, hash).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!(
+            "{}/api/stream/{stream_id}/download",
+            server.base_url
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let dl = server.db.get_download(hash).await.unwrap().unwrap();
+    assert!(dl.pinned);
+
+    let resp = client
+        .delete(format!(
+            "{}/api/stream/{stream_id}/download",
+            server.base_url
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let dl = server.db.get_download(hash).await.unwrap().unwrap();
+    assert!(!dl.pinned);
+
+    // Unknown stream 404s on pin.
+    let resp = client
+        .post(format!(
+            "{}/api/stream/ffffffffffffffffffffffffffffffffffffffff/download",
+            server.base_url
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn downloads_queue_lists_streams() {
+    let server = start_test_server().await;
+    let token = get_token(&server.base_url, "queueuser", "password123").await;
+    let hash = "5555555555555555555555555555555555555555";
+    let stream_id = create_stream_with_hash(&server.base_url, &token, hash).await;
+
+    let client = reqwest::Client::new();
+    // Unauthenticated is rejected.
+    let resp = client
+        .get(format!("{}/api/downloads", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Pin it so the queue shows the background flag.
+    client
+        .post(format!(
+            "{}/api/stream/{stream_id}/download",
+            server.base_url
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!("{}/api/downloads", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    let downloads = body["downloads"].as_array().unwrap();
+    let item = downloads
+        .iter()
+        .find(|d| d["info_hash"] == hash)
+        .expect("created download should appear in the queue");
+    assert_eq!(item["pinned"], true);
+    assert!(item["status"].is_string());
+    assert!(item["progress"].is_number());
 }
 
 #[tokio::test]
@@ -453,52 +642,41 @@ async fn settings_crud() {
 async fn test_video_endpoint_returns_mp4() {
     let server = start_test_server().await;
 
-    let client = reqwest::Client::new();
+    // The endpoint redirects to an external demo asset. Assert the
+    // redirect itself instead of following it, so the test doesn't
+    // depend on a third-party host being up.
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
     let resp = client
         .get(format!("{}/api/test/video", server.base_url))
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    assert!(content_type.contains("video/mp4"));
-
-    let body = resp.bytes().await.unwrap();
-    assert!(!body.is_empty());
-    assert_eq!(&body[4..8], b"ftyp");
+    assert!(resp.status().is_redirection());
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.ends_with(".mp4"));
 }
 
 #[tokio::test]
 async fn test_hls_playlist_endpoint() {
     let server = start_test_server().await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
     let resp = client
         .get(format!("{}/api/test/playlist.m3u8", server.base_url))
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
-
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    assert!(content_type.contains("mpegurl"));
-
-    let body = resp.text().await.unwrap();
-    assert!(body.contains("#EXTM3U"));
-    assert!(body.contains("#EXT-X-TARGETDURATION"));
+    assert!(resp.status().is_redirection());
+    let location = resp.headers().get("location").unwrap().to_str().unwrap();
+    assert!(location.contains(".m3u8"));
 }
 
 #[tokio::test]
@@ -517,7 +695,7 @@ async fn admin_user_creation_via_config() {
             bind: "127.0.0.1".to_string(),
             open_browser: false,
             log_level: None,
-},
+        },
         torrent: streamx::config::TorrentConfig {
             max_connections: 200,
             sequential: true,
@@ -537,7 +715,8 @@ async fn admin_user_creation_via_config() {
             threads: None,
             gpu: false,
             hls_downscale: true,
-            hls_max_height: 1080, hls_force_stereo: true,
+            hls_max_height: 1080,
+            hls_force_stereo: true,
         },
         auth: streamx::config::AuthConfig {
             jwt_secret: "admin-test-secret".to_string(),
@@ -624,4 +803,222 @@ async fn admin_user_creation_via_config() {
     let me_body: Value = me_resp.json().await.unwrap();
     assert_eq!(me_body["username"], "myadmin");
     assert_eq!(me_body["is_admin"], true);
+}
+
+// ===================== Playlists =====================
+
+async fn create_playlist(base_url: &str, token: &str, name: &str) -> String {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base_url}/api/playlists"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    body["id"].as_str().unwrap().to_string()
+}
+
+async fn add_track(
+    base_url: &str,
+    token: &str,
+    playlist_id: &str,
+    hash: &str,
+    file_index: u32,
+    title: &str,
+) -> reqwest::Response {
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{base_url}/api/playlists/{playlist_id}/tracks"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "info_hash": hash,
+            "file_index": file_index,
+            "title": title,
+        }))
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn playlist_crud_and_track_ordering() {
+    let server = start_test_server().await;
+    let token = get_token(&server.base_url, "pluser", "password123").await;
+    let client = reqwest::Client::new();
+    let pid = create_playlist(&server.base_url, &token, "Road trip").await;
+
+    let hash = "dddd4444dddd4444dddd4444dddd4444dddd4444";
+    // Insert out of alphabetical order; playback order must follow
+    // insertion positions, never titles.
+    for (i, title) in [(0u32, "Zulu"), (1, "Alpha"), (2, "Mike")] {
+        let resp = add_track(&server.base_url, &token, &pid, hash, i, title).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    let resp = client
+        .get(format!("{}/api/playlists/{pid}/tracks", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = resp.json().await.unwrap();
+    let tracks = body["tracks"].as_array().unwrap();
+    assert_eq!(tracks.len(), 3);
+    let titles: Vec<&str> = tracks
+        .iter()
+        .map(|t| t["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        vec!["Zulu", "Alpha", "Mike"],
+        "position order, not title order"
+    );
+    let positions: Vec<i64> = tracks
+        .iter()
+        .map(|t| t["position"].as_i64().unwrap())
+        .collect();
+    assert_eq!(positions, vec![0, 1, 2]);
+
+    // Duplicate (same playlist, hash, file_index) is rejected.
+    let dup = add_track(&server.base_url, &token, &pid, hash, 1, "Alpha again").await;
+    assert_eq!(dup.status(), StatusCode::BAD_REQUEST);
+
+    // Remove the middle track; order of the rest is unchanged.
+    let track_id = tracks[1]["id"].as_str().unwrap();
+    let del = client
+        .delete(format!(
+            "{}/api/playlists/{pid}/tracks/{track_id}",
+            server.base_url
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), StatusCode::OK);
+
+    let resp = client
+        .get(format!("{}/api/playlists/{pid}/tracks", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let titles: Vec<String> = body["tracks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["title"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(titles, vec!["Zulu", "Mike"]);
+
+    // Delete the playlist; its tracks are gone with it (FK cascade).
+    let del = client
+        .delete(format!("{}/api/playlists/{pid}", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), StatusCode::OK);
+    let resp = client
+        .get(format!("{}/api/playlists/{pid}/tracks", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn playlists_are_private_to_their_owner() {
+    let server = start_test_server().await;
+    let owner = get_token(&server.base_url, "plowner", "password123").await;
+    let intruder = get_token(&server.base_url, "plintruder", "password123").await;
+    let pid = create_playlist(&server.base_url, &owner, "Private mix").await;
+    let hash = "eeee5555eeee5555eeee5555eeee5555eeee5555";
+    add_track(&server.base_url, &owner, &pid, hash, 0, "Secret song").await;
+
+    let client = reqwest::Client::new();
+    // Another user can neither read...
+    let resp = client
+        .get(format!("{}/api/playlists/{pid}/tracks", server.base_url))
+        .header("Authorization", format!("Bearer {intruder}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // ...nor write someone else's playlist.
+    let resp = add_track(&server.base_url, &intruder, &pid, hash, 1, "Injected").await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    // Nor delete it.
+    let resp = client
+        .delete(format!("{}/api/playlists/{pid}", server.base_url))
+        .header("Authorization", format!("Bearer {intruder}"))
+        .send()
+        .await
+        .unwrap();
+    // Delete is scoped by user_id: no error but nothing deleted.
+    assert_eq!(resp.status(), StatusCode::OK);
+    let resp = client
+        .get(format!("{}/api/playlists/{pid}/tracks", server.base_url))
+        .header("Authorization", format!("Bearer {owner}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "owner's playlist must survive"
+    );
+
+    // Unauthenticated requests are rejected outright.
+    let resp = client
+        .get(format!("{}/api/playlists/{pid}/tracks", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn favourite_music_pins_full_download() {
+    let server = start_test_server().await;
+    let token = get_token(&server.base_url, "favmusic", "password123").await;
+    let hash = "abcd9999abcd9999abcd9999abcd9999abcd9999";
+    let magnet = format!("magnet:?xt=urn:btih:{hash}&dn=Great%20Album");
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/favourites", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "content_type": "music",
+            "title": "Great Album",
+            "info_hash": hash,
+            "metadata_json": serde_json::json!({ "magnet": magnet }).to_string(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // The favourite triggers a pinned full-album download in the
+    // background; poll the DB for the row.
+    let mut pinned = false;
+    for _ in 0..40 {
+        if let Some(dl) = server.db.get_download(hash).await.unwrap() {
+            if dl.pinned && dl.download_all {
+                pinned = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(
+        pinned,
+        "favourited music must become a pinned full-album download"
+    );
 }

@@ -6,8 +6,8 @@ mod common;
 use common::*;
 use std::path::PathBuf;
 use streamx::config::TranscodeConfig;
-use streamx::transcode::HlsManager;
 use streamx::transcode::hls::PlaylistResponse;
+use streamx::transcode::HlsManager;
 
 fn test_transcode_config() -> TranscodeConfig {
     TranscodeConfig {
@@ -22,7 +22,8 @@ fn test_transcode_config() -> TranscodeConfig {
         threads: Some(2),
         gpu: false,
         hls_downscale: true,
-        hls_max_height: 1080, hls_force_stereo: true,
+        hls_max_height: 1080,
+        hls_force_stereo: true,
     }
 }
 
@@ -42,7 +43,10 @@ async fn create_hls_manager(name: &str) -> (HlsManager, PathBuf) {
 #[tokio::test]
 async fn passthrough_h264_mp4() {
     let clip = h264_720p_clip();
-    if !clip.exists() { eprintln!("SKIP: fixture not generated"); return; }
+    if !clip.exists() {
+        eprintln!("SKIP: fixture not generated");
+        return;
+    }
     let (mgr, cache_dir) = create_hls_manager("passthrough_h264").await;
     let stream_id = "test_passthrough";
 
@@ -53,7 +57,10 @@ async fn passthrough_h264_mp4() {
     // Wait for FFmpeg to produce segments
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    let resp = mgr.generate_playlist(stream_id, "source").await.expect("playlist");
+    let resp = mgr
+        .generate_playlist(stream_id, "source")
+        .await
+        .expect("playlist");
     match resp {
         PlaylistResponse::Content(content) => {
             assert!(content.contains("#EXTM3U"), "Missing EXTM3U");
@@ -61,7 +68,10 @@ async fn passthrough_h264_mp4() {
             // Passthrough uses flat playlist (no quality prefix)
             for line in content.lines() {
                 if !line.starts_with('#') && !line.is_empty() {
-                    assert!(!line.contains('/'), "Passthrough should have bare filenames: {line}");
+                    assert!(
+                        !line.contains('/'),
+                        "Passthrough should have bare filenames: {line}"
+                    );
                 }
             }
         }
@@ -69,7 +79,10 @@ async fn passthrough_h264_mp4() {
     }
 
     // Verify segment can be fetched (fMP4 .m4s)
-    let seg = mgr.get_segment(stream_id, "segment_0000.m4s").await.expect("get_segment");
+    let seg = mgr
+        .get_segment(stream_id, "segment_0000.m4s")
+        .await
+        .expect("get_segment");
     assert!(seg.is_some(), "Segment 0 missing");
     let data = seg.unwrap();
     assert!(data.len() > 8, "Segment too small for fMP4 box header");
@@ -91,7 +104,10 @@ async fn passthrough_h264_mp4() {
 #[tokio::test]
 async fn transcode_hevc_source_copies_video() {
     let clip = hevc_720p_clip();
-    if !clip.exists() { eprintln!("SKIP: fixture not generated"); return; }
+    if !clip.exists() {
+        eprintln!("SKIP: fixture not generated");
+        return;
+    }
     let (mgr, cache_dir) = create_hls_manager("hevc_source_copy").await;
     let stream_id = "test_hevc_source";
 
@@ -101,7 +117,10 @@ async fn transcode_hevc_source_copies_video() {
 
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    let resp = mgr.generate_playlist(stream_id, "source").await.expect("playlist");
+    let resp = mgr
+        .generate_playlist(stream_id, "source")
+        .await
+        .expect("playlist");
     match resp {
         PlaylistResponse::Content(content) => {
             assert!(content.contains("#EXTM3U"));
@@ -109,7 +128,10 @@ async fn transcode_hevc_source_copies_video() {
             // Transcoded variant: segment paths should include quality prefix
             for line in content.lines() {
                 if !line.starts_with('#') && !line.is_empty() {
-                    assert!(line.starts_with("source/"), "Missing quality prefix: {line}");
+                    assert!(
+                        line.starts_with("source/"),
+                        "Missing quality prefix: {line}"
+                    );
                 }
             }
         }
@@ -117,8 +139,10 @@ async fn transcode_hevc_source_copies_video() {
     }
 
     // Verify variant segment (fMP4 .m4s)
-    let seg = mgr.get_variant_segment(stream_id, "source", "segment_0000.m4s")
-        .await.expect("get_variant_segment");
+    let seg = mgr
+        .get_variant_segment(stream_id, "source", "segment_0000.m4s")
+        .await
+        .expect("get_variant_segment");
     assert!(seg.is_some(), "Variant segment missing");
     let data = seg.unwrap();
     assert!(data.len() > 8, "Segment too small for fMP4 box header");
@@ -130,15 +154,24 @@ async fn transcode_hevc_source_copies_video() {
     );
 
     // Verify segment cache works (second call returns same data)
-    let seg2 = mgr.get_variant_segment(stream_id, "source", "segment_0000.m4s")
-        .await.expect("cached get");
-    assert_eq!(seg2.unwrap().len(), data.len(), "Cache returned different size");
+    let seg2 = mgr
+        .get_variant_segment(stream_id, "source", "segment_0000.m4s")
+        .await
+        .expect("cached get");
+    assert_eq!(
+        seg2.unwrap().len(),
+        data.len(),
+        "Cache returned different size"
+    );
 }
 
 #[tokio::test]
 async fn transcode_hevc_720p() {
     let clip = hevc_720p_clip();
-    if !clip.exists() { eprintln!("SKIP: fixture not generated"); return; }
+    if !clip.exists() {
+        eprintln!("SKIP: fixture not generated");
+        return;
+    }
     let (mgr, _cache_dir) = create_hls_manager("hevc_720p").await;
     let stream_id = "test_hevc_720p";
 
@@ -148,7 +181,10 @@ async fn transcode_hevc_720p() {
 
     tokio::time::sleep(std::time::Duration::from_secs(8)).await;
 
-    let resp = mgr.generate_playlist(stream_id, "720p").await.expect("playlist");
+    let resp = mgr
+        .generate_playlist(stream_id, "720p")
+        .await
+        .expect("playlist");
     match resp {
         PlaylistResponse::Content(content) => {
             assert!(content.contains("#EXTINF:"), "No segments");
@@ -161,8 +197,10 @@ async fn transcode_hevc_720p() {
         _ => panic!("Expected content"),
     }
 
-    let seg = mgr.get_variant_segment(stream_id, "720p", "segment_0000.m4s")
-        .await.expect("get segment");
+    let seg = mgr
+        .get_variant_segment(stream_id, "720p", "segment_0000.m4s")
+        .await
+        .expect("get segment");
     assert!(seg.is_some(), "720p segment missing");
 }
 
@@ -173,18 +211,23 @@ async fn transcode_hevc_720p() {
 #[tokio::test]
 async fn quality_switching_separate_dirs() {
     let clip = hevc_720p_clip();
-    if !clip.exists() { eprintln!("SKIP: fixture not generated"); return; }
+    if !clip.exists() {
+        eprintln!("SKIP: fixture not generated");
+        return;
+    }
     let (mgr, cache_dir) = create_hls_manager("quality_switch").await;
     let stream_id = "test_switch";
 
     // Start source quality
     mgr.start_stream(stream_id, clip.to_str().unwrap(), "source")
-        .await.expect("start source");
+        .await
+        .expect("start source");
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // Start 360p quality (different tier)
     mgr.start_stream(stream_id, clip.to_str().unwrap(), "360p")
-        .await.expect("start 360p");
+        .await
+        .expect("start 360p");
     tokio::time::sleep(std::time::Duration::from_secs(6)).await;
 
     // Both directories should exist
@@ -194,8 +237,14 @@ async fn quality_switching_separate_dirs() {
     assert!(dir_360.exists(), "360p dir missing");
 
     // Both should have playlists
-    assert!(source_dir.join("playlist.m3u8").exists(), "source playlist missing");
-    assert!(dir_360.join("playlist.m3u8").exists(), "360p playlist missing");
+    assert!(
+        source_dir.join("playlist.m3u8").exists(),
+        "source playlist missing"
+    );
+    assert!(
+        dir_360.join("playlist.m3u8").exists(),
+        "360p playlist missing"
+    );
 }
 
 // ============================================================
@@ -205,17 +254,24 @@ async fn quality_switching_separate_dirs() {
 #[tokio::test]
 async fn cache_hit_skips_transcode() {
     let clip = h264_720p_clip();
-    if !clip.exists() { eprintln!("SKIP: fixture not generated"); return; }
+    if !clip.exists() {
+        eprintln!("SKIP: fixture not generated");
+        return;
+    }
     let (mgr, _) = create_hls_manager("cache_hit").await;
     let stream_id = "test_cache";
 
     // First call starts transcode
     mgr.start_stream(stream_id, clip.to_str().unwrap(), "source")
-        .await.expect("first start");
+        .await
+        .expect("first start");
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     // Verify it produced segments
-    let resp = mgr.generate_playlist(stream_id, "source").await.expect("playlist");
+    let resp = mgr
+        .generate_playlist(stream_id, "source")
+        .await
+        .expect("playlist");
     match &resp {
         PlaylistResponse::Content(c) => assert!(c.contains("#EXTINF:")),
         _ => panic!("Expected content"),
@@ -224,9 +280,13 @@ async fn cache_hit_skips_transcode() {
     // Second call should return immediately (cache hit)
     let start = std::time::Instant::now();
     mgr.start_stream(stream_id, clip.to_str().unwrap(), "source")
-        .await.expect("second start");
+        .await
+        .expect("second start");
     let elapsed = start.elapsed();
-    assert!(elapsed.as_millis() < 500, "Cache hit took too long: {elapsed:?}");
+    assert!(
+        elapsed.as_millis() < 500,
+        "Cache hit took too long: {elapsed:?}"
+    );
 }
 
 // ============================================================
@@ -237,10 +297,16 @@ async fn cache_hit_skips_transcode() {
 async fn demo_stream_redirects() {
     let (mgr, _) = create_hls_manager("demo").await;
 
-    let resp = mgr.generate_playlist("demo", "source").await.expect("demo playlist");
+    let resp = mgr
+        .generate_playlist("demo", "source")
+        .await
+        .expect("demo playlist");
     match resp {
         PlaylistResponse::Redirect(url) => {
-            assert!(url.contains("test-streams.mux.dev"), "Unexpected redirect URL: {url}");
+            assert!(
+                url.contains("test-streams.mux.dev"),
+                "Unexpected redirect URL: {url}"
+            );
         }
         PlaylistResponse::Content(_) => panic!("Expected redirect for demo"),
     }
@@ -253,17 +319,27 @@ async fn demo_stream_redirects() {
 #[tokio::test]
 async fn cleanup_removes_cache() {
     let clip = h264_720p_clip();
-    if !clip.exists() { eprintln!("SKIP: fixture not generated"); return; }
+    if !clip.exists() {
+        eprintln!("SKIP: fixture not generated");
+        return;
+    }
     let (mgr, cache_dir) = create_hls_manager("cleanup_test").await;
     let stream_id = "test_cleanup";
 
     mgr.start_stream(stream_id, clip.to_str().unwrap(), "source")
-        .await.expect("start");
+        .await
+        .expect("start");
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-    assert!(cache_dir.join(stream_id).exists(), "Cache dir should exist before cleanup");
+    assert!(
+        cache_dir.join(stream_id).exists(),
+        "Cache dir should exist before cleanup"
+    );
     mgr.cleanup(stream_id).await.expect("cleanup");
-    assert!(!cache_dir.join(stream_id).exists(), "Cache dir should be gone after cleanup");
+    assert!(
+        !cache_dir.join(stream_id).exists(),
+        "Cache dir should be gone after cleanup"
+    );
 }
 
 // ============================================================
@@ -273,12 +349,16 @@ async fn cleanup_removes_cache() {
 #[tokio::test]
 async fn active_streams_reports_running() {
     let clip = hevc_720p_clip();
-    if !clip.exists() { eprintln!("SKIP: fixture not generated"); return; }
+    if !clip.exists() {
+        eprintln!("SKIP: fixture not generated");
+        return;
+    }
     let (mgr, _) = create_hls_manager("active_report").await;
     let stream_id = "test_active";
 
     mgr.start_stream(stream_id, clip.to_str().unwrap(), "source")
-        .await.expect("start");
+        .await
+        .expect("start");
 
     // Give FFmpeg a moment to start
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -287,7 +367,11 @@ async fn active_streams_reports_running() {
     // Should have at least one entry (either active or from cache scan)
     // The running transcode should show up
     let found = streams.iter().any(|s| s.stream_id == stream_id);
-    assert!(found, "Stream not in active list: {:?}", streams.iter().map(|s| &s.stream_id).collect::<Vec<_>>());
+    assert!(
+        found,
+        "Stream not in active list: {:?}",
+        streams.iter().map(|s| &s.stream_id).collect::<Vec<_>>()
+    );
 }
 
 // ============================================================
@@ -297,7 +381,10 @@ async fn active_streams_reports_running() {
 #[tokio::test]
 async fn growing_file_produces_segments() {
     let source = hevc_720p_clip();
-    if !source.exists() { eprintln!("SKIP: fixture not generated"); return; }
+    if !source.exists() {
+        eprintln!("SKIP: fixture not generated");
+        return;
+    }
     let (mgr, cache_dir) = create_hls_manager("growing_file").await;
     let stream_id = "test_growing";
 
@@ -313,7 +400,8 @@ async fn growing_file_produces_segments() {
 
     // Start transcode (FFmpeg will read what's available)
     mgr.start_stream(stream_id, growing_path.to_str().unwrap(), "source")
-        .await.expect("start on partial");
+        .await
+        .expect("start on partial");
 
     // Complete the file after a delay (simulates torrent finishing)
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -323,7 +411,10 @@ async fn growing_file_produces_segments() {
 
     // The transcode from the first half should have produced some segments
     // Even if the second half wasn't read, the first half has enough data
-    let resp = mgr.generate_playlist(stream_id, "source").await.expect("playlist");
+    let resp = mgr
+        .generate_playlist(stream_id, "source")
+        .await
+        .expect("playlist");
     match resp {
         PlaylistResponse::Content(content) => {
             assert!(content.contains("#EXTM3U"), "Missing header");
@@ -344,11 +435,17 @@ async fn corrupt_segment_returns_none() {
     // Create a fake corrupt fMP4 segment
     let seg_dir = cache_dir.join(stream_id).join("source");
     std::fs::create_dir_all(&seg_dir).expect("create dir");
-    std::fs::write(seg_dir.join("segment_0000.m4s"), b"NOT_A_VALID_FMP4_FILE").expect("write corrupt");
+    std::fs::write(seg_dir.join("segment_0000.m4s"), b"NOT_A_VALID_FMP4_FILE")
+        .expect("write corrupt");
 
     // Requesting it should return None (corrupt detected and deleted)
-    let result = mgr.get_variant_segment(stream_id, "source", "segment_0000.m4s")
-        .await.expect("get corrupt");
+    let result = mgr
+        .get_variant_segment(stream_id, "source", "segment_0000.m4s")
+        .await
+        .expect("get corrupt");
     assert!(result.is_none(), "Corrupt segment should return None");
-    assert!(!seg_dir.join("segment_0000.m4s").exists(), "Corrupt segment should be deleted");
+    assert!(
+        !seg_dir.join("segment_0000.m4s").exists(),
+        "Corrupt segment should be deleted"
+    );
 }

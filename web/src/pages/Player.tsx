@@ -18,6 +18,7 @@ import { formatBytes, formatSpeed, formatRuntime } from "../lib/utils";
 import { debugLog } from "../lib/debug-log";
 import { useAuth } from "../hooks/useAuth";
 import { useMediaSession } from "../hooks/useMediaSession";
+import { useServerSettings } from "../hooks/useServerSettings";
 import { useFavourites } from "../hooks/useFavourites";
 import { TrailerModal } from "../components/TrailerModal";
 import { LOGO_URL, PAGE_BG_URL, DEFAULT_VIDEO_POSTER_URL } from "../assets";
@@ -609,6 +610,9 @@ export function Player() {
   }, []);
 
   const QUALITY_STORAGE_KEY = "streamx_preferred_quality";
+  const serverSettings = useServerSettings();
+  // Conservative default: treat transcode as disabled until settings load.
+  const transcodeDisabled = serverSettings?.disable_transcode ?? true;
   const [selectedQuality, setSelectedQuality] = useState<string>(() =>
     localStorage.getItem(QUALITY_STORAGE_KEY) || "source"
   );
@@ -651,6 +655,11 @@ export function Player() {
   const needsHlsRef = useRef(false);
   useEffect(() => {
     if (useHls || isDemo) return;
+    if (transcodeDisabled) {
+      // Server-side transcoding is off: stay on direct playback and let
+      // the browser attempt whatever the file is.
+      return;
+    }
 
     let unsupported = false;
 
@@ -699,7 +708,7 @@ export function Player() {
         debugLog.info("player", `Unsupported format, waiting for data (${progress.toFixed(1)}%)`);
       }
     }
-  }, [status?.video_codec, status?.file_name, status?.progress, status?.status, useHls, isDemo, selectedQuality]);
+  }, [status?.video_codec, status?.file_name, status?.progress, status?.status, useHls, isDemo, selectedQuality, transcodeDisabled]);
 
   const hlsUrl = streamId ? api.getPlaylistUrl(streamId, selectedQuality) : null;
   // URL-based streams (direct HTTPS or HLS-transcoded HTTPS)
@@ -1095,7 +1104,7 @@ export function Player() {
                     <Text size="1" color="gray" style={{ minWidth: 80 }}>
                       <Text weight="medium" size="1">{formatSpeed(status.speed ?? 0)}</Text>
                     </Text>
-                    {useHls && (
+                    {useHls && !transcodeDisabled && (
                       <Flex gap="2" align="center">
                         <Text size="1" color="violet">
                           {bufferInfo.videoHeight > 0

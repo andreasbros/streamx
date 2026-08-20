@@ -4,6 +4,7 @@ use crate::server::AppState;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
+use axum::Json;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 
@@ -369,14 +370,83 @@ fn detect_running_ffmpeg_outputs() -> Vec<String> {
             let args: Vec<&str> = cmdline.split('\0').collect();
             if args.first().map(|a| a.contains("ffmpeg")).unwrap_or(false) {
                 // Last non-empty arg is typically the output path
-                if let Some(output) = args.iter().rev().find(|a| !a.is_empty() && a.contains('/'))
-                {
+                if let Some(output) = args.iter().rev().find(|a| !a.is_empty() && a.contains('/')) {
                     paths.push(output.to_string());
                 }
             }
         }
     }
     paths
+}
+
+pub(crate) async fn require_admin(state: &AppState, user_id: &str) -> Result<(), Error> {
+    let user = state
+        .db
+        .find_user_by_id(user_id)
+        .await?
+        .ok_or_else(|| Error::Unauthorized {
+            message: "User not found".to_string(),
+        })?;
+    if !user.is_admin {
+        return Err(Error::Unauthorized {
+            message: "Admin access required".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// POST /api/admin/restart-torrent — tear down the torrent client (all
+/// peer connections + DHT) and start a fresh session that rediscovers
+/// peers from the seed nodes. Active and pinned downloads are re-added.
+pub async fn restart_torrent(
+    State(state): State<AppState>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+) -> Result<impl IntoResponse, Error> {
+    require_admin(&state, &claims.user_id).await?;
+    let readded = state.torrent_engine.restart_session().await?;
+    tracing::info!(readded, "Admin restarted torrent client");
+    Ok(Json(serde_json::json!({
+        "status": "restarted",
+        "readded": readded,
+    })))
+}
+
+/// POST /api/admin/restart-server — restart the whole server process.
+/// Replies first, then execs the current binary in place (Unix), which
+/// closes the listener (CLOEXEC) and starts clean with the same args.
+pub async fn restart_server(
+    State(state): State<AppState>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+) -> Result<impl IntoResponse, Error> {
+    require_admin(&state, &claims.user_id).await?;
+
+    #[cfg(unix)]
+    {
+        tracing::info!("Admin requested server restart; re-exec in 500ms");
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            use std::os::unix::process::CommandExt;
+            let exe = match std::env::current_exe() {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!("restart-server: current_exe failed: {e}");
+                    return;
+                }
+            };
+            let err = std::process::Command::new(exe)
+                .args(std::env::args_os().skip(1))
+                .exec();
+            tracing::error!("restart-server: exec failed: {err}");
+        });
+        Ok(Json(serde_json::json!({ "status": "restarting" })))
+    }
+
+    #[cfg(not(unix))]
+    {
+        Err(Error::BadRequest {
+            message: "Server restart is only supported on Unix hosts".to_string(),
+        })
+    }
 }
 
 pub async fn kill_transcode(
@@ -417,7 +487,9 @@ pub async fn kill_transcode(
             };
             if cmdline.contains("ffmpeg") && cmdline.contains(&stream_id) {
                 tracing::info!(stream_id = %stream_id, pid, "Admin killing FFmpeg process");
-                unsafe { libc::kill(pid, libc::SIGTERM); }
+                unsafe {
+                    libc::kill(pid, libc::SIGTERM);
+                }
                 killed += 1;
             }
         }
@@ -428,7 +500,6 @@ pub async fn kill_transcode(
 
     Ok(axum::Json(serde_json::json!({ "killed": killed })))
 }
-
 
 pub async fn admin_logs_ws(
     State(state): State<AppState>,

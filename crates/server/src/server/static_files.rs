@@ -8,9 +8,21 @@ use axum::response::{Html, IntoResponse, Response};
 pub const BUILD_HASH: &str = env!("STREAMX_BUILD_HASH");
 pub const VERSION: &str = env!("STREAMX_VERSION");
 
-pub async fn static_handler(State(state): State<AppState>, headers: axum::http::HeaderMap, uri: axum::http::Uri) -> Response {
-    let host = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("localhost");
-    let scheme = if host.contains("localhost") || host.starts_with("127.") || host.starts_with("192.168.") { "http" } else { "https" };
+pub async fn static_handler(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
+) -> Response {
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+    let scheme =
+        if host.contains("localhost") || host.starts_with("127.") || host.starts_with("192.168.") {
+            "http"
+        } else {
+            "https"
+        };
     let base_url = format!("{scheme}://{host}");
     let path = uri.path().trim_start_matches('/');
 
@@ -30,7 +42,10 @@ pub async fn static_handler(State(state): State<AppState>, headers: axum::http::
                             StatusCode::OK,
                             [
                                 (header::CONTENT_TYPE, mime),
-                                (header::CACHE_CONTROL, "public, max-age=31536000, immutable".to_string()),
+                                (
+                                    header::CACHE_CONTROL,
+                                    "public, max-age=31536000, immutable".to_string(),
+                                ),
                             ],
                             content.data.to_vec(),
                         )
@@ -55,7 +70,10 @@ pub async fn static_handler(State(state): State<AppState>, headers: axum::http::
                         StatusCode::OK,
                         [
                             (header::CONTENT_TYPE, mime),
-                            (header::CACHE_CONTROL, "public, max-age=31536000, immutable".to_string()),
+                            (
+                                header::CACHE_CONTROL,
+                                "public, max-age=31536000, immutable".to_string(),
+                            ),
                         ],
                         content.data.to_vec(),
                     )
@@ -80,10 +98,7 @@ pub async fn static_handler(State(state): State<AppState>, headers: axum::http::
 
         return (
             StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, mime),
-                (header::CACHE_CONTROL, cache),
-            ],
+            [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, cache)],
             content.data.to_vec(),
         )
             .into_response();
@@ -138,7 +153,10 @@ fn rewrite_asset_paths(html: &str) -> String {
         .replace("'/assets/", &format!("'/assets/{BUILD_HASH}/"))
         .replace("\"/icons/", &format!("\"/assets/{BUILD_HASH}/icons/"))
         .replace("'/icons/", &format!("'/assets/{BUILD_HASH}/icons/"))
-        .replace("\"/default-poster.jpg\"", &format!("\"/assets/{BUILD_HASH}/default-poster.jpg\""))
+        .replace(
+            "\"/default-poster.jpg\"",
+            &format!("\"/assets/{BUILD_HASH}/default-poster.jpg\""),
+        )
         .replace("\"/sw.js\"", &format!("\"/assets/{BUILD_HASH}/sw.js\""))
 }
 
@@ -186,7 +204,11 @@ async fn inject_music_og_tags(
 
     // Try to get track title from file list (active handles first, then disk scan)
     let _ = state.torrent_engine.ensure_active(stream_id).await;
-    let mut files = state.torrent_engine.list_torrent_files(stream_id).await.unwrap_or_default();
+    let mut files = state
+        .torrent_engine
+        .list_torrent_files(stream_id)
+        .await
+        .unwrap_or_default();
 
     // Disk scan fallback for completed downloads
     if files.is_empty() {
@@ -201,7 +223,9 @@ async fn inject_music_og_tags(
                         if meta.is_file() {
                             let p = entry.file_name().to_string_lossy().to_string();
                             files.push(crate::torrent::types::TorrentFile {
-                                index: idx, path: p.clone(), size: meta.len(),
+                                index: idx,
+                                path: p.clone(),
+                                size: meta.len(),
                                 is_video: crate::torrent::types::TorrentFile::detect_video(&p),
                                 is_audio: crate::torrent::types::TorrentFile::detect_audio(&p),
                             });
@@ -211,7 +235,9 @@ async fn inject_music_og_tags(
                 }
                 if !files.is_empty() {
                     files.sort_by(|a, b| a.path.cmp(&b.path));
-                    for (i, f) in files.iter_mut().enumerate() { f.index = i; }
+                    for (i, f) in files.iter_mut().enumerate() {
+                        f.index = i;
+                    }
                     break;
                 }
             }
@@ -224,8 +250,14 @@ async fn inject_music_og_tags(
         .map(|f| {
             let name = f.path.rsplit('/').next().unwrap_or(&f.path);
             let without_ext = name.rsplit_once('.').map(|(n, _)| n).unwrap_or(name);
-            let trimmed = without_ext.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == ' ' || c == '_');
-            if trimmed.is_empty() { f.path.clone() } else { trimmed.to_string() }
+            let trimmed = without_ext.trim_start_matches(|c: char| {
+                c.is_ascii_digit() || c == '.' || c == '-' || c == ' ' || c == '_'
+            });
+            if trimmed.is_empty() {
+                f.path.clone()
+            } else {
+                trimmed.to_string()
+            }
         })
         .unwrap_or_else(|| format!("Track {}", file_index + 1));
 
@@ -270,7 +302,11 @@ fn inject_og_tags(
     stream_id: &str,
     base_url: &str,
 ) -> String {
-    let title = if meta.title.is_empty() { "StreamX" } else { &meta.title };
+    let title = if meta.title.is_empty() {
+        "StreamX"
+    } else {
+        &meta.title
+    };
 
     let year = meta.year.map(|y| format!(" ({y})")).unwrap_or_default();
 

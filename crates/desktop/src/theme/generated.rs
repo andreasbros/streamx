@@ -60,8 +60,10 @@ pub const FONT_WEIGHT_REGULAR: u32 = 400;
 pub const FONT_WEIGHT_MEDIUM: u32 = 500;
 pub const FONT_WEIGHT_SEMIBOLD: u32 = 600;
 pub const FONT_WEIGHT_BOLD: u32 = 700;
-pub const FONT_FAMILY_SANS: &str = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
-pub const FONT_FAMILY_MONO: &str = "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace";
+pub const FONT_FAMILY_SANS: &str =
+    "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif";
+pub const FONT_FAMILY_MONO: &str =
+    "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace";
 pub const MOTION_DURATION_INSTANT: u32 = 0;
 pub const MOTION_DURATION_FAST: u32 = 150;
 pub const MOTION_DURATION_MEDIUM: u32 = 300;

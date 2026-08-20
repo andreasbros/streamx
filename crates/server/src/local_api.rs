@@ -87,25 +87,42 @@ impl LocalApi {
 
     /// Decode the stored JWT to get the current user id. Returns
     /// `Unauthorized` when nothing is logged in.
+    ///
+    /// Embedded mode is native/local: an *expired* token with a valid
+    /// signature identifies the same local user, so instead of failing
+    /// the call it is transparently renewed for a fresh session.
     fn user_id(&self) -> ClientResult<String> {
         let token = self.http.token().ok_or(ClientError::Unauthorized)?;
         let secret = &self.components.config.auth.jwt_secret;
-        let claims = validate_jwt(&token, secret).map_err(err_to_client)?;
-        Ok(claims.user_id)
+        match validate_jwt(&token, secret) {
+            Ok(claims) => Ok(claims.user_id),
+            Err(_) => {
+                let claims = crate::server::auth::validate_jwt_allow_expired(&token, secret)
+                    .map_err(err_to_client)?;
+                let hours = self.session_hours()?;
+                let is_admin = matches!(claims.role, crate::server::auth::Role::Admin);
+                if let Ok(fresh) =
+                    create_jwt(&claims.user_id, &claims.username, is_admin, secret, hours)
+                {
+                    tracing::info!("embedded session token expired; renewed in place");
+                    self.http.set_token(Some(fresh));
+                }
+                Ok(claims.user_id)
+            }
+        }
     }
-
 
     fn session_hours(&self) -> ClientResult<i64> {
         let trimmed = self.components.config.auth.session_duration.trim();
         if let Some(days) = trimmed.strip_suffix('d') {
-            let d: u64 = days.parse().map_err(|_| ClientError::Backend(
-                format!("Invalid session duration: {trimmed}"),
-            ))?;
+            let d: u64 = days.parse().map_err(|_| {
+                ClientError::Backend(format!("Invalid session duration: {trimmed}"))
+            })?;
             Ok((d as i64) * 24)
         } else if let Some(hours) = trimmed.strip_suffix('h') {
-            let h: u64 = hours.parse().map_err(|_| ClientError::Backend(
-                format!("Invalid session duration: {trimmed}"),
-            ))?;
+            let h: u64 = hours.parse().map_err(|_| {
+                ClientError::Backend(format!("Invalid session duration: {trimmed}"))
+            })?;
             Ok(h as i64)
         } else {
             Ok(168)
@@ -255,7 +272,10 @@ impl Api for LocalApi {
                 .await
                 .map_err(err_to_client)?;
             if let Some(uid) = uid {
-                let _ = components.database.add_search(&uid, &q, results.len() as i32).await;
+                let _ = components
+                    .database
+                    .add_search(&uid, &q, results.len() as i32)
+                    .await;
             }
             Ok(SearchResponse { results })
         })
@@ -281,10 +301,7 @@ impl Api for LocalApi {
 
     // -------- streams --------
 
-    async fn create_stream(
-        &self,
-        req: &CreateStreamRequest,
-    ) -> ClientResult<CreateStreamResponse> {
+    async fn create_stream(&self, req: &CreateStreamRequest) -> ClientResult<CreateStreamResponse> {
         let components = self.components.clone();
         let magnet = req.magnet_uri.trim().to_string();
         let file_index = req.file_index;
@@ -341,7 +358,7 @@ impl Api for LocalApi {
                 progress: download.progress as f32,
                 title: download.title,
                 file_name: download.file_name,
-                file_size: download.file_size.max(0) as u64,
+                file_size: download.file_size,
                 peers,
                 speed_bps: speed,
             })
@@ -543,10 +560,7 @@ impl Api for LocalApi {
         .await
     }
 
-    async fn search_music_videos(
-        &self,
-        query: &str,
-    ) -> ClientResult<MusicVideoSearchResponse> {
+    async fn search_music_videos(&self, query: &str) -> ClientResult<MusicVideoSearchResponse> {
         let components = self.components.clone();
         let q = query.trim().to_string();
         self.run(async move {
@@ -565,10 +579,7 @@ impl Api for LocalApi {
         .await
     }
 
-    async fn browse_music_videos(
-        &self,
-        page: u32,
-    ) -> ClientResult<MusicVideoSearchResponse> {
+    async fn browse_music_videos(&self, page: u32) -> ClientResult<MusicVideoSearchResponse> {
         let components = self.components.clone();
         self.run(async move {
             let raw = components
@@ -628,6 +639,147 @@ impl Api for LocalApi {
                 .map_err(err_to_client)?
                 .ok_or_else(|| ClientError::Backend("Could not resolve magnet".into()))?;
             Ok(ResolveMagnetResponse { magnet })
+        })
+        .await
+    }
+
+    async fn pin_download(&self, stream_id: &str) -> ClientResult<()> {
+        let components = self.components.clone();
+        let sid = stream_id.to_string();
+        let _ = self.user_id()?;
+        self.run(async move {
+            let dl = components
+                .torrent_engine
+                .get_download(&sid)
+                .await
+                .map_err(err_to_client)?
+                .ok_or_else(|| ClientError::Backend(format!("Stream {sid} not found")))?;
+            components
+                .database
+                .set_download_pinned(&sid, true)
+                .await
+                .map_err(err_to_client)?;
+            if dl.status != "complete" {
+                components
+                    .torrent_engine
+                    .resume(&sid)
+                    .await
+                    .map_err(err_to_client)?;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn unpin_download(&self, stream_id: &str) -> ClientResult<()> {
+        let components = self.components.clone();
+        let sid = stream_id.to_string();
+        let _ = self.user_id()?;
+        self.run(async move {
+            components
+                .database
+                .set_download_pinned(&sid, false)
+                .await
+                .map_err(err_to_client)?;
+            let _ = components.torrent_engine.pause(&sid).await;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn list_downloads(&self) -> ClientResult<Vec<streamx_api::types::DownloadItem>> {
+        let components = self.components.clone();
+        let _ = self.user_id()?;
+        self.run(async move {
+            let downloads = components
+                .database
+                .list_downloads()
+                .await
+                .map_err(err_to_client)?;
+            let mut items = Vec::with_capacity(downloads.len());
+            for dl in downloads {
+                let (peers, speed) = components
+                    .torrent_engine
+                    .get_live_stats(&dl.info_hash)
+                    .await;
+                let title = if dl.title.is_empty() {
+                    components
+                        .database
+                        .get_metadata(&dl.info_hash)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|m| m.title)
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_default()
+                } else {
+                    dl.title.clone()
+                };
+                items.push(streamx_api::types::DownloadItem {
+                    info_hash: dl.info_hash,
+                    title,
+                    file_name: dl.file_name,
+                    file_size: dl.file_size,
+                    status: dl.status,
+                    progress: dl.progress,
+                    pinned: dl.pinned,
+                    download_all: dl.download_all,
+                    created_at: dl.created_at,
+                    updated_at: dl.updated_at,
+                    peers,
+                    speed,
+                });
+            }
+            Ok(items)
+        })
+        .await
+    }
+
+    async fn delete_stream(&self, stream_id: &str) -> ClientResult<()> {
+        let components = self.components.clone();
+        let sid = stream_id.to_string();
+        let uid = self.user_id()?;
+        self.run(async move {
+            let user = components
+                .database
+                .find_user_by_id(&uid)
+                .await
+                .map_err(err_to_client)?;
+            if !user.map(|u| u.is_admin).unwrap_or(false) {
+                return Err(ClientError::Unauthorized);
+            }
+            let state = crate::server::AppState::from_components(&components);
+            crate::server::api::cleanup_stream(&state, &sid)
+                .await
+                .map_err(err_to_client)?;
+            components
+                .database
+                .delete_download(&sid)
+                .await
+                .map_err(err_to_client)?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn restart_torrent(&self) -> ClientResult<()> {
+        let components = self.components.clone();
+        let uid = self.user_id()?;
+        self.run(async move {
+            let user = components
+                .database
+                .find_user_by_id(&uid)
+                .await
+                .map_err(err_to_client)?;
+            if !user.map(|u| u.is_admin).unwrap_or(false) {
+                return Err(ClientError::Unauthorized);
+            }
+            components
+                .torrent_engine
+                .restart_session()
+                .await
+                .map_err(err_to_client)?;
+            Ok(())
         })
         .await
     }

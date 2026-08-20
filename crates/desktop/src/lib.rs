@@ -14,5 +14,7 @@ pub mod playback;
 pub mod router;
 pub mod runtime;
 pub mod state;
+#[cfg(feature = "ui-test")]
+pub mod test_driver;
 pub mod text_input;
 pub mod theme;

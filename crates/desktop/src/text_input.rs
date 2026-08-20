@@ -20,13 +20,21 @@ pub struct TextModel {
 
 impl TextModel {
     pub fn new() -> Self {
-        Self { value: String::new(), cursor: 0, anchor: None }
+        Self {
+            value: String::new(),
+            cursor: 0,
+            anchor: None,
+        }
     }
 
     pub fn with_value(v: impl Into<String>) -> Self {
         let value: String = v.into();
         let cursor = value.chars().count();
-        Self { value, cursor, anchor: None }
+        Self {
+            value,
+            cursor,
+            anchor: None,
+        }
     }
 
     pub fn value(&self) -> &str {
@@ -53,8 +61,16 @@ impl TextModel {
 
     pub fn selection_range(&self) -> Option<(usize, usize)> {
         let a = self.anchor?;
-        let (lo, hi) = if a < self.cursor { (a, self.cursor) } else { (self.cursor, a) };
-        if lo == hi { None } else { Some((lo, hi)) }
+        let (lo, hi) = if a < self.cursor {
+            (a, self.cursor)
+        } else {
+            (self.cursor, a)
+        };
+        if lo == hi {
+            None
+        } else {
+            Some((lo, hi))
+        }
     }
 
     pub fn selected_text(&self) -> Option<String> {
@@ -151,7 +167,9 @@ impl TextModel {
         let target = if shift || self.anchor.is_none() {
             self.cursor.saturating_sub(1)
         } else {
-            self.selection_range().map(|(lo, _)| lo).unwrap_or(self.cursor)
+            self.selection_range()
+                .map(|(lo, _)| lo)
+                .unwrap_or(self.cursor)
         };
         self.move_cursor(target, shift);
     }
@@ -160,7 +178,9 @@ impl TextModel {
         let target = if shift || self.anchor.is_none() {
             (self.cursor + 1).min(self.char_len())
         } else {
-            self.selection_range().map(|(_, hi)| hi).unwrap_or(self.cursor)
+            self.selection_range()
+                .map(|(_, hi)| hi)
+                .unwrap_or(self.cursor)
         };
         self.move_cursor(target, shift);
     }
@@ -194,12 +214,6 @@ pub struct TextInput {
     is_password: bool,
     focus_handle: FocusHandle,
     pub submitted: bool,
-    /// True once the user has clicked inside the field. Hides the
-    /// placeholder so the cursor lives on an empty canvas. Reset when
-    /// the field loses focus AND is empty.
-    clicked_into: bool,
-    /// Tracks focus so we can reset `clicked_into` on blur.
-    was_focused: bool,
 }
 
 impl TextInput {
@@ -210,8 +224,6 @@ impl TextInput {
             is_password: false,
             focus_handle: cx.focus_handle(),
             submitted: false,
-            clicked_into: false,
-            was_focused: false,
         }
     }
 
@@ -288,15 +300,39 @@ impl TextInput {
         }
 
         match key {
-            "backspace" => { self.model.backspace(); cx.notify(); }
-            "delete" => { self.model.forward_delete(); cx.notify(); }
-            "left" => { self.model.move_left(shift); cx.notify(); }
-            "right" => { self.model.move_right(shift); cx.notify(); }
-            "home" => { self.model.move_home(shift); cx.notify(); }
-            "end" => { self.model.move_end(shift); cx.notify(); }
-            "enter" => { self.submitted = true; cx.notify(); }
+            "backspace" => {
+                self.model.backspace();
+                cx.notify();
+            }
+            "delete" => {
+                self.model.forward_delete();
+                cx.notify();
+            }
+            "left" => {
+                self.model.move_left(shift);
+                cx.notify();
+            }
+            "right" => {
+                self.model.move_right(shift);
+                cx.notify();
+            }
+            "home" => {
+                self.model.move_home(shift);
+                cx.notify();
+            }
+            "end" => {
+                self.model.move_end(shift);
+                cx.notify();
+            }
+            "enter" => {
+                self.submitted = true;
+                cx.notify();
+            }
             "escape" => { /* parent handles */ }
-            "space" => { self.model.insert_str(" "); cx.notify(); }
+            "space" => {
+                self.model.insert_str(" ");
+                cx.notify();
+            }
             _ => {
                 if let Some(ime) = ev.keystroke.key_char.as_ref() {
                     self.model.insert_str(ime);
@@ -304,7 +340,11 @@ impl TextInput {
                 } else if key.chars().count() == 1 {
                     let ch = key.chars().next().unwrap_or('\0');
                     if !ch.is_control() {
-                        let s: String = if shift {
+                        // Fallback when the platform gives no key_char.
+                        // Shift only uppercases letters; symbol keys
+                        // (shift+1 etc.) already arrive resolved in key_char,
+                        // so never remap them here.
+                        let s: String = if shift && ch.is_alphabetic() {
                             ch.to_uppercase().collect()
                         } else {
                             ch.to_string()
@@ -328,12 +368,6 @@ impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::new();
         let focused = self.focus_handle.is_focused(window);
-        // Reset `clicked_into` when the field loses focus AND is empty so
-        // the placeholder reappears next time it's unfocused + empty.
-        if !focused && self.was_focused && self.model.value().is_empty() {
-            self.clicked_into = false;
-        }
-        self.was_focused = focused;
 
         let display: String = if self.is_password {
             "•".repeat(self.model.char_len())
@@ -343,35 +377,36 @@ impl Render for TextInput {
 
         let chars: Vec<char> = display.chars().collect();
         let cursor_pos = self.model.cursor().min(chars.len());
-        let (lo, hi) = self.model.selection_range().unwrap_or((cursor_pos, cursor_pos));
+        let (lo, hi) = self
+            .model
+            .selection_range()
+            .unwrap_or((cursor_pos, cursor_pos));
 
         let before: String = chars[..lo].iter().collect();
         let selected: String = chars[lo..hi].iter().collect();
         let after: String = chars[hi..].iter().collect();
 
         let is_empty = self.model.value().is_empty();
-        // Show placeholder only when nothing's typed AND user hasn't
-        // clicked in yet. Keyboard/Tab focus still shows placeholder —
-        // just highlights the border.
-        let show_placeholder = is_empty && !self.clicked_into;
-        let text_color = if is_empty { theme.fg_muted() } else { theme.fg_primary() };
+        let text_color = if is_empty {
+            theme.fg_muted()
+        } else {
+            theme.fg_primary()
+        };
 
         let mut text_row = div()
             .flex()
             .items_center()
-            .h(px(22.0))
+            .h(px(22.0 * theme.scale()))
             .text_size(px(theme.fs_2()))
             .text_color(text_color);
 
-        if show_placeholder {
+        if is_empty {
+            // HTML-like placeholder: caret sits at the start, dimmed
+            // placeholder text stays visible until the user types.
+            if focused {
+                text_row = text_row.child(cursor_bar(&theme));
+            }
             text_row = text_row.child(self.placeholder.clone());
-            if focused {
-                text_row = text_row.child(cursor_bar(&theme));
-            }
-        } else if is_empty {
-            if focused {
-                text_row = text_row.child(cursor_bar(&theme));
-            }
         } else {
             text_row = text_row.child(SharedString::from(before));
             if !selected.is_empty() {
@@ -393,11 +428,13 @@ impl Render for TextInput {
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _w, cx| {
                 this.on_key_down(ev, cx);
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _ev, window, cx| {
-                this.clicked_into = true;
-                this.focus_handle.focus(window, cx);
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| {
+                    this.focus_handle.focus(window, cx);
+                    cx.notify();
+                }),
+            )
             .px(px(theme.space_3()))
             .py(px(theme.space_2()))
             .rounded(px(theme.radius_md()))
@@ -414,7 +451,11 @@ impl Render for TextInput {
 }
 
 fn cursor_bar(theme: &Theme) -> gpui::Div {
-    div().w(px(2.0)).h(px(18.0)).bg(theme.accent()).mx(px(1.0))
+    div()
+        .w(px(2.0))
+        .h(px(18.0 * theme.scale()))
+        .bg(theme.accent())
+        .mx(px(1.0))
 }
 
 pub fn text_input(cx: &mut App, placeholder: impl Into<SharedString>) -> Entity<TextInput> {

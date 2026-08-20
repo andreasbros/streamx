@@ -226,24 +226,37 @@ impl HlsManager {
                     .lines()
                     .filter(|l| !l.starts_with('#') && !l.is_empty())
                     .collect();
-                let all_valid = segments.iter().take(1).chain(segments.iter().rev().take(1)).all(|seg| {
-                    let path = tier_dir.join(seg);
-                    match std::fs::read(&path) {
-                        Ok(data) => is_valid_fmp4(&data),
-                        Err(_) => false,
-                    }
-                });
+                let all_valid = segments
+                    .iter()
+                    .take(1)
+                    .chain(segments.iter().rev().take(1))
+                    .all(|seg| {
+                        let path = tier_dir.join(seg);
+                        match std::fs::read(&path) {
+                            Ok(data) => is_valid_fmp4(&data),
+                            Err(_) => false,
+                        }
+                    });
                 if all_valid {
                     tracing::info!(stream_id, quality, seg_count, "Valid completed cache found");
                     return Ok(());
                 }
                 // Cache has corrupt segments - delete and re-transcode
-                tracing::warn!(stream_id, quality, "Cached segments corrupt, re-transcoding");
+                tracing::warn!(
+                    stream_id,
+                    quality,
+                    "Cached segments corrupt, re-transcoding"
+                );
                 let _ = tokio::fs::remove_dir_all(&tier_dir).await;
                 let _ = tokio::fs::create_dir_all(&tier_dir).await;
             } else if !has_endlist && seg_count > 10 {
                 // Incomplete transcode with enough segments to start playback
-                tracing::info!(stream_id, quality, seg_count, "Partial cache found, skipping");
+                tracing::info!(
+                    stream_id,
+                    quality,
+                    seg_count,
+                    "Partial cache found, skipping"
+                );
                 return Ok(());
             }
         }
@@ -298,10 +311,7 @@ impl HlsManager {
             }
         };
 
-        self.active
-            .write()
-            .await
-            .insert(active_key, handle);
+        self.active.write().await.insert(active_key, handle);
 
         Ok(())
     }
@@ -325,7 +335,11 @@ impl HlsManager {
                     crate::transcode::pipeline::TranscodeStatus::Failed(_) => {
                         drop(active);
                         self.active.write().await.remove(&active_key);
-                        tracing::info!(stream_id, quality, "Removed failed piped transcode, will retry");
+                        tracing::info!(
+                            stream_id,
+                            quality,
+                            "Removed failed piped transcode, will retry"
+                        );
                     }
                     _ => return Ok(()),
                 }
@@ -341,7 +355,11 @@ impl HlsManager {
                 .await
                 .unwrap_or_default();
             if content.matches("EXTINF:").count() > 10 {
-                tracing::info!(stream_id, quality, "Valid cached quality found, skipping piped");
+                tracing::info!(
+                    stream_id,
+                    quality,
+                    "Valid cached quality found, skipping piped"
+                );
                 return Ok(());
             }
         }
@@ -378,22 +396,14 @@ impl HlsManager {
                 .await?
         };
 
-        self.active
-            .write()
-            .await
-            .insert(active_key, handle);
+        self.active.write().await.insert(active_key, handle);
 
         Ok(())
     }
 
     /// Start HLS transcoding from a remote HTTPS URL.
     /// FFmpeg reads the URL directly as input.
-    pub async fn start_stream_url(
-        &self,
-        stream_id: &str,
-        url: &str,
-        quality: &str,
-    ) -> Result<()> {
+    pub async fn start_stream_url(&self, stream_id: &str, url: &str, quality: &str) -> Result<()> {
         let active_key = format!("{stream_id}/{quality}");
         {
             let active = self.active.read().await;
@@ -442,7 +452,10 @@ impl HlsManager {
                 {
                     Ok(h) => h,
                     Err(e) => {
-                        tracing::warn!(stream_id, "GPU transcode failed for URL, CPU fallback: {e}");
+                        tracing::warn!(
+                            stream_id,
+                            "GPU transcode failed for URL, CPU fallback: {e}"
+                        );
                         self.pipeline
                             .start_transcode_cpu(stream_id, url, &info, quality)
                             .await?
@@ -547,7 +560,11 @@ impl HlsManager {
         match tokio::fs::read(&path).await {
             Ok(data) => {
                 if !is_valid_segment(&data, segment_name) {
-                    tracing::warn!(stream_id, segment_name, "Corrupt segment detected, deleting");
+                    tracing::warn!(
+                        stream_id,
+                        segment_name,
+                        "Corrupt segment detected, deleting"
+                    );
                     let _ = tokio::fs::remove_file(&path).await;
                     return Ok(None);
                 }
@@ -603,7 +620,12 @@ impl HlsManager {
         match tokio::fs::read(&path).await {
             Ok(data) => {
                 if !is_valid_segment(&data, segment_name) {
-                    tracing::warn!(stream_id, variant, segment_name, "Corrupt segment detected, deleting");
+                    tracing::warn!(
+                        stream_id,
+                        variant,
+                        segment_name,
+                        "Corrupt segment detected, deleting"
+                    );
                     let _ = tokio::fs::remove_file(&path).await;
                     return Ok(None);
                 }
@@ -695,8 +717,8 @@ impl HlsManager {
         let active = self.active.read().await;
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let mut result: Vec<ActiveStreamInfo> = active
-            .iter()
-            .map(|(key, _handle)| {
+            .keys()
+            .map(|key| {
                 let (sid, quality) = key.split_once('/').unwrap_or((key, "source"));
                 let tier_dir = cache_dir.join(sid).join(quality);
                 ActiveStreamInfo {
@@ -778,7 +800,11 @@ impl HlsManager {
         let prefix = format!("{stream_id}/");
         let keys: Vec<String> = {
             let active = self.active.read().await;
-            active.keys().filter(|k| k.starts_with(&prefix) || *k == stream_id).cloned().collect()
+            active
+                .keys()
+                .filter(|k| k.starts_with(&prefix) || *k == stream_id)
+                .cloned()
+                .collect()
         };
         if !keys.is_empty() {
             let mut active = self.active.write().await;
@@ -858,10 +884,14 @@ fn is_valid_fmp4(data: &[u8]) -> bool {
                 return false;
             }
             let ext_size = u64::from_be_bytes([
-                data[offset + 8], data[offset + 9],
-                data[offset + 10], data[offset + 11],
-                data[offset + 12], data[offset + 13],
-                data[offset + 14], data[offset + 15],
+                data[offset + 8],
+                data[offset + 9],
+                data[offset + 10],
+                data[offset + 11],
+                data[offset + 12],
+                data[offset + 13],
+                data[offset + 14],
+                data[offset + 15],
             ]) as usize;
             if offset + ext_size > len {
                 return false; // truncated

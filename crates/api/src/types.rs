@@ -14,7 +14,10 @@ use ts_rs::TS;
 macro_rules! ts {
     ($item:item) => {
         #[cfg_attr(feature = "ts-export", derive(TS))]
-        #[cfg_attr(feature = "ts-export", ts(export, export_to = "../../../web/src/api/generated/"))]
+        #[cfg_attr(
+            feature = "ts-export",
+            ts(export, export_to = "../../../web/src/api/generated/")
+        )]
         $item
     };
 }
@@ -37,15 +40,27 @@ pub struct TorrentFile {
 impl TorrentFile {
     pub fn detect_video(path: &str) -> bool {
         let lower = path.to_lowercase();
-        lower.ends_with(".mp4") || lower.ends_with(".mkv") || lower.ends_with(".avi")
-            || lower.ends_with(".webm") || lower.ends_with(".mov") || lower.ends_with(".m4v")
-            || lower.ends_with(".wmv") || lower.ends_with(".flv") || lower.ends_with(".ts")
+        lower.ends_with(".mp4")
+            || lower.ends_with(".mkv")
+            || lower.ends_with(".avi")
+            || lower.ends_with(".webm")
+            || lower.ends_with(".mov")
+            || lower.ends_with(".m4v")
+            || lower.ends_with(".wmv")
+            || lower.ends_with(".flv")
+            || lower.ends_with(".ts")
     }
     pub fn detect_audio(path: &str) -> bool {
         let lower = path.to_lowercase();
-        lower.ends_with(".mp3") || lower.ends_with(".flac") || lower.ends_with(".m4a")
-            || lower.ends_with(".aac") || lower.ends_with(".ogg") || lower.ends_with(".oga")
-            || lower.ends_with(".opus") || lower.ends_with(".wav") || lower.ends_with(".wma")
+        lower.ends_with(".mp3")
+            || lower.ends_with(".flac")
+            || lower.ends_with(".m4a")
+            || lower.ends_with(".aac")
+            || lower.ends_with(".ogg")
+            || lower.ends_with(".oga")
+            || lower.ends_with(".opus")
+            || lower.ends_with(".wav")
+            || lower.ends_with(".wma")
             || lower.ends_with(".alac")
     }
 }
@@ -265,6 +280,24 @@ ts! {
 #[derive(Debug, Deserialize)]
 pub struct ResolveMagnetResponse {
     pub magnet: String,
+}
+}
+
+ts! {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DownloadItem {
+    pub info_hash: String,
+    pub title: String,
+    pub file_name: String,
+    pub file_size: u64,
+    pub status: String,
+    pub progress: f64,
+    pub pinned: bool,
+    pub download_all: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub peers: u32,
+    pub speed: f64,
 }
 }
 

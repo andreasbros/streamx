@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, img, px, App, AppContext, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ObjectFit, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, StyledImage, Window,
+    div, img, px, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, KeyDownEvent, MouseButton, ObjectFit, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, StyledImage, Window,
 };
 // Resize borders + invisible edge strips only exist on Linux (client-side
 // decorations). Keep the imports scoped to that cfg so Darwin stays warning-free.
@@ -18,8 +18,7 @@ use parking_lot::Mutex;
 use streamx_api::client::Client;
 
 use crate::components::{
-    card, frost_card, movie_tile, primary_button, section_title, TILE_POSTER_H, TILE_POSTER_W,
-    TILE_TOTAL_H,
+    card, frost_card, movie_tile, primary_button, secondary_button, section_title,
 };
 use crate::keybindings::{translate, Shortcut};
 use crate::pages::{loading_page, movie_page, stub_page};
@@ -65,8 +64,20 @@ pub struct MainView {
     player: Arc<Mutex<PlayerState>>,
 }
 
+/// Handle to the main window so background tasks (tick loop) can inject
+/// synthetic input coming from the ui-test driver.
+static MAIN_WINDOW: std::sync::OnceLock<gpui::AnyWindowHandle> = std::sync::OnceLock::new();
+
+/// Whether the main window opened. Used by the ui-test driver so the
+/// harness fails fast when the app came up headless or crashed at
+/// window creation.
+pub fn main_window_open() -> bool {
+    MAIN_WINDOW.get().is_some()
+}
+
 impl MainView {
     pub fn new(state: Arc<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let _ = MAIN_WINDOW.set(window.window_handle());
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
 
@@ -82,14 +93,20 @@ impl MainView {
                 .with_placeholder("http://localhost:8999")
                 .initial(state.server_url.read().clone())
         });
-        let search_input = text_input(cx, "search · press / or Ctrl+K");
+        let search_input = text_input(cx, "Search movies or paste a magnet link...");
         let admin_kill_input = text_input(cx, "stream id");
         let music_input = text_input(cx, "artist or album");
         let music_video_input = text_input(cx, "music video");
         let tv_input = text_input(cx, "TV show");
 
-        let username_focus = username_input.read(cx).focus_handle(cx);
-        username_focus.focus(window, cx);
+        // Focus the username field only when the login page is actually
+        // shown. Focusing it while booting authed leaves keyboard focus
+        // on an unrendered input, which swallows every shortcut (and all
+        // typing) until the user clicks somewhere.
+        if matches!(state.current_page(), Page::Login) {
+            let username_focus = username_input.read(cx).focus_handle(cx);
+            username_focus.focus(window, cx);
+        }
 
         let this = Self {
             state: state.clone(),
@@ -114,18 +131,32 @@ impl MainView {
     fn bootstrap(&self, cx: &mut Context<Self>) {
         let state = self.state.clone();
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            let client = state.client.read().clone();
-            match runtime::spawn(async move { client.version().await }).await {
-                Ok(v) => {
-                    *state.server_version.write() = Some(v.version);
-                    *state.server_hash.write() = Some(v.hash);
-                    *state.connection_error.write() = None;
+            // The embedded server boots in the background; retry until it
+            // answers (or ~30s pass) instead of giving up on the first
+            // refused connection. Each attempt re-reads the client, so the
+            // in-process backend is picked up as soon as it's installed.
+            let mut connected = false;
+            for _ in 0..60 {
+                let client = state.client.read().clone();
+                match runtime::spawn(async move { client.version().await }).await {
+                    Ok(v) => {
+                        *state.server_version.write() = Some(v.version);
+                        *state.server_hash.write() = Some(v.hash);
+                        *state.connection_error.write() = None;
+                        connected = true;
+                    }
+                    Err(e) => {
+                        *state.connection_error.write() = Some(format!("server unreachable: {e}"));
+                    }
                 }
-                Err(e) => {
-                    *state.connection_error.write() = Some(format!("server unreachable: {e}"));
+                let _ = this.update(cx, |_, cx| cx.notify());
+                if connected {
+                    break;
                 }
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
             }
-            let _ = this.update(cx, |_, cx| cx.notify());
 
             if state.is_authed() {
                 let client = state.client.read().clone();
@@ -146,20 +177,21 @@ impl MainView {
         let state = self.state.clone();
         // Debounced live-search: track the last value seen per input and
         // when it stopped changing, fire a search.
-        let mut last_search_q: String = String::new();
-        let mut last_search_typed_at: Option<std::time::Instant> = None;
-        let mut last_music_q: String = String::new();
-        let mut last_music_typed_at: Option<std::time::Instant> = None;
-        let mut last_mv_q: String = String::new();
-        let mut last_mv_typed_at: Option<std::time::Instant> = None;
-        let mut last_tv_q: String = String::new();
-        let mut last_tv_typed_at: Option<std::time::Instant> = None;
-        let debounce = Duration::from_millis(350);
+        let mut search_db = DebounceState::default();
+        let mut music_db = DebounceState::default();
+        let mut mv_db = DebounceState::default();
+        let mut tv_db = DebounceState::default();
+        let debounce = Duration::from_millis(300);
+        // Downloads refresh cadence for the Downloads and Movie pages.
+        let mut last_dl_refresh = std::time::Instant::now() - Duration::from_secs(10);
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
             loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(100))
                     .await;
+                state
+                    .tick_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 {
                     let mut p = player.lock();
@@ -174,8 +206,11 @@ impl MainView {
                 // Poll mpv IPC for play-state snapshot (paused + time-pos + duration).
                 let ipc_clone = player.lock().ipc.clone();
                 if let Some(ipc) = ipc_clone {
-                    let snap = runtime::spawn(async move { crate::playback::ipc::snapshot(&ipc).await }).await;
+                    let snap =
+                        runtime::spawn(async move { crate::playback::ipc::snapshot(&ipc).await })
+                            .await;
                     player.lock().snapshot = snap;
+                    state.mark_dirty();
                 }
 
                 // Poll torrent status (peers, speed, progress) on the Player page.
@@ -183,8 +218,133 @@ impl MainView {
                 if let Some(sid) = sid {
                     let client = state.client.read().clone();
                     let sid_clone = sid.clone();
-                    if let Ok(ts) = runtime::spawn(async move { client.stream_status(&sid_clone).await }).await {
+                    if let Ok(ts) =
+                        runtime::spawn(async move { client.stream_status(&sid_clone).await }).await
+                    {
                         player.lock().torrent = Some(ts);
+                        state.mark_dirty();
+                    }
+                }
+
+                // Apply synthetic input queued by the ui-test driver on
+                // the UI thread, through the real event dispatch path.
+                let keys: Vec<String> = std::mem::take(&mut *state.ui_keys.lock());
+                if !keys.is_empty() {
+                    match MAIN_WINDOW.get() {
+                        Some(handle) => {
+                            let result = cx.update_window(*handle, |_, window, cx| {
+                                for k in &keys {
+                                    match gpui::Keystroke::parse(k) {
+                                        Ok(ks) => {
+                                            let handled = window.dispatch_keystroke(ks, cx);
+                                            tracing::debug!(key = %k, handled, "ui-test keystroke");
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(key = %k, "ui-test keystroke parse failed: {e}")
+                                        }
+                                    }
+                                }
+                                window.refresh();
+                            });
+                            if let Err(e) = result {
+                                tracing::warn!("ui-test key dispatch failed: {e}");
+                            }
+                        }
+                        None => tracing::warn!("ui-test keys dropped: no window"),
+                    }
+                }
+
+                // Apply driver-requested window resizes on the UI thread.
+                if let Some((w, h)) = state.ui_resize.lock().take() {
+                    if let Some(handle) = MAIN_WINDOW.get() {
+                        let _ = cx.update_window(*handle, |_, window, _cx| {
+                            window.resize(gpui::size(gpui::px(w), gpui::px(h)));
+                            window.refresh();
+                        });
+                        state.mark_dirty();
+                    }
+                }
+
+                // Serve driver screenshot requests from GPUI's own
+                // renderer: pixel-identical on every platform, no OS
+                // capture tooling needed.
+                #[cfg(feature = "ui-test")]
+                {
+                    let shots: Vec<String> = std::mem::take(&mut *state.ui_shots.lock());
+                    if !shots.is_empty() {
+                        if let Some(handle) = MAIN_WINDOW.get() {
+                            let _ = cx.update_window(*handle, |_, window, _cx| {
+                                for path in &shots {
+                                    match window.render_to_image() {
+                                        Ok(img) => {
+                                            if let Err(e) = img.save(path) {
+                                                tracing::warn!("screenshot save failed: {e}");
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("render_to_image failed: {e}")
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+
+                // Stream in posters whose bytes just landed on disk, and
+                // retry failed ones whose backoff elapsed: evicting an
+                // asset makes GPUI re-run the AssetSource next frame
+                // (which now finds the disk cache).
+                let mut evict: Vec<String> = std::mem::take(&mut *state.poster_ready.lock());
+                evict.extend(state.due_poster_retries());
+                if !evict.is_empty() {
+                    let _ = this.update(cx, |_, cx| {
+                        for path in &evict {
+                            gpui::ImageSource::Resource(gpui::Resource::Embedded(
+                                SharedString::from(path.clone()),
+                            ))
+                            .remove_asset(cx);
+                        }
+                        cx.refresh_windows();
+                    });
+                    state.mark_dirty();
+                }
+
+                // Infinite scroll on the category page: the virtualized
+                // grid flags when the viewport nears its last row (which
+                // also fires when content is shorter than the viewport,
+                // filling the first screen automatically).
+                if state
+                    .category_need_more
+                    .swap(false, std::sync::atomic::Ordering::Relaxed)
+                    && matches!(state.current_page(), Page::CategoryBrowse)
+                    && !*state.category_loading.read()
+                    && !*state.category_done.read()
+                {
+                    let st = state.clone();
+                    let _ = runtime::spawn(async move { load_category_page(&st).await });
+                }
+
+                // Keep download progress fresh on the pages that show it.
+                if matches!(state.current_page(), Page::Downloads | Page::Movie)
+                    && last_dl_refresh.elapsed() >= Duration::from_secs(2)
+                    && !*state.downloads_loading.read()
+                {
+                    last_dl_refresh = std::time::Instant::now();
+                    let st = state.clone();
+                    let _ = runtime::spawn(async move { load_downloads(&st).await });
+                }
+
+                // The embedded backend renews expired session tokens in
+                // place; mirror the fresh token into persisted state so
+                // playback URLs and the next app start use it too.
+                {
+                    let client_token = state.client.read().token();
+                    if let Some(t) = client_token {
+                        let differs = state.token.read().as_deref() != Some(t.as_str());
+                        if differs {
+                            state.set_token(Some(t));
+                        }
                     }
                 }
 
@@ -223,53 +383,33 @@ impl MainView {
                 let Some(((sv, ss), (mv, ms), (mvv, mvs), (tv, ts))) = inputs else {
                     break;
                 };
+                *state.search_input_mirror.write() = sv.clone();
 
-                fire_debounced(
-                    &sv,
-                    ss,
-                    &mut last_search_q,
-                    &mut last_search_typed_at,
-                    debounce,
-                    |q| {
-                        let st = state.clone();
-                        let _ = runtime::spawn(async move { run_search(st, q).await });
-                    },
-                );
-                fire_debounced(
-                    &mv,
-                    ms,
-                    &mut last_music_q,
-                    &mut last_music_typed_at,
-                    debounce,
-                    |q| {
-                        let st = state.clone();
-                        let _ = runtime::spawn(async move { run_music_search(st, q).await });
-                    },
-                );
-                fire_debounced(
-                    &mvv,
-                    mvs,
-                    &mut last_mv_q,
-                    &mut last_mv_typed_at,
-                    debounce,
-                    |q| {
-                        let st = state.clone();
-                        let _ = runtime::spawn(async move { run_music_video_search(st, q).await });
-                    },
-                );
-                fire_debounced(
-                    &tv,
-                    ts,
-                    &mut last_tv_q,
-                    &mut last_tv_typed_at,
-                    debounce,
-                    |q| {
-                        let st = state.clone();
-                        let _ = runtime::spawn(async move { run_tv_search(st, q).await });
-                    },
-                );
+                fire_debounced(&sv, ss, &mut search_db, debounce, |q| {
+                    let st = state.clone();
+                    let _ = runtime::spawn(async move { run_search(st, q).await });
+                });
+                fire_debounced(&mv, ms, &mut music_db, debounce, |q| {
+                    let st = state.clone();
+                    let _ = runtime::spawn(async move { run_music_search(st, q).await });
+                });
+                fire_debounced(&mvv, mvs, &mut mv_db, debounce, |q| {
+                    let st = state.clone();
+                    let _ = runtime::spawn(async move { run_music_video_search(st, q).await });
+                });
+                fire_debounced(&tv, ts, &mut tv_db, debounce, |q| {
+                    let st = state.clone();
+                    let _ = runtime::spawn(async move { run_tv_search(st, q).await });
+                });
 
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                // Repaint only when something rendered actually changed.
+                // The previous unconditional notify forced a full
+                // re-render of every page at 10Hz, which made resize,
+                // typing and scrolling feel sluggish.
+                if state.take_dirty() && this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+                if this.update(cx, |_, _| ()).is_err() {
                     break;
                 }
             }
@@ -315,6 +455,7 @@ impl MainView {
                 }
             }
             *state.login_in_flight.write() = false;
+            state.mark_dirty();
             let _ = this.update(cx, |_, cx| cx.notify());
         })
         .detach();
@@ -411,7 +552,9 @@ impl MainView {
             let client = state.client.read().clone();
             let create_req = req;
             let expected_title = create_req.title.clone().unwrap_or_default();
-            let resp = match runtime::spawn(async move { client.create_stream(&create_req).await }).await {
+            let resp = match runtime::spawn(async move { client.create_stream(&create_req).await })
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     player.lock().error = Some(format!("create_stream failed: {e}"));
@@ -443,9 +586,7 @@ impl MainView {
                             .iter()
                             .filter(|f| f.is_video)
                             .max_by_key(|f| f.size)
-                            .or_else(|| {
-                                files.iter().filter(|f| f.is_audio).max_by_key(|f| f.size)
-                            })
+                            .or_else(|| files.iter().filter(|f| f.is_audio).max_by_key(|f| f.size))
                             .or_else(|| files.first());
                         if let Some(f) = pick {
                             file_index = f.index;
@@ -454,9 +595,7 @@ impl MainView {
                         break;
                     }
                     _ => {
-                        cx.background_executor()
-                            .timer(Duration::from_secs(1))
-                            .await;
+                        cx.background_executor().timer(Duration::from_secs(1)).await;
                     }
                 }
             }
@@ -510,7 +649,14 @@ impl MainView {
     }
 
     /// Play a raw magnet: resolves via `resolve_magnet` first if needed.
-    fn play_magnet(&mut self, magnet: Option<String>, title: String, api_base: Option<&'static str>, detail_url: Option<String>, cx: &mut Context<Self>) {
+    fn play_magnet(
+        &mut self,
+        magnet: Option<String>,
+        title: String,
+        api_base: Option<&'static str>,
+        detail_url: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(m) = magnet {
             let req = streamx_api::types::CreateStreamRequest {
                 magnet_uri: m,
@@ -532,10 +678,9 @@ impl MainView {
         cx.spawn(async move |_weak, cx: &mut gpui::AsyncApp| {
             let client = state.client.read().clone();
             let detail_clone = detail.clone();
-            let resolved = runtime::spawn(async move {
-                client.resolve_magnet(api_base, &detail_clone).await
-            })
-            .await;
+            let resolved =
+                runtime::spawn(async move { client.resolve_magnet(api_base, &detail_clone).await })
+                    .await;
             let magnet = match resolved {
                 Ok(r) => r.magnet,
                 Err(e) => {
@@ -609,11 +754,23 @@ impl MainView {
                 .px(px(theme.space_3()))
                 .py(px(theme.space_2()))
                 .rounded(px(theme.radius_md()))
-                .bg(if selected { theme.accent() } else { theme.bg_elevated() })
-                .text_color(if selected { theme.fg_on_accent() } else { theme.fg_secondary() })
+                .bg(if selected {
+                    theme.accent()
+                } else {
+                    theme.bg_elevated()
+                })
+                .text_color(if selected {
+                    theme.fg_on_accent()
+                } else {
+                    theme.fg_secondary()
+                })
                 .text_size(px(theme.fs_1()))
                 .border_1()
-                .border_color(if selected { theme.accent() } else { theme.border_default() })
+                .border_color(if selected {
+                    theme.accent()
+                } else {
+                    theme.border_default()
+                })
                 .cursor_pointer()
                 .child(div().child(SharedString::from(label)))
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
@@ -655,7 +812,11 @@ impl MainView {
 
         let version_line: SharedString = match self.state.server_version.read().clone() {
             Some(v) => SharedString::from(format!("server v{v}")),
-            None => SharedString::from(if server_ok { "connected" } else { "server offline" }),
+            None => SharedString::from(if server_ok {
+                "connected"
+            } else {
+                "server offline"
+            }),
         };
 
         let submit_label: SharedString = if in_flight {
@@ -729,8 +890,9 @@ impl MainView {
             })
     }
 
-    fn search_page_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn search_page_view(&self, viewport_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        let layout = crate::components::tile_layout(viewport_w - 2.0 * theme.space_5());
         let query = self.state.query.read().clone();
         let browse = self.state.browse.read().clone();
         let results = self.state.search_results.read().clone();
@@ -754,7 +916,7 @@ impl MainView {
             .child(
                 div()
                     .flex_1()
-                    .max_w(px(480.0))
+                    .max_w(px(480.0 * theme.scale()))
                     .child(self.search_input.clone()),
             )
             .child(
@@ -765,11 +927,11 @@ impl MainView {
             );
 
         let mut root = div()
-            .w_full()
-            .p(px(theme.space_5()))
-            .bg(theme.bg_app())
+            .size_full()
             .flex()
             .flex_col()
+            .p(px(theme.space_5()))
+            .bg(theme.bg_app())
             .child(header);
 
         if !query.is_empty() {
@@ -780,103 +942,146 @@ impl MainView {
                 )
                 .mb(px(theme.space_3())),
             );
-            let mut grid = div()
-                .flex()
-                .flex_wrap()
-                .gap(px(theme.space_3()));
-            for (i, g) in results.iter().enumerate() {
-                let clone = g.clone();
-                grid = grid.child(
-                    movie_tile(g, &theme, format!("search-{i}")).on_click(cx.listener(move |this, _ev, _w, cx| {
-                        *this.state.selected_movie.write() = Some(clone.clone());
-                        this.state.navigate(Page::Movie);
-                        cx.notify();
-                    })),
-                );
-            }
-            if results.is_empty() && !searching {
-                grid = grid.child(
+            if results.is_empty() {
+                root = root.child(
                     div()
                         .text_size(px(theme.fs_2()))
                         .text_color(theme.fg_muted())
-                        .child("No results."),
+                        .child(if searching {
+                            "Searching…"
+                        } else {
+                            "No results."
+                        }),
+                );
+            } else {
+                root = root.child(
+                    virtual_tile_grid(
+                        "search-grid",
+                        results.clone(),
+                        layout,
+                        theme,
+                        self.state.clone(),
+                        cx.entity().downgrade(),
+                        false,
+                    )
+                    .flex_1()
+                    .min_h_0(),
                 );
             }
-            root = root.child(grid);
         } else {
-            let sections = [
-                ("Latest", browse.latest.clone()),
-                ("Most Popular", browse.popular.clone()),
-                ("Top Rated", browse.top_rated.clone()),
-                ("Action", browse.action.clone()),
-                ("Comedy", browse.comedy.clone()),
-                ("Thriller", browse.thriller.clone()),
-                ("Sci-Fi", browse.scifi.clone()),
-                ("Horror", browse.horror.clone()),
+            // Virtualized vertical list of the 8 sections: only visible
+            // rows build tiles, so wheel/trackpad scrolling stays fluid.
+            let specs = category_specs();
+            let sections: Vec<(crate::state::CategorySpec, Vec<Arc<_>>)> = vec![
+                (specs[0].clone(), browse.latest.clone()),
+                (specs[1].clone(), browse.popular.clone()),
+                (specs[2].clone(), browse.top_rated.clone()),
+                (specs[3].clone(), browse.action.clone()),
+                (specs[4].clone(), browse.comedy.clone()),
+                (specs[5].clone(), browse.thriller.clone()),
+                (specs[6].clone(), browse.scifi.clone()),
+                (specs[7].clone(), browse.horror.clone()),
             ];
-            let mut col = div().flex().flex_col();
-            for (title, groups) in sections {
-                col = col.child(self.browse_row(title, &groups, cx));
-            }
-            root = root.child(col);
+            let state = self.state.clone();
+            let weak = cx.entity().downgrade();
+            let block_h =
+                theme.fs_5() * 1.6 + theme.space_2() + layout.total_h + 20.0 + theme.space_4();
+            root = root.child(
+                gpui::uniform_list(
+                    "home-sections",
+                    sections.len(),
+                    move |range, _window, _cx| {
+                        range
+                            .map(|i| {
+                                let (spec, groups) = &sections[i];
+                                home_section_block(
+                                    spec,
+                                    groups,
+                                    layout,
+                                    theme,
+                                    block_h,
+                                    state.clone(),
+                                    weak.clone(),
+                                )
+                            })
+                            .collect()
+                    },
+                )
+                .flex_1()
+                .min_h_0(),
+            );
         }
 
         root
     }
 
-    fn browse_row(
-        &self,
-        title: &'static str,
-        groups: &[streamx_api::types::SearchResultGroup],
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// Category drill-down: an infinitely scrolling grid of tiles for
+    /// one home section, mirroring the web app's /browse/:category page.
+    fn category_page_view(&self, viewport_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
-        // Horizontal scroll on the tile strip — trackpad / wheel works,
-        // and on Wayland GPUI also surfaces touch scrolling.
-        let mut row = div()
-            .id(SharedString::from(format!("row-scroll-{title}")))
-            .flex()
-            .gap(px(theme.space_3()))
-            .overflow_x_scroll()
-            .pb(px(theme.space_2()))
-            .min_h(px(TILE_TOTAL_H + 20.0));
+        let layout = crate::components::tile_layout(viewport_w - 2.0 * theme.space_5());
+        let title = self
+            .state
+            .category
+            .read()
+            .as_ref()
+            .map(|s| s.title)
+            .unwrap_or("Browse");
+        let items = self.state.category_items.read().clone();
+        let loading = *self.state.category_loading.read();
+        let done = *self.state.category_done.read();
 
-        if groups.is_empty() {
-            for i in 0..8u32 {
-                row = row.child(
-                    div()
-                        .id(SharedString::from(format!("skel-{title}-{i}")))
-                        .w(px(TILE_POSTER_W))
-                        .h(px(TILE_POSTER_H))
-                        .rounded(px(theme.radius_md()))
-                        .bg(theme.bg_panel())
-                        .flex_shrink_0(),
-                );
-            }
+        let grid = virtual_tile_grid(
+            "cat-grid",
+            items.clone(),
+            layout,
+            theme,
+            self.state.clone(),
+            cx.entity().downgrade(),
+            true,
+        );
+
+        let footer: &'static str = if loading {
+            "Loading more…"
+        } else if done && items.is_empty() {
+            "Nothing here."
+        } else if done {
+            "That's everything."
         } else {
-            for (i, g) in groups.iter().enumerate() {
-                let clone = g.clone();
-                row = row.child(
-                    movie_tile(g, &theme, format!("row-{title}-{i}")).on_click(cx.listener(move |this, _ev, _w, cx| {
-                        *this.state.selected_movie.write() = Some(clone.clone());
-                        this.state.navigate(Page::Movie);
-                        cx.notify();
-                    })),
-                );
-            }
-        }
+            ""
+        };
 
         div()
+            .size_full()
             .flex()
             .flex_col()
+            .p(px(theme.space_5()))
+            .bg(theme.bg_app())
             .gap(px(theme.space_2()))
-            .mb(px(theme.space_4()))
-            .child(section_title(SharedString::from(title), &theme))
-            .child(row)
+            .child(self.back_hint(cx))
+            .child(
+                div()
+                    .text_size(px(theme.fs_6()))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.fg_primary())
+                    .child(SharedString::from(title)),
+            )
+            .child(grid.flex_1().min_h_0())
+            .child(
+                div()
+                    .py(px(theme.space_2()))
+                    .text_size(px(theme.fs_2()))
+                    .text_color(theme.fg_muted())
+                    .child(footer),
+            )
     }
 
-    fn player_page_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn player_page_view(&self, viewport_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        // Hero poster: ~22% of the window, clamped so it is prominent on
+        // big displays without swallowing small ones.
+        let hero_w = (viewport_w * 0.22).clamp(200.0, 460.0);
+        let hero_h = hero_w * 1.5;
         let p = self.player.lock();
         let stream_id = p.stream_id.clone().unwrap_or_default();
         let target = p.target.as_ref().map(|t| t.display()).unwrap_or_default();
@@ -888,32 +1093,33 @@ impl MainView {
         let torrent = p.torrent.clone();
         drop(p);
 
-        let movie = self.state.selected_movie.read().clone();
-        let backdrop_url = movie
+        // Hero metadata comes from the actual play request, never from
+        // the last browsed movie — playing a surround demo or a music
+        // track must not wear a stale movie's title and poster.
+        let req = self.player.lock().last_request.clone();
+        let backdrop_url = req.as_ref().and_then(|r| {
+            r.backdrop
+                .clone()
+                .or_else(|| r.poster_large.clone())
+                .or_else(|| r.poster_medium.clone())
+        });
+        let poster_url = req.as_ref().and_then(|r| {
+            r.poster_medium
+                .clone()
+                .or_else(|| r.poster_large.clone())
+                .or_else(|| r.poster_small.clone())
+        });
+        let year = req.as_ref().and_then(|r| r.year);
+        let rating = req.as_ref().and_then(|r| r.rating);
+        let runtime = req.as_ref().and_then(|r| r.runtime);
+        let genres = req
             .as_ref()
-            .and_then(|m| {
-                m.backdrop
-                    .clone()
-                    .or_else(|| m.poster_large.clone())
-                    .or_else(|| m.poster_medium.clone())
-            });
-        let poster_url = movie
-            .as_ref()
-            .and_then(|m| {
-                m.poster_medium
-                    .clone()
-                    .or_else(|| m.poster_large.clone())
-                    .or_else(|| m.poster_small.clone())
-            });
-        let year = movie.as_ref().and_then(|m| m.year);
-        let rating = movie.as_ref().and_then(|m| m.rating);
-        let runtime = movie.as_ref().and_then(|m| m.runtime);
-        let genres = movie
-            .as_ref()
-            .map(|m| m.genres.clone())
+            .and_then(|r| r.genres.clone())
             .unwrap_or_default();
-        let summary = movie.as_ref().and_then(|m| m.summary.clone());
-        let title = movie.map(|m| m.title).unwrap_or_else(|| "Unknown title".into());
+        let summary = req.as_ref().and_then(|r| r.summary.clone());
+        let title = req
+            .and_then(|r| r.title)
+            .unwrap_or_else(|| "Unknown title".into());
 
         // Content sits in front of a full-bleed backdrop with a dark
         // overlay for readability. Matches web Player.tsx poster behaviour.
@@ -928,89 +1134,79 @@ impl MainView {
             .flex_col()
             .gap(px(theme.space_3()));
 
-        content = content
-            .child(self.back_hint(cx))
-            .child(
-                frost_card(&theme)
-                    .flex()
-                    .gap(px(theme.space_4()))
-                    .items_start()
-                    .child({
-                        // Poster thumbnail. Loads via LocalApi in Embedded mode.
-                        let mut poster = div()
-                            .w(px(TILE_POSTER_W))
-                            .h(px(TILE_POSTER_H))
-                            .rounded(px(theme.radius_md()))
-                            .overflow_hidden()
-                            .bg(theme.bg_panel())
-                            .border_1()
-                            .border_color(theme.border_subtle())
-                            .flex_shrink_0();
-                        if let Some(url) = poster_url {
-                            let src: gpui::ImageSource = if url.starts_with("/proxy/") {
-                                gpui::ImageSource::Resource(gpui::Resource::Embedded(
-                                    SharedString::from(url),
+        content = content.child(self.back_hint(cx)).child(
+            frost_card(&theme)
+                .flex()
+                .gap(px(theme.space_4()))
+                .items_start()
+                .child({
+                    // Poster thumbnail via the shared poster cache.
+                    let mut poster = div()
+                        .w(px(hero_w))
+                        .h(px(hero_h))
+                        .rounded(px(theme.radius_md()))
+                        .overflow_hidden()
+                        .bg(theme.bg_panel())
+                        .border_1()
+                        .border_color(theme.border_subtle())
+                        .flex_shrink_0();
+                    if let Some(url) = poster_url {
+                        let src = crate::components::poster_image_source(&url);
+                        poster = poster.child(
+                            img(src)
+                                .w(px(hero_w))
+                                .h(px(hero_h))
+                                .object_fit(ObjectFit::Cover),
+                        );
+                    }
+                    poster
+                })
+                .child({
+                    let mut meta = div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(theme.space_2()))
+                        .child(
+                            div()
+                                .text_size(px(theme.fs_6()))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(theme.fg_primary())
+                                .child(SharedString::from(title.clone())),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(theme.space_3()))
+                                .text_size(px(theme.fs_2()))
+                                .text_color(theme.fg_secondary())
+                                .child(SharedString::from(
+                                    year.map(|y| y.to_string()).unwrap_or_default(),
                                 ))
-                            } else {
-                                gpui::ImageSource::from(SharedString::from(url))
-                            };
-                            poster = poster.child(
-                                img(src)
-                                    .w(px(TILE_POSTER_W))
-                                    .h(px(TILE_POSTER_H))
-                                    .object_fit(ObjectFit::Cover),
-                            );
-                        }
-                        poster
-                    })
-                    .child({
-                        let mut meta = div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap(px(theme.space_2()))
-                            .child(
-                                div()
-                                    .text_size(px(theme.fs_6()))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(theme.fg_primary())
-                                    .child(SharedString::from(title.clone())),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(px(theme.space_3()))
-                                    .text_size(px(theme.fs_2()))
-                                    .text_color(theme.fg_secondary())
-                                    .child(SharedString::from(
-                                        year.map(|y| y.to_string()).unwrap_or_default(),
-                                    ))
-                                    .child(SharedString::from(
-                                        rating.map(|r| format!("★ {:.1}", r)).unwrap_or_default(),
-                                    ))
-                                    .child(SharedString::from(
-                                        runtime.map(|r| format!("{} min", r)).unwrap_or_default(),
-                                    ))
-                                    .child(SharedString::from(
-                                        if genres.is_empty() {
-                                            String::new()
-                                        } else {
-                                            genres.join(" · ")
-                                        },
-                                    )),
-                            );
-                        if let Some(s) = summary.as_ref() {
-                            meta = meta.child(
-                                div()
-                                    .max_w(px(720.0))
-                                    .text_size(px(theme.fs_1()))
-                                    .text_color(theme.fg_secondary())
-                                    .child(SharedString::from(s.clone())),
-                            );
-                        }
-                        meta
-                    }),
-            );
+                                .child(SharedString::from(
+                                    rating.map(|r| format!("★ {:.1}", r)).unwrap_or_default(),
+                                ))
+                                .child(SharedString::from(
+                                    runtime.map(|r| format!("{} min", r)).unwrap_or_default(),
+                                ))
+                                .child(SharedString::from(if genres.is_empty() {
+                                    String::new()
+                                } else {
+                                    genres.join(" · ")
+                                })),
+                        );
+                    if let Some(s) = summary.as_ref() {
+                        meta = meta.child(
+                            div()
+                                .max_w(px(720.0))
+                                .text_size(px(theme.fs_1()))
+                                .text_color(theme.fg_secondary())
+                                .child(SharedString::from(s.clone())),
+                        );
+                    }
+                    meta
+                }),
+        );
 
         // Torrent status card (progress, peers, speed, size).
         if let Some(ts) = torrent {
@@ -1118,12 +1314,21 @@ impl MainView {
                         .on_click(cx.listener(|this, _ev, _w, cx| this.retry_playback(cx))),
                 );
         } else if !target.is_empty() {
-            let status = if playing { "Playing in mpv window" } else { "mpv exited" };
+            let status = if playing {
+                "Playing in mpv window"
+            } else {
+                "mpv exited"
+            };
             let paused_label = if snap.paused { "Paused" } else { "Playing" };
 
             let fmt_time = |s: f64| -> String {
                 let total = s.max(0.0) as u64;
-                format!("{:02}:{:02}:{:02}", total / 3600, (total / 60) % 60, total % 60)
+                format!(
+                    "{:02}:{:02}:{:02}",
+                    total / 3600,
+                    (total / 60) % 60,
+                    total % 60
+                )
             };
             let time_line = SharedString::from(format!(
                 "{} / {}",
@@ -1145,7 +1350,11 @@ impl MainView {
                         .child(
                             div()
                                 .text_size(px(theme.fs_2()))
-                                .text_color(if playing { theme.accent() } else { theme.fg_muted() })
+                                .text_color(if playing {
+                                    theme.accent()
+                                } else {
+                                    theme.fg_muted()
+                                })
                                 .child(SharedString::from(status)),
                         )
                         .child(
@@ -1175,14 +1384,16 @@ impl MainView {
                                             if snap.paused { "Play" } else { "Pause" },
                                             &theme,
                                         )
-                                        .on_click(cx.listener(|this, _ev, _w, _cx| {
-                                            let ipc = this.player.lock().ipc.clone();
-                                            if let Some(ipc) = ipc {
-                                                let _ = runtime::spawn(async move {
-                                                    let _ = ipc.toggle_pause().await;
-                                                });
-                                            }
-                                        })),
+                                        .on_click(
+                                            cx.listener(|this, _ev, _w, _cx| {
+                                                let ipc = this.player.lock().ipc.clone();
+                                                if let Some(ipc) = ipc {
+                                                    let _ = runtime::spawn(async move {
+                                                        let _ = ipc.toggle_pause().await;
+                                                    });
+                                                }
+                                            }),
+                                        ),
                                     )
                                     .child(
                                         primary_button("player-seek-back", "-10s", &theme)
@@ -1196,15 +1407,16 @@ impl MainView {
                                             })),
                                     )
                                     .child(
-                                        primary_button("player-seek-fwd", "+30s", &theme)
-                                            .on_click(cx.listener(|this, _ev, _w, _cx| {
+                                        primary_button("player-seek-fwd", "+30s", &theme).on_click(
+                                            cx.listener(|this, _ev, _w, _cx| {
                                                 let ipc = this.player.lock().ipc.clone();
                                                 if let Some(ipc) = ipc {
                                                     let _ = runtime::spawn(async move {
                                                         let _ = ipc.seek(30.0, true).await;
                                                     });
                                                 }
-                                            })),
+                                            }),
+                                        ),
                                     )
                                     .child(
                                         div()
@@ -1269,11 +1481,7 @@ impl MainView {
             .relative()
             .bg(theme.bg_app());
         if let Some(url) = backdrop_url {
-            let src: gpui::ImageSource = if url.starts_with("/proxy/") {
-                gpui::ImageSource::Resource(gpui::Resource::Embedded(SharedString::from(url)))
-            } else {
-                gpui::ImageSource::from(SharedString::from(url))
-            };
+            let src = crate::components::poster_image_source(&url);
             outer = outer.child(
                 img(src)
                     .absolute()
@@ -1297,63 +1505,159 @@ impl MainView {
         outer
     }
 
-    fn movie_page_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn movie_page_view(&self, viewport_w: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
+        let hero_w = (viewport_w * 0.18).clamp(180.0, 380.0);
+        let hero_h = hero_w * 1.5;
         let movie = self.state.selected_movie.read().clone();
         let Some(m) = movie else {
             return movie_page(&self.state, &theme).into_any_element();
         };
 
-        let mut root = div()
-            .w_full()
-            .p(px(theme.space_5()))
-            .bg(theme.bg_app())
+        // Mirrors the web Movie page: full-bleed dimmed backdrop, poster
+        // on the left, title + badges + genres + summary on the right,
+        // then the variant cards.
+        let backdrop_url = m
+            .backdrop
+            .clone()
+            .or_else(|| m.poster_large.clone())
+            .or_else(|| m.poster.clone());
+        let poster_url = m
+            .poster_large
+            .clone()
+            .or_else(|| m.poster.clone())
+            .or_else(|| m.poster_medium.clone())
+            .or_else(|| m.poster_small.clone());
+
+        let badge_row = {
+            let mut row = div()
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap(px(theme.space_2()));
+            if let Some(r) = m.rating.filter(|r| *r > 0.0) {
+                row = row.child(crate::components::badge(
+                    SharedString::from(format!("★ {r:.1}")),
+                    theme.favourite(),
+                    &theme,
+                ));
+            }
+            if let Some(rt) = m.runtime.filter(|r| *r > 0) {
+                row = row.child(crate::components::badge(
+                    SharedString::from(format!("{} min", rt)),
+                    theme.fg_secondary(),
+                    &theme,
+                ));
+            }
+            if let Some(mpa) = m.mpa_rating.clone().filter(|s| !s.is_empty()) {
+                row = row.child(crate::components::badge(
+                    SharedString::from(mpa),
+                    theme.fg_secondary(),
+                    &theme,
+                ));
+            }
+            if let Some(lang) = m.language.clone().filter(|l| l != "en" && !l.is_empty()) {
+                row = row.child(crate::components::badge(
+                    SharedString::from(lang.to_uppercase()),
+                    theme.fg_secondary(),
+                    &theme,
+                ));
+            }
+            row
+        };
+
+        let genre_row = {
+            let mut row = div().flex().flex_wrap().gap(px(theme.space_1()));
+            for g in &m.genres {
+                row = row.child(crate::components::badge(
+                    SharedString::from(g.clone()),
+                    theme.accent(),
+                    &theme,
+                ));
+            }
+            row
+        };
+
+        let mut meta_col = div()
+            .flex_1()
             .flex()
             .flex_col()
-            .gap(px(theme.space_2()));
-
-        root = root
-            .child(self.back_hint(cx))
-            .child(
-                div()
-                    .text_size(px(theme.fs_6()))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .text_color(theme.fg_primary())
-                    .child(SharedString::from(m.title.clone())),
-            )
+            .gap(px(theme.space_2()))
             .child(
                 div()
                     .flex()
+                    .items_center()
                     .gap(px(theme.space_2()))
-                    .text_size(px(theme.fs_2()))
-                    .text_color(theme.fg_secondary())
-                    .child(SharedString::from(
-                        m.year.map(|y| y.to_string()).unwrap_or_default(),
-                    ))
-                    .child(SharedString::from(
-                        m.rating.map(|r| format!("★ {:.1}", r)).unwrap_or_default(),
-                    ))
-                    .child(SharedString::from(if m.genres.is_empty() {
-                        "".to_string()
-                    } else {
-                        m.genres.join(" · ")
-                    })),
+                    .child(
+                        div()
+                            .text_size(px(theme.fs_6()))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(theme.fg_primary())
+                            .child(SharedString::from(m.title.clone())),
+                    )
+                    .when_some(m.year, |el, y| {
+                        el.child(
+                            div()
+                                .text_size(px(theme.fs_3()))
+                                .text_color(theme.fg_muted())
+                                .child(SharedString::from(format!("({y})"))),
+                        )
+                    }),
             )
-            .child(
+            .child(badge_row);
+        if !m.genres.is_empty() {
+            meta_col = meta_col.child(genre_row);
+        }
+        if let Some(s) = m.summary.clone().filter(|s| !s.is_empty()) {
+            meta_col = meta_col.child(
                 div()
                     .text_size(px(theme.fs_2()))
                     .text_color(theme.fg_secondary())
                     .max_w(px(720.0))
-                    .child(SharedString::from(m.summary.clone().unwrap_or_default())),
-            )
-            .child(
-                div()
-                    .text_size(px(theme.fs_5()))
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .mt(px(theme.space_4()))
-                    .child("Variants"),
+                    .child(SharedString::from(s)),
             );
+        }
 
+        let mut hero = div().flex().items_start().gap(px(theme.space_4()));
+        if let Some(url) = poster_url {
+            let src = crate::components::poster_image_source(&url);
+            hero = hero.child(
+                div()
+                    .w(px(hero_w))
+                    .h(px(hero_h))
+                    .rounded(px(theme.radius_md()))
+                    .overflow_hidden()
+                    .bg(theme.bg_panel())
+                    .border_1()
+                    .border_color(theme.border_subtle())
+                    .flex_shrink_0()
+                    .child(
+                        img(src)
+                            .w(px(hero_w))
+                            .h(px(hero_h))
+                            .object_fit(ObjectFit::Cover),
+                    ),
+            );
+        }
+        hero = hero.child(meta_col);
+
+        let mut root = div()
+            .w_full()
+            .p(px(theme.space_5()))
+            .flex()
+            .flex_col()
+            .gap(px(theme.space_2()));
+
+        root = root.child(self.back_hint(cx)).child(hero).child(
+            div()
+                .text_size(px(theme.fs_5()))
+                .font_weight(gpui::FontWeight::BOLD)
+                .mt(px(theme.space_4()))
+                .text_color(theme.fg_primary())
+                .child("Available Qualities"),
+        );
+
+        let downloads = self.state.downloads.read().clone();
         for (i, v) in m.variants.iter().enumerate() {
             let quality = v.quality.clone().unwrap_or_else(|| "?".into());
             let codec = v.video_codec.clone().unwrap_or_default();
@@ -1361,6 +1665,19 @@ impl MainView {
             let size = v.size.clone();
             let seeds = v.seeds;
             let leeches = v.leeches;
+            let hash = info_hash_from_magnet(&v.magnet);
+            let dl = hash.as_ref().and_then(|h| {
+                downloads
+                    .iter()
+                    .find(|d| d.info_hash.eq_ignore_ascii_case(h))
+                    .cloned()
+            });
+            let dl_complete = dl.as_ref().map(|d| d.status == "complete").unwrap_or(false);
+            let dl_active = dl
+                .as_ref()
+                .map(|d| d.pinned && d.status != "complete")
+                .unwrap_or(false);
+            let dl_progress = dl.as_ref().map(|d| d.progress).unwrap_or(0.0);
 
             let row = div()
                 .flex()
@@ -1420,10 +1737,85 @@ impl MainView {
                         })),
                 );
 
+            let row = if dl_complete {
+                row.child(
+                    div()
+                        .px(px(theme.space_2()))
+                        .py(px(2.0))
+                        .rounded(px(theme.radius_sm()))
+                        .text_size(px(theme.fs_1()))
+                        .text_color(theme.success())
+                        .border_1()
+                        .border_color(theme.success())
+                        .child("Downloaded"),
+                )
+            } else if dl_active {
+                let h = hash.clone().unwrap_or_default();
+                row.child(
+                    secondary_button(
+                        SharedString::from(format!("cancel-dl-{i}")),
+                        SharedString::from(format!("{dl_progress:.0}% · Cancel Download")),
+                        &theme,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.cancel_background_download(h.clone(), cx);
+                    })),
+                )
+            } else {
+                row.child(
+                    secondary_button(
+                        SharedString::from(format!("start-dl-{i}")),
+                        "⬇ Download",
+                        &theme,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.start_background_download(i, cx);
+                    })),
+                )
+            };
+
             root = root.child(row);
         }
 
-        root.into_any_element()
+        // Layering like the web Movie page: backdrop image + dim overlay
+        // pinned to the FULL viewport (they never end mid-screen, however
+        // short the variant list is), with the content scrolling over
+        // them — CSS background-attachment: fixed, in gpui terms.
+        let mut outer = div()
+            .id("movie-root")
+            .size_full()
+            .relative()
+            .bg(theme.bg_app());
+        if let Some(url) = backdrop_url {
+            let src = crate::components::poster_image_source(&url);
+            outer = outer.child(
+                img(src)
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            );
+            outer = outer.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .bg(theme.bg_overlay()),
+            );
+        }
+        outer
+            .child(
+                div()
+                    .id("movie-scroll")
+                    .size_full()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(root),
+            )
+            .into_any_element()
     }
 
     /// Kick off an async data load for a page if data isn't already
@@ -1441,6 +1833,11 @@ impl MainView {
                     let _ = runtime::spawn(async move { load_history(&state).await });
                 }
             }
+            Page::Downloads => {
+                if !*state.downloads_loading.read() {
+                    let _ = runtime::spawn(async move { load_downloads(&state).await });
+                }
+            }
             Page::Favourites => {
                 if !*state.favourites_loading.read() {
                     let _ = runtime::spawn(async move { load_favourites(&state).await });
@@ -1452,8 +1849,7 @@ impl MainView {
                 }
             }
             Page::MusicVideoSearch => {
-                if state.music_video_results.read().is_empty()
-                    && !*state.music_video_loading.read()
+                if state.music_video_results.read().is_empty() && !*state.music_video_loading.read()
                 {
                     let _ = runtime::spawn(async move { load_music_videos(&state).await });
                 }
@@ -1518,7 +1914,9 @@ impl MainView {
                 };
                 let meta = format!(
                     "{} · watched {}",
-                    item.year.map(|y| y.to_string()).unwrap_or_else(|| "—".into()),
+                    item.year
+                        .map(|y| y.to_string())
+                        .unwrap_or_else(|| "—".into()),
                     item.watched_at,
                 );
                 let _ = cx;
@@ -1567,6 +1965,319 @@ impl MainView {
         root
     }
 
+    /// Start a background download for the selected movie's variant:
+    /// create the stream with full metadata, then pin it so it keeps
+    /// downloading after the app closes.
+    fn start_background_download(&mut self, variant_idx: usize, cx: &mut Context<Self>) {
+        let movie = match self.state.selected_movie.read().clone() {
+            Some(m) => m,
+            None => return,
+        };
+        let variant = match movie.variants.get(variant_idx) {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        let req = streamx_api::types::CreateStreamRequest {
+            magnet_uri: variant.magnet.clone(),
+            file_index: None,
+            poster_url: movie.poster_large.clone().or_else(|| movie.poster.clone()),
+            title: Some(movie.title.clone()),
+            year: movie.year,
+            rating: movie.rating,
+            runtime: movie.runtime,
+            genres: Some(movie.genres.clone()),
+            language: movie.language.clone(),
+            video_codec: variant.video_codec.clone(),
+            audio_channels: variant.audio_channels.clone(),
+            source_type: variant.source_type.clone(),
+            summary: movie.summary.clone(),
+            imdb_code: movie.imdb_code.clone(),
+            mpa_rating: movie.mpa_rating.clone(),
+            bit_depth: variant.bit_depth.clone(),
+            trailer_code: movie.trailer_code.clone(),
+            poster_small: movie.poster_small.clone(),
+            poster_medium: movie.poster_medium.clone(),
+            poster_large: movie.poster_large.clone(),
+            backdrop: movie.backdrop.clone(),
+        };
+        let state = self.state.clone();
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            let client = state.client.read().clone();
+            let create_req = req;
+            let result = runtime::spawn(async move {
+                let resp = client.create_stream(&create_req).await?;
+                client.pin_download(&resp.stream_id).await?;
+                Ok::<_, streamx_api::client::ClientError>(resp.stream_id)
+            })
+            .await;
+            match result {
+                Ok(_) => state.show_toast("Download started.", ToastKind::Success),
+                Err(e) => state.show_toast(format!("Download failed: {e}"), ToastKind::Error),
+            }
+            load_downloads(&state).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
+    fn cancel_background_download(&mut self, hash: String, cx: &mut Context<Self>) {
+        let state = self.state.clone();
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            let client = state.client.read().clone();
+            let h = hash.clone();
+            let res = runtime::spawn(async move { client.unpin_download(&h).await }).await;
+            match res {
+                Ok(()) => state.show_toast("Download cancelled.", ToastKind::Info),
+                Err(e) => state.show_toast(format!("Cancel failed: {e}"), ToastKind::Error),
+            }
+            load_downloads(&state).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
+    fn resume_background_download(&mut self, hash: String, cx: &mut Context<Self>) {
+        let state = self.state.clone();
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            let client = state.client.read().clone();
+            let h = hash.clone();
+            let res = runtime::spawn(async move { client.pin_download(&h).await }).await;
+            match res {
+                Ok(()) => state.show_toast("Download resumed.", ToastKind::Success),
+                Err(e) => state.show_toast(format!("Resume failed: {e}"), ToastKind::Error),
+            }
+            load_downloads(&state).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
+    fn delete_download(&mut self, hash: String, cx: &mut Context<Self>) {
+        let state = self.state.clone();
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            let client = state.client.read().clone();
+            let h = hash.clone();
+            let res = runtime::spawn(async move { client.delete_stream(&h).await }).await;
+            match res {
+                Ok(()) => state.show_toast("Download deleted.", ToastKind::Success),
+                Err(e) => state.show_toast(format!("Delete failed: {e}"), ToastKind::Error),
+            }
+            load_downloads(&state).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
+    fn downloads_page_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        let items = self.state.downloads.read().clone();
+        let loading = *self.state.downloads_loading.read();
+        let is_admin = self
+            .state
+            .user
+            .read()
+            .as_ref()
+            .map(|u| u.is_admin)
+            .unwrap_or(false);
+
+        let mut root = div()
+            .w_full()
+            .p(px(theme.space_5()))
+            .bg(theme.bg_app())
+            .flex()
+            .flex_col()
+            .gap(px(theme.space_2()))
+            .child(self.back_hint(cx))
+            .child(
+                div()
+                    .text_size(px(theme.fs_6()))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.fg_primary())
+                    .child("Downloads"),
+            );
+
+        if items.is_empty() {
+            root = root.child(
+                div()
+                    .text_size(px(theme.fs_2()))
+                    .text_color(theme.fg_muted())
+                    .child(if loading {
+                        "Loading downloads…"
+                    } else {
+                        "No downloads yet. Use the Download button on a movie."
+                    }),
+            );
+            return root;
+        }
+
+        let fmt_speed = |bps: f64| -> String {
+            if bps >= 1_000_000.0 {
+                format!("{:.1} MB/s", bps / 1_000_000.0)
+            } else if bps >= 1_000.0 {
+                format!("{:.0} KB/s", bps / 1_000.0)
+            } else {
+                format!("{:.0} B/s", bps)
+            }
+        };
+        let fmt_size = |bytes: u64| -> String {
+            let b = bytes as f64;
+            if b >= 1_000_000_000.0 {
+                format!("{:.1} GB", b / 1_000_000_000.0)
+            } else if b >= 1_000_000.0 {
+                format!("{:.0} MB", b / 1_000_000.0)
+            } else {
+                format!("{} B", bytes)
+            }
+        };
+
+        let mut list = div()
+            .flex()
+            .flex_col()
+            .gap(px(theme.space_2()))
+            .mt(px(theme.space_3()));
+        for (i, dl) in items.iter().enumerate() {
+            let complete = dl.status == "complete";
+            let active = dl.status == "downloading" || dl.status == "initializing";
+            let status_color = if complete {
+                theme.success()
+            } else if active {
+                theme.accent()
+            } else {
+                theme.fg_muted()
+            };
+            let name = if dl.title.is_empty() {
+                if dl.file_name.is_empty() {
+                    dl.info_hash.clone()
+                } else {
+                    dl.file_name.clone()
+                }
+            } else {
+                dl.title.clone()
+            };
+            let progress = (dl.progress / 100.0).clamp(0.0, 1.0) as f32;
+            let hash = dl.info_hash.clone();
+
+            let mut meta_line = format!("{:.1}%", dl.progress);
+            if dl.file_size > 0 {
+                meta_line.push_str(&format!(" · {}", fmt_size(dl.file_size)));
+            }
+            if active {
+                meta_line.push_str(&format!(" · {} peers · {}", dl.peers, fmt_speed(dl.speed)));
+            }
+
+            let mut row = div()
+                .flex()
+                .flex_col()
+                .gap(px(theme.space_1()))
+                .p(px(theme.space_3()))
+                .rounded(px(theme.radius_md()))
+                .bg(theme.bg_surface())
+                .border_1()
+                .border_color(theme.border_subtle())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(theme.space_2()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(theme.fs_2()))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(theme.fg_primary())
+                                .child(SharedString::from(name)),
+                        )
+                        .child(
+                            div()
+                                .px(px(theme.space_2()))
+                                .py(px(2.0))
+                                .rounded(px(theme.radius_sm()))
+                                .text_size(px(theme.fs_1()))
+                                .text_color(status_color)
+                                .border_1()
+                                .border_color(status_color)
+                                .child(SharedString::from(dl.status.clone())),
+                        )
+                        .when(dl.pinned && !complete, |el| {
+                            el.child(
+                                div()
+                                    .text_size(px(theme.fs_1()))
+                                    .text_color(theme.accent_text())
+                                    .child("background"),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(4.0))
+                        .rounded(px(theme.radius_sm()))
+                        .bg(theme.bg_elevated())
+                        .child(
+                            div()
+                                .h(px(4.0))
+                                .w(gpui::relative(progress))
+                                .rounded(px(theme.radius_sm()))
+                                .bg(if complete {
+                                    theme.success()
+                                } else {
+                                    theme.accent()
+                                }),
+                        ),
+                );
+
+            let mut actions = div().flex().items_center().gap(px(theme.space_2())).child(
+                div()
+                    .flex_1()
+                    .text_size(px(theme.fs_1()))
+                    .text_color(theme.fg_muted())
+                    .child(SharedString::from(meta_line)),
+            );
+            if !complete && dl.pinned {
+                let h = hash.clone();
+                actions = actions.child(
+                    secondary_button(
+                        SharedString::from(format!("dl-cancel-{i}")),
+                        "Cancel Download",
+                        &theme,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.cancel_background_download(h.clone(), cx);
+                    })),
+                );
+            }
+            if !complete && !dl.pinned {
+                let h = hash.clone();
+                actions = actions.child(
+                    secondary_button(
+                        SharedString::from(format!("dl-resume-{i}")),
+                        "⬇ Download",
+                        &theme,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.resume_background_download(h.clone(), cx);
+                    })),
+                );
+            }
+            if is_admin {
+                let h = hash.clone();
+                actions = actions.child(
+                    secondary_button(
+                        SharedString::from(format!("dl-delete-{i}")),
+                        "🗑 Delete",
+                        &theme,
+                    )
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.delete_download(h.clone(), cx);
+                    })),
+                );
+            }
+            row = row.child(actions);
+            list = list.child(row);
+        }
+        root.child(list)
+    }
+
     fn favourites_page_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let items = self.state.favourites.read().clone();
@@ -1611,25 +2322,57 @@ impl MainView {
             for (i, fav) in items.iter().enumerate() {
                 let title: SharedString = fav.title.clone().into();
                 let year = fav.year.map(|y| y.to_string()).unwrap_or_default();
-                let rating = fav.rating.map(|r| format!("★ {:.1}", r)).unwrap_or_default();
+                let rating = fav
+                    .rating
+                    .map(|r| format!("★ {:.1}", r))
+                    .unwrap_or_default();
                 let query = fav.title.clone();
+
+                // Poster tile like the web Favourites grid; text-only
+                // fallback when no poster URL was captured.
+                let poster_box = match fav.poster_url.clone().filter(|p| !p.is_empty()) {
+                    Some(url) => {
+                        let src = crate::components::poster_image_source(&url);
+                        div()
+                            .w(px(120.0))
+                            .h(px(180.0))
+                            .rounded(px(theme.radius_md()))
+                            .overflow_hidden()
+                            .bg(theme.bg_panel())
+                            .child(
+                                img(src)
+                                    .w(px(120.0))
+                                    .h(px(180.0))
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                    }
+                    None => div()
+                        .w(px(120.0))
+                        .h(px(180.0))
+                        .rounded(px(theme.radius_md()))
+                        .bg(theme.bg_panel())
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(theme.fs_6()))
+                        .text_color(theme.fg_muted())
+                        .child("★"),
+                };
+
                 grid = grid.child(
                     div()
                         .id(SharedString::from(format!("fav-{}", i)))
-                        .w(px(160.0))
-                        .p(px(theme.space_2()))
-                        .rounded(px(theme.radius_md()))
-                        .bg(theme.bg_surface())
-                        .border_1()
-                        .border_color(theme.border_subtle())
+                        .w(px(120.0))
                         .cursor_pointer()
-                        .hover(|s| s.border_color(theme.accent()))
                         .flex()
                         .flex_col()
                         .gap(px(theme.space_1()))
+                        .child(poster_box)
                         .child(
                             div()
-                                .text_size(px(theme.fs_2()))
+                                .max_h(px(36.0))
+                                .overflow_hidden()
+                                .text_size(px(theme.fs_1()))
                                 .font_weight(gpui::FontWeight::MEDIUM)
                                 .text_color(theme.fg_primary())
                                 .child(title),
@@ -1641,11 +2384,15 @@ impl MainView {
                                 .text_size(px(theme.fs_1()))
                                 .text_color(theme.fg_muted())
                                 .child(SharedString::from(year))
-                                .child(SharedString::from(rating)),
+                                .child(
+                                    div()
+                                        .text_color(theme.favourite())
+                                        .child(SharedString::from(rating)),
+                                ),
                         )
                         .on_click(cx.listener(move |this, _ev, window, cx| {
                             // Re-search for this title and jump to Search page.
-                            this.state.replace_page(Page::Search);
+                            this.state.navigate(Page::Search);
                             this.search_input.update(cx, |input, _| {
                                 input.set_value(query.clone());
                                 input.submitted = true;
@@ -1674,15 +2421,30 @@ impl MainView {
         let mode_pill = |label: &'static str, this_mode: Mode| -> gpui::Stateful<gpui::Div> {
             let selected = mode == this_mode;
             div()
-                .id(SharedString::from(format!("settings-mode-{}", this_mode.as_str())))
+                .id(SharedString::from(format!(
+                    "settings-mode-{}",
+                    this_mode.as_str()
+                )))
                 .px(px(theme.space_3()))
                 .py(px(theme.space_2()))
                 .rounded(px(theme.radius_md()))
-                .bg(if selected { theme.accent() } else { theme.bg_elevated() })
-                .text_color(if selected { theme.fg_on_accent() } else { theme.fg_secondary() })
+                .bg(if selected {
+                    theme.accent()
+                } else {
+                    theme.bg_elevated()
+                })
+                .text_color(if selected {
+                    theme.fg_on_accent()
+                } else {
+                    theme.fg_secondary()
+                })
                 .text_size(px(theme.fs_1()))
                 .border_1()
-                .border_color(if selected { theme.accent() } else { theme.border_default() })
+                .border_color(if selected {
+                    theme.accent()
+                } else {
+                    theme.border_default()
+                })
                 .cursor_pointer()
                 .child(div().child(SharedString::from(label)))
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
@@ -1697,7 +2459,13 @@ impl MainView {
             _ => SharedString::from("server unreachable"),
         };
         let user_text: SharedString = user
-            .map(|u| SharedString::from(format!("@{} · {}", u.username, if u.is_admin { "admin" } else { "user" })))
+            .map(|u| {
+                SharedString::from(format!(
+                    "@{} · {}",
+                    u.username,
+                    if u.is_admin { "admin" } else { "user" }
+                ))
+            })
             .unwrap_or_else(|| SharedString::from("not signed in"));
 
         div()
@@ -1764,6 +2532,38 @@ impl MainView {
                         .text_size(px(theme.fs_3()))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(theme.fg_primary())
+                        .child("Maintenance"),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme.fs_1()))
+                        .text_color(theme.fg_muted())
+                        .child("Restart the torrent client: closes all peer connections and rediscovers seed nodes. Active and background downloads are re-added."),
+                )
+                .child(
+                    secondary_button("settings-restart-torrent", "Restart torrent client", &theme)
+                        .on_click(cx.listener(|this, _ev, _w, cx| {
+                            let state = this.state.clone();
+                            state.show_toast("Restarting torrent client…", ToastKind::Info);
+                            cx.spawn(async move |view, cx: &mut gpui::AsyncApp| {
+                                let client = state.client.read().clone();
+                                let res = runtime::spawn(async move { client.restart_torrent().await }).await;
+                                match res {
+                                    Ok(()) => state.show_toast("Torrent client restarted.", ToastKind::Success),
+                                    Err(e) => state.show_toast(format!("Restart failed: {e}"), ToastKind::Error),
+                                }
+                                let _ = view.update(cx, |_, cx| cx.notify());
+                            })
+                            .detach();
+                        })),
+                ),
+            )
+            .child(card(&theme).flex().flex_col().gap(px(theme.space_2()))
+                .child(
+                    div()
+                        .text_size(px(theme.fs_3()))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.fg_primary())
                         .child("Account"),
                 )
                 .child(
@@ -1795,7 +2595,11 @@ impl MainView {
     ) -> impl IntoElement {
         let theme = self.theme;
 
-        let hint = if loading { "loading… ⟳" } else { "Enter to search · Esc back" };
+        let hint = if loading {
+            "loading… ⟳"
+        } else {
+            "Enter to search · Esc back"
+        };
 
         let header = div()
             .flex()
@@ -1832,7 +2636,11 @@ impl MainView {
                 div()
                     .text_size(px(theme.fs_2()))
                     .text_color(theme.fg_muted())
-                    .child(if loading { "Searching…" } else { "No results." }),
+                    .child(if loading {
+                        "Searching…"
+                    } else {
+                        "No results."
+                    }),
             );
         } else {
             let mut list = div().flex().flex_col().gap(px(theme.space_2()));
@@ -1885,15 +2693,17 @@ impl MainView {
                                 "Play",
                                 &theme,
                             )
-                            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                                this.play_magnet(
-                                    magnet.clone(),
-                                    title_owned.clone(),
-                                    Some(api_base),
-                                    Some(detail_url.clone()),
-                                    cx,
-                                );
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _ev, _w, cx| {
+                                    this.play_magnet(
+                                        magnet.clone(),
+                                        title_owned.clone(),
+                                        Some(api_base),
+                                        Some(detail_url.clone()),
+                                        cx,
+                                    );
+                                },
+                            )),
                         ),
                 );
             }
@@ -1933,7 +2743,11 @@ impl MainView {
         let theme = self.theme;
         let results = self.state.tv_results.read().clone();
         let loading = *self.state.tv_loading.read();
-        let hint = if loading { "loading… ⟳" } else { "Enter to search · Esc back" };
+        let hint = if loading {
+            "loading… ⟳"
+        } else {
+            "Enter to search · Esc back"
+        };
 
         let header = div()
             .flex()
@@ -1970,7 +2784,11 @@ impl MainView {
                 div()
                     .text_size(px(theme.fs_2()))
                     .text_color(theme.fg_muted())
-                    .child(if loading { "Searching…" } else { "No results." }),
+                    .child(if loading {
+                        "Searching…"
+                    } else {
+                        "No results."
+                    }),
             );
         } else {
             let mut list = div().flex().flex_col().gap(px(theme.space_2()));
@@ -1978,9 +2796,8 @@ impl MainView {
                 let show_name = SharedString::from(g.show_name.clone());
                 let season_count = g.seasons.len();
                 let ep_count: usize = g.seasons.iter().map(|s| s.episodes.len()).sum();
-                let meta = SharedString::from(format!(
-                    "{season_count} seasons · {ep_count} episodes"
-                ));
+                let meta =
+                    SharedString::from(format!("{season_count} seasons · {ep_count} episodes"));
                 let clone = g.clone();
                 list = list.child(
                     div()
@@ -2123,9 +2940,17 @@ impl MainView {
                                 SharedString::from(label),
                                 &theme,
                             )
-                            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                                this.play_magnet(Some(magnet.clone()), title.clone(), None, None, cx);
-                            })),
+                            .on_click(cx.listener(
+                                move |this, _ev, _w, cx| {
+                                    this.play_magnet(
+                                        Some(magnet.clone()),
+                                        title.clone(),
+                                        None,
+                                        None,
+                                        cx,
+                                    );
+                                },
+                            )),
                         );
                     }
                     ep_row = ep_row.child(variants);
@@ -2211,14 +3036,16 @@ impl MainView {
                             .child(SharedString::from(demo.size)),
                     )
                     .child(
-                        primary_button(
-                            SharedString::from(format!("ss-play-{i}")),
-                            "Play",
-                            &theme,
-                        )
-                        .on_click(cx.listener(move |this, _ev, _w, cx| {
-                            this.play_magnet(Some(magnet.clone()), title.clone(), None, None, cx);
-                        })),
+                        primary_button(SharedString::from(format!("ss-play-{i}")), "Play", &theme)
+                            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                                this.play_magnet(
+                                    Some(magnet.clone()),
+                                    title.clone(),
+                                    None,
+                                    None,
+                                    cx,
+                                );
+                            })),
                     ),
             );
         }
@@ -2358,7 +3185,9 @@ impl MainView {
                 .child(SharedString::from(label))
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     *this.state.drawer_open.write() = false;
-                    this.state.replace_page(page);
+                    // Push (not replace) so the header back arrow and Esc
+                    // walk history exactly like the web app's browser back.
+                    this.state.navigate(page);
                     this.ensure_loaded_for(page);
                     cx.notify();
                 }))
@@ -2370,9 +3199,8 @@ impl MainView {
             .gap(px(theme.space_1()))
             .child(link("Movies", Page::Search))
             .child(link("TV Shows", Page::TvSearch))
-            .child(link("Music", Page::MusicSearch))
-            .child(link("Music Videos", Page::MusicVideoSearch))
             .child(link("Favourites", Page::Favourites))
+            .child(link("Downloads", Page::Downloads))
             .child(link("History", Page::History))
             .child(link("Surround Sound", Page::SurroundSound))
             .child(link("Settings", Page::Settings));
@@ -2381,15 +3209,20 @@ impl MainView {
             items = items.child(link("Admin", Page::Admin));
         }
 
-        // Full-screen overlay with a 280px panel on the left.
+        // Full-screen overlay with a 280px panel on the left. `occlude`
+        // stops clicks from reaching page elements underneath — without
+        // it a drawer click also activates whatever tile/button sits
+        // below it, navigating somewhere unrelated.
         div()
+            .occlude()
             .absolute()
             .inset_0()
             .bg(theme.bg_overlay())
             .flex()
             .child(
                 div()
-                    .w(px(280.0))
+                    .occlude()
+                    .w(px(280.0 * theme.scale()))
                     .h_full()
                     .bg(theme.bg_surface())
                     .border_r_1()
@@ -2400,10 +3233,23 @@ impl MainView {
                     .gap(px(theme.space_3()))
                     .child(
                         div()
-                            .text_size(px(theme.fs_5()))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme.accent_text())
-                            .child("StreamX"),
+                            .flex()
+                            .items_center()
+                            .gap(px(theme.space_2()))
+                            .child(
+                                gpui::svg()
+                                    .path("logo.svg")
+                                    .w(px(48.0 * theme.scale()))
+                                    .h(px(48.0 * theme.scale()))
+                                    .text_color(theme.fg_primary()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(theme.fs_5()))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme.accent_text())
+                                    .child("StreamX"),
+                            ),
                     )
                     .child(items),
             )
@@ -2444,12 +3290,20 @@ impl MainView {
     fn title_bar(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let control = |id: &'static str, icon: &'static str, is_close: bool| {
-            let hover_bg = if is_close { theme.error() } else { theme.bg_elevated() };
-            let hover_fg = if is_close { theme.fg_on_accent() } else { theme.fg_primary() };
+            let hover_bg = if is_close {
+                theme.error()
+            } else {
+                theme.bg_elevated()
+            };
+            let hover_fg = if is_close {
+                theme.fg_on_accent()
+            } else {
+                theme.fg_primary()
+            };
             div()
                 .id(SharedString::from(format!("win-ctrl-{id}")))
-                .w(px(28.0))
-                .h(px(20.0))
+                .w(px(28.0 * theme.scale()))
+                .h(px(20.0 * theme.scale()))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2470,10 +3324,10 @@ impl MainView {
                 })
         };
 
-        div()
+        let bar = div()
             .id("title-bar")
             .w_full()
-            .h(px(32.0))
+            .h(px(32.0 * theme.scale()))
             .flex()
             .items_center()
             .justify_between()
@@ -2488,17 +3342,30 @@ impl MainView {
                 if ev.click_count() == 2 {
                     window.zoom_window();
                 }
-            }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.space_2()))
-                    .text_size(px(theme.fs_1()))
-                    .text_color(theme.fg_muted())
-                    .child("StreamX"),
-            )
-            .child(
+            }));
+
+        let name = div()
+            .flex()
+            .items_center()
+            .gap(px(theme.space_2()))
+            .text_size(px(theme.fs_1()))
+            .text_color(theme.fg_muted())
+            .child("StreamX");
+
+        // macOS: the native traffic lights overlay the top-left corner
+        // (the titlebar is transparent, not removed), so the app name
+        // lives on the right and no custom controls are drawn.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = control;
+            bar.child(div().w(px(78.0))).child(name)
+        }
+
+        // Linux (client-side decorations): name on the left, custom
+        // min/max/close controls on the right.
+        #[cfg(not(target_os = "macos"))]
+        {
+            bar.child(name).child(
                 div()
                     .flex()
                     .items_center()
@@ -2510,6 +3377,7 @@ impl MainView {
                     .child(control("maximize", "□", false))
                     .child(control("close", "✕", true)),
             )
+        }
     }
 
     /// App header: drawer button, logo (click → home), current page title,
@@ -2521,11 +3389,15 @@ impl MainView {
         let user = self.state.user.read().clone();
 
         let nav_arrow = |id: &'static str, icon: &'static str, enabled: bool| {
-            let color = if enabled { theme.fg_secondary() } else { theme.fg_disabled() };
+            let color = if enabled {
+                theme.fg_secondary()
+            } else {
+                theme.fg_disabled()
+            };
             div()
                 .id(SharedString::from(format!("nav-{id}")))
-                .w(px(28.0))
-                .h(px(28.0))
+                .w(px(28.0 * theme.scale()))
+                .h(px(28.0 * theme.scale()))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2533,7 +3405,8 @@ impl MainView {
                 .text_size(px(theme.fs_3()))
                 .text_color(color)
                 .when(enabled, |el| {
-                    el.cursor_pointer().hover(move |s| s.bg(theme.bg_elevated()))
+                    el.cursor_pointer()
+                        .hover(move |s| s.bg(theme.bg_elevated()))
                 })
                 .child(icon)
         };
@@ -2556,15 +3429,27 @@ impl MainView {
                     .child(
                         div()
                             .id("logo-home")
-                            .text_size(px(theme.fs_3()))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(theme.accent_text())
+                            .flex()
+                            .items_center()
                             .cursor_pointer()
-                            .hover(|s| s.text_color(theme.accent()))
-                            .child("StreamX")
+                            .hover(|s| s.opacity(0.8))
+                            .child(
+                                gpui::svg()
+                                    .path("logo.svg")
+                                    .w(px(44.0 * theme.scale()))
+                                    .h(px(44.0 * theme.scale()))
+                                    .text_color(theme.fg_primary()),
+                            )
                             .on_click(cx.listener(|this, _ev, _w, cx| {
-                                this.state.replace_page(Page::Search);
+                                // Logo is a full "go home": clear any
+                                // search so the browse view shows, from
+                                // every page.
+                                this.search_input.update(cx, |input, _| input.set_value(""));
+                                *this.state.query.write() = String::new();
+                                *this.state.search_results.write() = Vec::new();
+                                this.state.navigate(Page::Search);
                                 this.ensure_loaded_for(Page::Search);
+                                this.state.mark_dirty();
                                 cx.notify();
                             })),
                     )
@@ -2582,14 +3467,13 @@ impl MainView {
                     .flex()
                     .items_center()
                     .gap(px(theme.space_2()))
-                    .child(
-                        nav_arrow("back", "◀", can_go_back)
-                            .on_click(cx.listener(|this, _ev, _w, cx| {
-                                if this.state.back() {
-                                    cx.notify();
-                                }
-                            })),
-                    )
+                    .child(nav_arrow("back", "◀", can_go_back).on_click(cx.listener(
+                        |this, _ev, _w, cx| {
+                            if this.state.back() {
+                                cx.notify();
+                            }
+                        },
+                    )))
                     .child(nav_arrow("fwd", "▶", false))
                     .when(user.is_some(), |el| {
                         let u = user
@@ -2656,7 +3540,12 @@ impl MainView {
                 "rz-bot",
                 CursorStyle::ResizeUpDown,
                 ResizeEdge::Bottom,
-                div().absolute().bottom_0().left(px(c)).right(px(c)).h(px(e)),
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left(px(c))
+                    .right(px(c))
+                    .h(px(e)),
             ),
             strip(
                 "rz-left",
@@ -2724,23 +3613,93 @@ async fn load_browse(state: &Arc<AppState>) {
     use streamx_api::client::BrowseParams;
 
     *state.browse_loading.write() = true;
+    state.mark_dirty();
     let client: Client = state.client.read().clone();
     let sections: [(&str, BrowseParams); 8] = [
-        ("latest",   BrowseParams { sort_by: Some("date_added".into()),     limit: Some(10), ..Default::default() }),
-        ("popular",  BrowseParams { sort_by: Some("download_count".into()), limit: Some(10), ..Default::default() }),
-        ("top_rated",BrowseParams { sort_by: Some("rating".into()), minimum_rating: Some(8), limit: Some(10), ..Default::default() }),
-        ("action",   BrowseParams { sort_by: Some("download_count".into()), genre: Some("action".into()),   limit: Some(10), ..Default::default() }),
-        ("comedy",   BrowseParams { sort_by: Some("download_count".into()), genre: Some("comedy".into()),   limit: Some(10), ..Default::default() }),
-        ("thriller", BrowseParams { sort_by: Some("download_count".into()), genre: Some("thriller".into()), limit: Some(10), ..Default::default() }),
-        ("scifi",    BrowseParams { sort_by: Some("download_count".into()), genre: Some("sci-fi".into()),   limit: Some(10), ..Default::default() }),
-        ("horror",   BrowseParams { sort_by: Some("download_count".into()), genre: Some("horror".into()),   limit: Some(10), ..Default::default() }),
+        (
+            "latest",
+            BrowseParams {
+                sort_by: Some("date_added".into()),
+                limit: Some(24),
+                ..Default::default()
+            },
+        ),
+        (
+            "popular",
+            BrowseParams {
+                sort_by: Some("download_count".into()),
+                limit: Some(24),
+                ..Default::default()
+            },
+        ),
+        (
+            "top_rated",
+            BrowseParams {
+                sort_by: Some("rating".into()),
+                minimum_rating: Some(8),
+                limit: Some(24),
+                ..Default::default()
+            },
+        ),
+        (
+            "action",
+            BrowseParams {
+                sort_by: Some("download_count".into()),
+                genre: Some("action".into()),
+                limit: Some(24),
+                ..Default::default()
+            },
+        ),
+        (
+            "comedy",
+            BrowseParams {
+                sort_by: Some("download_count".into()),
+                genre: Some("comedy".into()),
+                limit: Some(24),
+                ..Default::default()
+            },
+        ),
+        (
+            "thriller",
+            BrowseParams {
+                sort_by: Some("download_count".into()),
+                genre: Some("thriller".into()),
+                limit: Some(24),
+                ..Default::default()
+            },
+        ),
+        (
+            "scifi",
+            BrowseParams {
+                sort_by: Some("download_count".into()),
+                genre: Some("sci-fi".into()),
+                limit: Some(24),
+                ..Default::default()
+            },
+        ),
+        (
+            "horror",
+            BrowseParams {
+                sort_by: Some("download_count".into()),
+                genre: Some("horror".into()),
+                limit: Some(24),
+                ..Default::default()
+            },
+        ),
     ];
 
-    let mut out = BrowseData::default();
+    // All rows fetch in parallel so the home page fills in one round
+    // trip instead of eight sequential ones.
+    let mut handles = Vec::new();
     for (name, p) in sections {
         let c = client.clone();
-        let r = runtime::spawn(async move { c.browse(&p).await }).await;
-        if let Ok(rows) = r {
+        handles.push((name, runtime::spawn(async move { c.browse(&p).await })));
+    }
+    let mut out = BrowseData::default();
+    for (name, fut) in handles {
+        if let Ok(rows) = fut.await {
+            let rows: Vec<std::sync::Arc<streamx_api::types::SearchResultGroup>> =
+                rows.into_iter().map(std::sync::Arc::new).collect();
             match name {
                 "latest" => out.latest = rows,
                 "popular" => out.popular = rows,
@@ -2756,50 +3715,64 @@ async fn load_browse(state: &Arc<AppState>) {
     }
     *state.browse.write() = out;
     *state.browse_loading.write() = false;
+    state.mark_dirty();
 }
 
-/// Debounce + change-detection helper used by the tick loop.
-/// Fires immediately when the user hit Enter (`submitted=true`); otherwise
-/// waits for the value to stay stable for `debounce` ms with length >= 2
-/// before firing. Clears `last_fired` when the field is emptied.
-fn fire_debounced<F: FnOnce(String)>(
+/// Debounce + change-detection state for one live-search input.
+/// `last_seen` tracks the newest value (restarts the timer only when the
+/// user actually types), `last_fired` tracks what was last searched.
+#[derive(Default)]
+pub struct DebounceState {
+    last_seen: String,
+    last_fired: String,
+    typed_at: Option<std::time::Instant>,
+}
+
+/// Fires immediately on Enter (`submitted=true`); otherwise fires once the
+/// value has been stable for `debounce` and differs from the last search.
+/// An emptied field fires with an empty query so the page resets to the
+/// browse view, matching the web UI.
+pub fn fire_debounced<F: FnOnce(String)>(
     current: &str,
     submitted: bool,
-    last_fired: &mut String,
-    last_typed_at: &mut Option<std::time::Instant>,
+    st: &mut DebounceState,
     debounce: Duration,
     run: F,
 ) {
     let trimmed = current.trim();
-    let changed = trimmed != last_fired.as_str();
-    if changed {
-        *last_typed_at = Some(std::time::Instant::now());
+    if trimmed != st.last_seen {
+        st.last_seen = trimmed.to_string();
+        st.typed_at = Some(std::time::Instant::now());
     }
     if submitted && !trimmed.is_empty() {
-        *last_fired = trimmed.to_string();
-        *last_typed_at = None;
+        st.last_fired = trimmed.to_string();
+        st.typed_at = None;
         run(trimmed.to_string());
         return;
     }
-    let ready = last_typed_at
+    let ready = st
+        .typed_at
         .map(|t| t.elapsed() >= debounce)
         .unwrap_or(false);
-    if ready && changed && trimmed.len() >= 2 {
-        *last_fired = trimmed.to_string();
-        *last_typed_at = None;
-        run(trimmed.to_string());
-    } else if ready && trimmed.is_empty() && !last_fired.is_empty() {
-        *last_fired = String::new();
-        *last_typed_at = None;
-        // Fire with empty query so the page resets (state.query and
-        // state.search_results cleared, browse view comes back).
-        run(String::new());
+    if !ready {
+        return;
     }
+    st.typed_at = None;
+    if trimmed == st.last_fired {
+        return;
+    }
+    st.last_fired = trimmed.to_string();
+    run(trimmed.to_string());
 }
 
-
 async fn run_music_search(state: Arc<AppState>, query: String) {
+    if query.trim().is_empty() {
+        *state.music_query.write() = String::new();
+        load_music(&state).await;
+        return;
+    }
     *state.music_loading.write() = true;
+    state.mark_dirty();
     *state.music_query.write() = query.clone();
     let client = state.client.read().clone();
     match client.search_music(&query).await {
@@ -2807,10 +3780,17 @@ async fn run_music_search(state: Arc<AppState>, query: String) {
         Err(e) => state.show_toast(format!("Music search failed: {e}"), ToastKind::Error),
     }
     *state.music_loading.write() = false;
+    state.mark_dirty();
 }
 
 async fn run_music_video_search(state: Arc<AppState>, query: String) {
+    if query.trim().is_empty() {
+        *state.music_video_query.write() = String::new();
+        load_music_videos(&state).await;
+        return;
+    }
     *state.music_video_loading.write() = true;
+    state.mark_dirty();
     *state.music_video_query.write() = query.clone();
     let client = state.client.read().clone();
     match client.search_music_videos(&query).await {
@@ -2818,10 +3798,17 @@ async fn run_music_video_search(state: Arc<AppState>, query: String) {
         Err(e) => state.show_toast(format!("Music video search failed: {e}"), ToastKind::Error),
     }
     *state.music_video_loading.write() = false;
+    state.mark_dirty();
 }
 
 async fn run_tv_search(state: Arc<AppState>, query: String) {
+    if query.trim().is_empty() {
+        *state.tv_query.write() = String::new();
+        load_tv(&state).await;
+        return;
+    }
     *state.tv_loading.write() = true;
+    state.mark_dirty();
     *state.tv_query.write() = query.clone();
     let client = state.client.read().clone();
     match client.search_tv(&query).await {
@@ -2829,36 +3816,43 @@ async fn run_tv_search(state: Arc<AppState>, query: String) {
         Err(e) => state.show_toast(format!("TV search failed: {e}"), ToastKind::Error),
     }
     *state.tv_loading.write() = false;
+    state.mark_dirty();
 }
 
 async fn load_music(state: &Arc<AppState>) {
     *state.music_loading.write() = true;
+    state.mark_dirty();
     let client = state.client.read().clone();
     match client.browse_music(1).await {
         Ok(resp) => *state.music_results.write() = resp.results,
         Err(e) => state.show_toast(format!("Music browse failed: {e}"), ToastKind::Error),
     }
     *state.music_loading.write() = false;
+    state.mark_dirty();
 }
 
 async fn load_music_videos(state: &Arc<AppState>) {
     *state.music_video_loading.write() = true;
+    state.mark_dirty();
     let client = state.client.read().clone();
     match client.browse_music_videos(1).await {
         Ok(resp) => *state.music_video_results.write() = resp.results,
         Err(e) => state.show_toast(format!("Music video browse failed: {e}"), ToastKind::Error),
     }
     *state.music_video_loading.write() = false;
+    state.mark_dirty();
 }
 
 async fn load_tv(state: &Arc<AppState>) {
     *state.tv_loading.write() = true;
+    state.mark_dirty();
     let client = state.client.read().clone();
     match client.browse_tv(1).await {
         Ok(resp) => *state.tv_results.write() = resp.results,
         Err(e) => state.show_toast(format!("TV browse failed: {e}"), ToastKind::Error),
     }
     *state.tv_loading.write() = false;
+    state.mark_dirty();
 }
 
 struct SurroundDemo {
@@ -2907,42 +3901,315 @@ const SURROUND_DEMOS: &[SurroundDemo] = &[
     },
 ];
 
+/// The eight home categories, shared by the home rows and the category
+/// drill-down page.
+pub fn category_specs() -> [crate::state::CategorySpec; 8] {
+    use streamx_api::client::BrowseParams;
+    let p = |sort: &str, genre: Option<&str>, min: Option<u32>| BrowseParams {
+        sort_by: Some(sort.into()),
+        genre: genre.map(String::from),
+        minimum_rating: min,
+        ..Default::default()
+    };
+    [
+        crate::state::CategorySpec {
+            title: "Latest",
+            params: p("date_added", None, None),
+        },
+        crate::state::CategorySpec {
+            title: "Most Popular",
+            params: p("download_count", None, None),
+        },
+        crate::state::CategorySpec {
+            title: "Top Rated",
+            params: p("rating", None, Some(8)),
+        },
+        crate::state::CategorySpec {
+            title: "Action",
+            params: p("download_count", Some("action"), None),
+        },
+        crate::state::CategorySpec {
+            title: "Comedy",
+            params: p("download_count", Some("comedy"), None),
+        },
+        crate::state::CategorySpec {
+            title: "Thriller",
+            params: p("download_count", Some("thriller"), None),
+        },
+        crate::state::CategorySpec {
+            title: "Sci-Fi",
+            params: p("download_count", Some("sci-fi"), None),
+        },
+        crate::state::CategorySpec {
+            title: "Horror",
+            params: p("download_count", Some("horror"), None),
+        },
+    ]
+}
+
+/// Open a category drill-down page and fetch its first page.
+pub async fn open_category(state: Arc<AppState>, spec: crate::state::CategorySpec) {
+    *state.category.write() = Some(spec);
+    state.category_items.write().clear();
+    state
+        .category_page
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    *state.category_done.write() = false;
+    state.navigate(Page::CategoryBrowse);
+    state.mark_dirty();
+    load_category_page(&state).await;
+}
+
+/// Fetch the next page of the open category; appends deduped items.
+pub async fn load_category_page(state: &Arc<AppState>) {
+    {
+        let mut loading = state.category_loading.write();
+        if *loading || *state.category_done.read() {
+            return;
+        }
+        *loading = true;
+    }
+    state.mark_dirty();
+    let spec = state.category.read().clone();
+    let Some(spec) = spec else {
+        *state.category_loading.write() = false;
+        return;
+    };
+    let next = state
+        .category_page
+        .load(std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    let mut params = spec.params.clone();
+    params.limit = Some(20);
+    params.page = Some(next);
+    let client = state.client.read().clone();
+    match client.browse(&params).await {
+        Ok(rows) if !rows.is_empty() => {
+            let mut items = state.category_items.write();
+            let existing: std::collections::HashSet<String> = items
+                .iter()
+                .map(|g| format!("{}-{:?}", g.title, g.year))
+                .collect();
+            let mut added = 0usize;
+            for g in rows {
+                let key = format!("{}-{:?}", g.title, g.year);
+                if !existing.contains(&key) {
+                    items.push(std::sync::Arc::new(g));
+                    added += 1;
+                }
+            }
+            drop(items);
+            state
+                .category_page
+                .store(next, std::sync::atomic::Ordering::Relaxed);
+            // A page of pure duplicates means the provider stopped
+            // paginating; don't spin on it.
+            if added == 0 {
+                *state.category_done.write() = true;
+            }
+        }
+        Ok(_) => {
+            *state.category_done.write() = true;
+        }
+        Err(e) => {
+            state.show_toast(format!("Browse failed: {e}"), ToastKind::Error);
+            *state.category_done.write() = true;
+        }
+    }
+    *state.category_loading.write() = false;
+    state.mark_dirty();
+}
+
+/// One home section: clickable heading + horizontally scrolling tile
+/// strip. Fixed height (`block_h`) so the sections can live in a
+/// virtualized uniform list.
+#[allow(clippy::too_many_arguments)]
+fn home_section_block(
+    spec: &crate::state::CategorySpec,
+    groups: &[Arc<streamx_api::types::SearchResultGroup>],
+    layout: crate::components::TileLayout,
+    theme: Theme,
+    block_h: f32,
+    state: Arc<AppState>,
+    weak: gpui::WeakEntity<MainView>,
+) -> gpui::Div {
+    let title = spec.title;
+    let gap = crate::components::TILE_GAP * crate::theme::ui_scale();
+
+    let mut strip = div()
+        .id(SharedString::from(format!("row-scroll-{title}")))
+        .flex()
+        .gap(px(gap))
+        .overflow_x_scroll()
+        .pb(px(theme.space_2()))
+        .min_h(px(layout.total_h + 20.0));
+
+    if groups.is_empty() {
+        for i in 0..8u32 {
+            strip = strip.child(
+                div()
+                    .id(SharedString::from(format!("skel-{title}-{i}")))
+                    .w(px(layout.tile_w))
+                    .h(px(layout.poster_h))
+                    .rounded(px(theme.radius_md()))
+                    .bg(theme.bg_panel())
+                    .flex_shrink_0(),
+            );
+        }
+    } else {
+        for (i, g) in groups.iter().enumerate() {
+            let g_click = g.clone();
+            let weak = weak.clone();
+            strip = strip.child(
+                movie_tile(g.as_ref(), &theme, format!("row-{title}-{i}"), layout).on_click(
+                    move |_ev, _window, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            *this.state.selected_movie.write() = Some(g_click.clone());
+                            this.state.navigate(Page::Movie);
+                            cx.notify();
+                        });
+                    },
+                ),
+            );
+        }
+    }
+
+    let spec_for_click = spec.clone();
+    let weak_for_click = weak.clone();
+    let heading = div()
+        .id(SharedString::from(format!("cat-open-{title}")))
+        .flex()
+        .items_center()
+        .gap(px(theme.space_1()))
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.8))
+        .child(section_title(SharedString::from(title), &theme))
+        .child(
+            div()
+                .text_size(px(theme.fs_2()))
+                .text_color(theme.fg_muted())
+                .child("⌄"),
+        )
+        .on_click(move |_ev, _window, cx| {
+            let state = state.clone();
+            let spec = spec_for_click.clone();
+            let _ = runtime::spawn(async move { open_category(state, spec).await });
+            let _ = weak_for_click.update(cx, |_, cx| cx.notify());
+        });
+
+    div()
+        .h(px(block_h))
+        .flex()
+        .flex_col()
+        .gap(px(theme.space_2()))
+        .child(heading)
+        .child(strip)
+}
+
+/// Virtualized tile grid: only the visible rows build elements, so large
+/// grids scroll fluidly like a web page. When `flag_need_more` is true,
+/// nearing the last row flips `state.category_need_more`, which the tick
+/// loop turns into an infinite-scroll page fetch.
+fn virtual_tile_grid(
+    id: &'static str,
+    items: Vec<Arc<streamx_api::types::SearchResultGroup>>,
+    layout: crate::components::TileLayout,
+    theme: Theme,
+    state: Arc<AppState>,
+    weak: gpui::WeakEntity<MainView>,
+    flag_need_more: bool,
+) -> gpui::UniformList {
+    let cols = layout.per_row.max(1);
+    let row_count = items.len().div_ceil(cols).max(1);
+    let gap = crate::components::TILE_GAP * crate::theme::ui_scale();
+    gpui::uniform_list(id, row_count, move |range, _window, _cx| {
+        if flag_need_more && range.end + 2 >= row_count {
+            state
+                .category_need_more
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        range
+            .map(|row| {
+                let mut row_div = div().flex().gap(px(gap)).pb(px(gap));
+                let start = row * cols;
+                let end = (start + cols).min(items.len());
+                for i in start..end {
+                    let g = items[i].clone();
+                    let g_click = g.clone();
+                    let weak = weak.clone();
+                    row_div = row_div.child(
+                        movie_tile(g.as_ref(), &theme, format!("{id}-{i}"), layout).on_click(
+                            move |_ev, _window, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    *this.state.selected_movie.write() = Some(g_click.clone());
+                                    this.state.navigate(Page::Movie);
+                                    cx.notify();
+                                });
+                            },
+                        ),
+                    );
+                }
+                row_div
+            })
+            .collect()
+    })
+}
+
+async fn load_downloads(state: &Arc<AppState>) {
+    *state.downloads_loading.write() = true;
+    state.mark_dirty();
+    let client = state.client.read().clone();
+    match client.list_downloads().await {
+        Ok(items) => *state.downloads.write() = items,
+        Err(e) => tracing::debug!("Downloads load failed: {e}"),
+    }
+    *state.downloads_loading.write() = false;
+    state.mark_dirty();
+}
+
 async fn load_history(state: &Arc<AppState>) {
     *state.history_loading.write() = true;
+    state.mark_dirty();
     let client = state.client.read().clone();
     match client.history().await {
         Ok(resp) => *state.history.write() = resp.items,
         Err(e) => state.show_toast(format!("History failed: {e}"), ToastKind::Error),
     }
     *state.history_loading.write() = false;
+    state.mark_dirty();
 }
 
 async fn load_favourites(state: &Arc<AppState>) {
     *state.favourites_loading.write() = true;
+    state.mark_dirty();
     let client = state.client.read().clone();
     match client.favourites().await {
         Ok(resp) => *state.favourites.write() = resp.items,
         Err(e) => state.show_toast(format!("Favourites failed: {e}"), ToastKind::Error),
     }
     *state.favourites_loading.write() = false;
+    state.mark_dirty();
 }
 
-async fn run_search(state: Arc<AppState>, query: String) {
+pub async fn run_search(state: Arc<AppState>, query: String) {
     // Empty query means "clear search" — restore the browse view.
     if query.trim().is_empty() {
         *state.query.write() = String::new();
         *state.search_results.write() = Vec::new();
         *state.search_in_flight.write() = false;
+        state.mark_dirty();
         return;
     }
     *state.search_in_flight.write() = true;
+    state.mark_dirty();
     *state.query.write() = query.clone();
 
     let client = state.client.read().clone();
     let result = client.search(&query, 1).await;
     match result {
         Ok(resp) => {
-            *state.search_results.write() = resp.results;
+            *state.search_results.write() =
+                resp.results.into_iter().map(std::sync::Arc::new).collect();
             *state.connection_error.write() = None;
         }
         Err(e) => {
@@ -2951,9 +4218,23 @@ async fn run_search(state: Arc<AppState>, query: String) {
         }
     }
     *state.search_in_flight.write() = false;
+    state.mark_dirty();
 }
 
-fn first_tile(b: &BrowseData) -> Option<streamx_api::types::SearchResultGroup> {
+/// Extract the btih info hash from a magnet URI, lowercased.
+pub fn info_hash_from_magnet(magnet: &str) -> Option<String> {
+    let idx = magnet.find("xt=urn:btih:")?;
+    let rest = &magnet[idx + "xt=urn:btih:".len()..];
+    let end = rest.find('&').unwrap_or(rest.len());
+    let hash = &rest[..end];
+    if hash.is_empty() {
+        None
+    } else {
+        Some(hash.to_ascii_lowercase())
+    }
+}
+
+fn first_tile(b: &BrowseData) -> Option<Arc<streamx_api::types::SearchResultGroup>> {
     b.latest
         .first()
         .or_else(|| b.popular.first())
@@ -2969,6 +4250,18 @@ impl Focusable for MainView {
 
 impl Render for MainView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Refresh the global UI scale from the window size before any
+        // Theme accessor runs: fonts, spacing, menus, inputs and buttons
+        // all track it.
+        let viewport_w: f32 = window.viewport_size().width.into();
+        crate::theme::set_viewport_width(viewport_w);
+        // Keyboard shortcuts need a focus target. Focus set before the
+        // first render is dropped by GPUI, leaving NO dispatch path (keys
+        // go nowhere until the user clicks) — reclaim the root focus
+        // whenever nothing holds focus.
+        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+        }
         let theme = self.theme;
         let page = self.state.current_page();
         let drawer_open = *self.state.drawer_open.read();
@@ -2983,16 +4276,23 @@ impl Render for MainView {
                 .bg(theme.bg_app())
                 .child(self.login_page_view(window, cx))
                 .into_any_element(),
-            Page::Search => self.search_page_view(cx).into_any_element(),
-            Page::Movie => self.movie_page_view(cx).into_any_element(),
-            Page::Player => self.player_page_view(cx).into_any_element(),
+            Page::Search => self.search_page_view(viewport_w, cx).into_any_element(),
+            Page::CategoryBrowse => self.category_page_view(viewport_w, cx).into_any_element(),
+            Page::Movie => self.movie_page_view(viewport_w, cx).into_any_element(),
+            Page::Player => self.player_page_view(viewport_w, cx).into_any_element(),
             Page::Loading => loading_page(&theme, "loading…").into_any_element(),
             Page::History => self.history_page_view(cx).into_any_element(),
+            Page::Downloads => self.downloads_page_view(cx).into_any_element(),
             Page::Favourites => self.favourites_page_view(cx).into_any_element(),
             Page::Settings => self.settings_page_view(cx).into_any_element(),
             Page::Admin => self.admin_page_view(cx).into_any_element(),
             Page::MusicSearch => self.music_search_page_view(cx).into_any_element(),
-            Page::MusicPlayer => stub_page(&theme, "Now playing", "Dedicated audio player lands in Phase 5 follow-up.").into_any_element(),
+            Page::MusicPlayer => stub_page(
+                &theme,
+                "Now playing",
+                "Dedicated audio player lands in Phase 5 follow-up.",
+            )
+            .into_any_element(),
             Page::TvSearch => self.tv_search_page_view(cx).into_any_element(),
             Page::TvShow => self.tv_show_page_view(cx).into_any_element(),
             Page::MusicVideoSearch => self.music_video_search_page_view(cx).into_any_element(),

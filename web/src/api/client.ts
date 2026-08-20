@@ -2,6 +2,7 @@ import { getToken } from "../lib/auth";
 import { debugLog } from "../lib/debug-log";
 import type {
   ApiError,
+  DownloadsResponse,
   FavouriteItem,
   FavouritesResponse,
   LoginRequest,
@@ -12,6 +13,7 @@ import type {
   SearchRequest,
   SearchResponse,
   SearchHistoryResponse,
+  ServerSettings,
   Settings,
   StreamRequest,
   StreamResponse,
@@ -140,6 +142,29 @@ class ApiClient {
 
   async pauseStream(streamId: string): Promise<void> {
     await this.request(`/api/stream/${streamId}/pause`, { method: "PUT" });
+  }
+
+  async serverSettings(): Promise<ServerSettings> {
+    return this.request<ServerSettings>("/api/settings/server");
+  }
+
+  async updateServerSettings(settings: ServerSettings): Promise<ServerSettings> {
+    return this.request<ServerSettings>("/api/admin/settings", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    });
+  }
+
+  async listDownloads(): Promise<DownloadsResponse> {
+    return this.request<DownloadsResponse>("/api/downloads");
+  }
+
+  async pinDownload(streamId: string): Promise<void> {
+    await this.request(`/api/stream/${streamId}/download`, { method: "POST" });
+  }
+
+  async unpinDownload(streamId: string): Promise<void> {
+    await this.request(`/api/stream/${streamId}/download`, { method: "DELETE" });
   }
 
   async resumeStream(streamId: string): Promise<void> {

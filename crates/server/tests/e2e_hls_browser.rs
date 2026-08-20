@@ -27,21 +27,49 @@ async fn start_server() -> HlsBrowserServer {
 
     let port = portpicker::pick_unused_port().expect("port");
     let config = streamx::config::AppConfig {
-        server: streamx::config::ServerConfig { port, bind: "127.0.0.1".into(), open_browser: false, log_level: None },
+        server: streamx::config::ServerConfig {
+            port,
+            bind: "127.0.0.1".into(),
+            open_browser: false,
+            log_level: None,
+        },
         torrent: streamx::config::TorrentConfig {
-            max_connections: 10, sequential: true, seed_after_complete: false, dht: false, pex: false,
+            max_connections: 10,
+            sequential: true,
+            seed_after_complete: false,
+            dht: false,
+            pex: false,
         },
         transcode: streamx::config::TranscodeConfig {
-            hls_segment_duration: 2, video_codec: "h264".into(), audio_codec: "aac".into(),
-            preset: "ultrafast".into(), max_concurrent_transcodes: 2, crf: 28,
-            max_bitrate: None, audio_bitrate: "128k".into(), threads: Some(2),
-            gpu: false, hls_downscale: true, hls_max_height: 1080, hls_force_stereo: true,
+            hls_segment_duration: 2,
+            video_codec: "h264".into(),
+            audio_codec: "aac".into(),
+            preset: "ultrafast".into(),
+            max_concurrent_transcodes: 2,
+            crf: 28,
+            max_bitrate: None,
+            audio_bitrate: "128k".into(),
+            threads: Some(2),
+            gpu: false,
+            hls_downscale: true,
+            hls_max_height: 1080,
+            hls_force_stereo: true,
         },
-        auth: streamx::config::AuthConfig { jwt_secret: "hls_browser_test".into(), session_duration: "24h".into() },
-        providers: vec![], vpn: None, data_dir: dp.clone(),
-        log_dir: None, log_level: "info".into(), open_browser: false,
-        admin_user: None, admin_password: None,
-        ui: streamx::config::UiConfig { default_theme: "dark".into() },
+        auth: streamx::config::AuthConfig {
+            jwt_secret: "hls_browser_test".into(),
+            session_duration: "24h".into(),
+        },
+        providers: vec![],
+        vpn: None,
+        data_dir: dp.clone(),
+        log_dir: None,
+        log_level: "info".into(),
+        open_browser: false,
+        admin_user: None,
+        admin_password: None,
+        ui: streamx::config::UiConfig {
+            default_theme: "dark".into(),
+        },
     };
 
     let db = streamx::db::Database::open(&dp.join("db/streamx.db")).expect("db");
@@ -49,21 +77,36 @@ async fn start_server() -> HlsBrowserServer {
     let hash = bcrypt::hash("password", 4).expect("hash");
     db.create_user("admin", &hash).await.ok();
 
-    let engine = streamx::torrent::TorrentEngine::create(&config.torrent, &dp, db.clone(), None).await.expect("engine");
+    let engine = streamx::torrent::TorrentEngine::create(&config.torrent, &dp, db.clone(), None)
+        .await
+        .expect("engine");
     let search = streamx::torrent::SearchProvider::new(vec![], None);
-    let hls = streamx::transcode::HlsManager::new(&config.transcode, dp.join("cache")).await.expect("hls");
+    let hls = streamx::transcode::HlsManager::new(&config.transcode, dp.join("cache"))
+        .await
+        .expect("hls");
     let (log_tx, _) = tokio::sync::broadcast::channel::<String>(100);
     let (_, log_hist) = streamx::logging::BroadcastLayer::new(log_tx.clone());
-    let app = streamx::server::build_router(db.clone(), config, engine, search, hls, log_tx, log_hist);
+    let app =
+        streamx::server::build_router(db.clone(), config, engine, search, hls, log_tx, log_hist);
 
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.ok(); });
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .ok();
+    });
 
     let client = reqwest::Client::new();
-    let resp = client.post(format!("http://127.0.0.1:{port}/api/auth/login"))
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/api/auth/login"))
         .json(&serde_json::json!({"username": "admin", "password": "password"}))
-        .send().await.expect("login");
+        .send()
+        .await
+        .expect("login");
     let body: serde_json::Value = resp.json().await.expect("json");
     let token = body["token"].as_str().expect("token").to_string();
 
@@ -71,17 +114,25 @@ async fn start_server() -> HlsBrowserServer {
     let _ = std::fs::remove_dir_all(&artifact_dir);
     std::fs::create_dir_all(&artifact_dir).unwrap();
 
-    HlsBrowserServer { port, token, data_dir: tmp, artifact_dir }
+    HlsBrowserServer {
+        port,
+        token,
+        data_dir: tmp,
+        artifact_dir,
+    }
 }
 
 impl HlsBrowserServer {
     async fn seed_complete(&self, stream_id: &str, source: &Path) {
-        let dest = self.data_dir.path().join("downloads/complete").join(
-            source.file_name().unwrap()
-        );
+        let dest = self
+            .data_dir
+            .path()
+            .join("downloads/complete")
+            .join(source.file_name().unwrap());
         std::fs::copy(source, &dest).expect("copy file");
 
-        let db = streamx::db::Database::open(&self.data_dir.path().join("db/streamx.db")).expect("db");
+        let db =
+            streamx::db::Database::open(&self.data_dir.path().join("db/streamx.db")).expect("db");
         db.init().await.ok();
         db.upsert_download(&streamx::db::downloads::Download {
             info_hash: stream_id.into(),
@@ -96,21 +147,31 @@ impl HlsBrowserServer {
             complete_path: Some(dest.to_string_lossy().into()),
             created_at: chrono::Utc::now().to_rfc3339(),
             updated_at: chrono::Utc::now().to_rfc3339(),
-        }).await.expect("seed");
+        })
+        .await
+        .expect("seed");
     }
 }
 
 fn ui_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("ui")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("ui")
 }
 
 async fn run_playwright(
-    port: u16, artifact_dir: &Path, stream_id: &str, token: &str, quality: &str,
+    port: u16,
+    artifact_dir: &Path,
+    stream_id: &str,
+    token: &str,
+    quality: &str,
 ) -> (bool, String) {
     let ui_tests = ui_dir().join("tests");
     let screenshot_path = artifact_dir.join("playback.png");
 
-    let config = format!(r#"
+    let config = format!(
+        r#"
 import {{ defineConfig }} from "@playwright/test";
 export default defineConfig({{
   testDir: "{tdir}",
@@ -134,9 +195,11 @@ export default defineConfig({{
   }} }}],
   reporter: [["json", {{ outputFile: "{out}/results.json" }}], ["html", {{ outputFolder: "{out}/html-report", open: "never" }}]],
 }});
-"#, tdir = ui_tests.to_string_lossy().replace('\\', "/"),
-    port = port,
-    out = artifact_dir.to_string_lossy().replace('\\', "/"));
+"#,
+        tdir = ui_tests.to_string_lossy().replace('\\', "/"),
+        port = port,
+        out = artifact_dir.to_string_lossy().replace('\\', "/")
+    );
 
     let config_path = artifact_dir.join("pw.config.ts");
     std::fs::write(&config_path, config).unwrap();
@@ -179,17 +242,16 @@ export default defineConfig({{
 // h264_ac3_mkv: H.264+6ch AC3→6ch AAC (requires multi-channel MSE support, skip in headless)
 #[case::h264_mkv_surround("h264_ac3_mkv", "source")]
 #[tokio::test]
-async fn hls_transcode_browser_playback(
-    #[case] clip_id: &str,
-    #[case] quality: &str,
-) {
+async fn hls_transcode_browser_playback(#[case] clip_id: &str, #[case] quality: &str) {
     // Check prerequisites
     if !ui_dir().join("dist/index.html").exists() {
         eprintln!("SKIP: UI not built (cd ui && pnpm build)");
         return;
     }
     let pw = std::process::Command::new("pnpm")
-        .args(["exec", "playwright", "--version"]).current_dir(ui_dir()).output();
+        .args(["exec", "playwright", "--version"])
+        .current_dir(ui_dir())
+        .output();
     if !pw.map(|o| o.status.success()).unwrap_or(false) {
         eprintln!("SKIP: Playwright not available");
         return;
@@ -197,7 +259,10 @@ async fn hls_transcode_browser_playback(
 
     let clip = match get_clip(clip_id) {
         Some(c) => c,
-        None => { eprintln!("SKIP: clip {clip_id} not generated"); return; }
+        None => {
+            eprintln!("SKIP: clip {clip_id} not generated");
+            return;
+        }
     };
 
     let test_name = format!("{clip_id}_{quality}");
@@ -207,12 +272,20 @@ async fn hls_transcode_browser_playback(
     // Seed completed download
     server.seed_complete(&stream_id, &clip).await;
 
-    eprintln!("[{test_name}] Server on port {}, running Playwright...", server.port);
+    eprintln!(
+        "[{test_name}] Server on port {}, running Playwright...",
+        server.port
+    );
     let start = std::time::Instant::now();
 
     let (passed, stdout) = run_playwright(
-        server.port, &server.artifact_dir, &stream_id, &server.token, quality,
-    ).await;
+        server.port,
+        &server.artifact_dir,
+        &stream_id,
+        &server.token,
+        quality,
+    )
+    .await;
 
     let elapsed = start.elapsed();
     eprintln!("[{test_name}] Finished in {elapsed:.1?}");
@@ -228,7 +301,11 @@ async fn hls_transcode_browser_playback(
     // List artifacts
     let videos: Vec<_> = walkdir(&server.artifact_dir, "webm");
     let screenshots: Vec<_> = walkdir(&server.artifact_dir, "png");
-    eprintln!("[{test_name}] Videos: {}, Screenshots: {}", videos.len(), screenshots.len());
+    eprintln!(
+        "[{test_name}] Videos: {}, Screenshots: {}",
+        videos.len(),
+        screenshots.len()
+    );
 
     // Frame comparison: extract golden frame and compare with screenshot
     let screenshot = server.artifact_dir.join("playback.png");
@@ -240,7 +317,9 @@ async fn hls_transcode_browser_playback(
                 eprintln!("[{test_name}] Frame diff: {diff_pct:.1}%");
                 // Generous threshold for HLS transcode artifacts
                 if diff_pct < 25.0 {
-                    eprintln!("[{test_name}] FRAME MATCH: golden and playback within {diff_pct:.1}%");
+                    eprintln!(
+                        "[{test_name}] FRAME MATCH: golden and playback within {diff_pct:.1}%"
+                    );
                 } else {
                     eprintln!("[{test_name}] FRAME MISMATCH: {diff_pct:.1}% difference");
                 }
@@ -253,12 +332,17 @@ async fn hls_transcode_browser_playback(
     // HEVC source copy and multi-channel audio require browser capabilities
     // that headless Chromium typically lacks (HEVC decoder, multi-ch MSE)
     let needs_advanced_codec = (clip_id.contains("hevc") && quality == "source")
-        || clip_id.contains("ac3") || clip_id.contains("eac3");
+        || clip_id.contains("ac3")
+        || clip_id.contains("eac3");
     if !passed && needs_advanced_codec {
         eprintln!("[{test_name}] Expected: headless Chromium lacks HEVC/multi-channel support");
         return;
     }
-    assert!(passed, "[{test_name}] Playwright test failed - check video at {:?}", videos.first());
+    assert!(
+        passed,
+        "[{test_name}] Playwright test failed - check video at {:?}",
+        videos.first()
+    );
 }
 
 fn walkdir(dir: &Path, ext: &str) -> Vec<PathBuf> {
@@ -267,8 +351,11 @@ fn walkdir(dir: &Path, ext: &str) -> Vec<PathBuf> {
         if let Ok(entries) = std::fs::read_dir(d) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if p.is_dir() { walk(&p, e, r); }
-                else if p.extension().map(|x| x == e).unwrap_or(false) { r.push(p); }
+                if p.is_dir() {
+                    walk(&p, e, r);
+                } else if p.extension().map(|x| x == e).unwrap_or(false) {
+                    r.push(p);
+                }
             }
         }
     }

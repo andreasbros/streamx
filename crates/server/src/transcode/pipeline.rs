@@ -41,12 +41,16 @@ impl Drop for TranscodeHandle {
             // SIGTERM lets FFmpeg finalize the current segment and write EXT-X-ENDLIST
             for pid in pids.iter() {
                 tracing::info!(stream_id = %self.stream_id, pid, "Stopping FFmpeg (SIGTERM)");
-                unsafe { libc::kill(*pid as i32, libc::SIGTERM); }
+                unsafe {
+                    libc::kill(*pid as i32, libc::SIGTERM);
+                }
             }
             // Wait up to 3 seconds for graceful exit
             for _ in 0..30 {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                let all_dead = pids.iter().all(|pid| unsafe { libc::kill(*pid as i32, 0) } != 0);
+                let all_dead = pids
+                    .iter()
+                    .all(|pid| unsafe { libc::kill(*pid as i32, 0) } != 0);
                 if all_dead {
                     return;
                 }
@@ -56,7 +60,9 @@ impl Drop for TranscodeHandle {
                 let alive = unsafe { libc::kill(*pid as i32, 0) } == 0;
                 if alive {
                     tracing::warn!(stream_id = %self.stream_id, pid, "FFmpeg did not exit in 3s, SIGKILL");
-                    unsafe { libc::kill(*pid as i32, libc::SIGKILL); }
+                    unsafe {
+                        libc::kill(*pid as i32, libc::SIGKILL);
+                    }
                 }
             }
         }
@@ -140,7 +146,12 @@ fn generate_master_playlist(tiers: &[&QualityTier], source_height: u32) -> Strin
     lines.join("\n")
 }
 
-fn apply_audio_args(cmd: &mut Command, media_info: &MediaInfo, audio_bitrate: &str, force_stereo: bool) {
+fn apply_audio_args(
+    cmd: &mut Command,
+    media_info: &MediaInfo,
+    audio_bitrate: &str,
+    force_stereo: bool,
+) {
     if media_info.needs_audio_transcode {
         cmd.arg("-c:a").arg("aac");
         cmd.arg("-b:a").arg(audio_bitrate);
@@ -223,21 +234,25 @@ impl TranscodePipeline {
         let tier_count = tiers.len();
         let (results_tx, mut results_rx) =
             tokio::sync::mpsc::channel::<std::result::Result<(), String>>(tier_count);
-        let child_pids: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let child_pids: Arc<std::sync::Mutex<Vec<u32>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
 
         for tier in &tiers {
-            let mut cmd = match self.build_variant_command_gpu(input_path, media_info, tier, &output_dir) {
-                Ok(c) => c,
-                Err(msg) => {
-                    return Err(Error::Transcode { message: msg });
-                }
-            };
+            let mut cmd =
+                match self.build_variant_command_gpu(input_path, media_info, tier, &output_dir) {
+                    Ok(c) => c,
+                    Err(msg) => {
+                        return Err(Error::Transcode { message: msg });
+                    }
+                };
 
             let mut child = cmd.spawn().map_err(|e| Error::Transcode {
                 message: format!("Failed to spawn ffmpeg (GPU): {e}"),
             })?;
             if let Some(pid) = child.id() {
-                if let Ok(mut pids) = child_pids.lock() { pids.push(pid); }
+                if let Ok(mut pids) = child_pids.lock() {
+                    pids.push(pid);
+                }
             }
 
             // Wait briefly to catch immediate GPU failures (e.g. "No usable encoding profile")
@@ -358,7 +373,8 @@ impl TranscodePipeline {
         let tier_count = tiers.len();
         let (results_tx, mut results_rx) =
             tokio::sync::mpsc::channel::<std::result::Result<(), String>>(tier_count);
-        let child_pids: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let child_pids: Arc<std::sync::Mutex<Vec<u32>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
 
         for tier in &tiers {
             let mut cmd = self.build_variant_command_cpu(input_path, media_info, tier, &output_dir);
@@ -380,7 +396,9 @@ impl TranscodePipeline {
                     }
                 };
                 if let Some(pid) = child.id() {
-                    if let Ok(mut p) = pids.lock() { p.push(pid); }
+                    if let Ok(mut p) = pids.lock() {
+                        p.push(pid);
+                    }
                 }
                 let result = monitor_transcode(child, &sid).await;
                 if let Err(ref msg) = result {
@@ -490,9 +508,8 @@ impl TranscodePipeline {
         let child = cmd.spawn().map_err(|e| Error::Transcode {
             message: format!("Failed to spawn ffmpeg for passthrough: {e}"),
         })?;
-        let child_pids: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(
-            child.id().into_iter().collect()
-        ));
+        let child_pids: Arc<std::sync::Mutex<Vec<u32>>> =
+            Arc::new(std::sync::Mutex::new(child.id().into_iter().collect()));
 
         let (status_tx, status_rx) = watch::channel(TranscodeStatus::Running);
         let sid = stream_id.to_string();
@@ -616,7 +633,8 @@ impl TranscodePipeline {
         let tier_count = tiers.len();
         let (results_tx, mut results_rx) =
             tokio::sync::mpsc::channel::<std::result::Result<(), String>>(tier_count);
-        let child_pids: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let child_pids: Arc<std::sync::Mutex<Vec<u32>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
 
         for tier in &tiers {
             let mut cmd =
@@ -630,7 +648,9 @@ impl TranscodePipeline {
                 let child = match cmd.spawn() {
                     Ok(c) => {
                         if let Some(pid) = c.id() {
-                            if let Ok(mut p) = pids.lock() { p.push(pid); }
+                            if let Ok(mut p) = pids.lock() {
+                                p.push(pid);
+                            }
                         }
                         c
                     }
@@ -748,9 +768,8 @@ impl TranscodePipeline {
         let mut child = cmd.spawn().map_err(|e| Error::Transcode {
             message: format!("Failed to spawn ffmpeg (passthrough piped): {e}"),
         })?;
-        let child_pids: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(
-            child.id().into_iter().collect()
-        ));
+        let child_pids: Arc<std::sync::Mutex<Vec<u32>>> =
+            Arc::new(std::sync::Mutex::new(child.id().into_iter().collect()));
 
         let stdin = child.stdin.take().ok_or_else(|| Error::Transcode {
             message: "Failed to get ffmpeg stdin handle".to_string(),
@@ -802,7 +821,10 @@ impl TranscodePipeline {
         // Always transcode to H.264 for MPEG-TS HLS (browsers can't play HEVC in TS)
 
         let mut cmd = Command::new("ffmpeg");
-        cmd.arg("-y").arg("-hide_banner").arg("-loglevel").arg("warning");
+        cmd.arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("warning");
         cmd.arg("-probesize").arg("5000000");
         cmd.arg("-analyzeduration").arg("3000000");
         cmd.arg("-fflags").arg("+genpts+igndts+discardcorrupt");
@@ -811,7 +833,8 @@ impl TranscodePipeline {
         // Full HW decode (-hwaccel vaapi) fails on HEVC 10-bit on many GPUs
         match &self.hw_accel {
             HwAccel::Vaapi => {
-                cmd.arg("-init_hw_device").arg("vaapi=va:/dev/dri/renderD128");
+                cmd.arg("-init_hw_device")
+                    .arg("vaapi=va:/dev/dri/renderD128");
                 cmd.arg("-filter_hw_device").arg("va");
             }
             other => {
@@ -838,7 +861,8 @@ impl TranscodePipeline {
             }
             HwAccel::Nvenc => {
                 if let Some(h) = tier.height {
-                    cmd.arg("-vf").arg(format!("scale_cuda=w=-2:h={h}:format=nv12"));
+                    cmd.arg("-vf")
+                        .arg(format!("scale_cuda=w=-2:h={h}:format=nv12"));
                 }
                 cmd.arg("-preset").arg("p4");
                 cmd.arg("-rc").arg("vbr");
@@ -855,8 +879,12 @@ impl TranscodePipeline {
                 cmd.arg("-crf").arg(self.config.crf.to_string());
                 cmd.arg("-tune").arg("film");
                 match self.config.threads {
-                    Some(t) => { cmd.arg("-threads").arg(t.to_string()); }
-                    None => { cmd.arg("-threads").arg("0"); }
+                    Some(t) => {
+                        cmd.arg("-threads").arg(t.to_string());
+                    }
+                    None => {
+                        cmd.arg("-threads").arg("0");
+                    }
                 }
                 cmd.arg("-maxrate").arg(tier.video_bitrate);
                 let bs = parse_bitrate(tier.video_bitrate).saturating_mul(2) / 1000;
@@ -864,7 +892,12 @@ impl TranscodePipeline {
             }
         }
 
-        apply_audio_args(&mut cmd, media_info, tier.audio_bitrate, self.config.hls_force_stereo);
+        apply_audio_args(
+            &mut cmd,
+            media_info,
+            tier.audio_bitrate,
+            self.config.hls_force_stereo,
+        );
 
         cmd.arg("-sn");
         cmd.arg("-avoid_negative_ts").arg("make_zero");
@@ -915,8 +948,12 @@ impl TranscodePipeline {
             cmd.arg("-crf").arg(self.config.crf.to_string());
             cmd.arg("-tune").arg("film");
             match self.config.threads {
-                Some(threads) => { cmd.arg("-threads").arg(threads.to_string()); }
-                None => { cmd.arg("-threads").arg("0"); }
+                Some(threads) => {
+                    cmd.arg("-threads").arg(threads.to_string());
+                }
+                None => {
+                    cmd.arg("-threads").arg("0");
+                }
             }
 
             let has_hdr =
@@ -942,7 +979,12 @@ impl TranscodePipeline {
             cmd.arg("-bufsize").arg(format!("{bufsize_kbps}k"));
         }
 
-        apply_audio_args(&mut cmd, media_info, tier.audio_bitrate, self.config.hls_force_stereo);
+        apply_audio_args(
+            &mut cmd,
+            media_info,
+            tier.audio_bitrate,
+            self.config.hls_force_stereo,
+        );
 
         cmd.arg("-sn");
         cmd.arg("-avoid_negative_ts").arg("make_zero");
@@ -1047,7 +1089,10 @@ mod tests {
 
     #[test]
     fn available_qualities_for_heights() {
-        assert_eq!(available_qualities(2160), vec!["360p", "720p", "1080p", "source"]);
+        assert_eq!(
+            available_qualities(2160),
+            vec!["360p", "720p", "1080p", "source"]
+        );
         assert_eq!(available_qualities(1080), vec!["360p", "720p", "source"]);
         assert_eq!(available_qualities(480), vec!["360p", "source"]);
         assert_eq!(available_qualities(360), vec!["source"]);

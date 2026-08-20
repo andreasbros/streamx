@@ -19,7 +19,8 @@ fn test_config() -> TranscodeConfig {
         threads: Some(1),
         gpu: false,
         hls_downscale: true,
-        hls_max_height: 1080, hls_force_stereo: true,
+        hls_max_height: 1080,
+        hls_force_stereo: true,
     }
 }
 
@@ -41,12 +42,32 @@ fn long_hevc_clip() -> PathBuf {
     std::fs::create_dir_all(path.parent().unwrap()).ok();
     let status = std::process::Command::new("ffmpeg")
         .args([
-            "-y", "-hide_banner", "-loglevel", "error",
-            "-f", "lavfi", "-i", "testsrc2=duration=60:size=1920x1080:rate=24",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=60",
-            "-c:v", "libx265", "-preset", "ultrafast", "-crf", "32",
-            "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-            "-f", "matroska",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=duration=60:size=1920x1080:rate=24",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=60",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "32",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-ac",
+            "2",
+            "-f",
+            "matroska",
         ])
         .arg(&path)
         .status();

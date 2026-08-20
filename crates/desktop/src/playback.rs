@@ -151,7 +151,10 @@ pub fn longest_common_dir(files: &[TorrentFile]) -> Option<String> {
         return None;
     }
     let first = files[0].path.split('/').next()?.to_string();
-    if files.iter().all(|f| f.path.starts_with(&format!("{first}/"))) {
+    if files
+        .iter()
+        .all(|f| f.path.starts_with(&format!("{first}/")))
+    {
         Some(first)
     } else {
         None
@@ -185,6 +188,11 @@ pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, Str
         .args(&args)
         .arg("--force-window=yes")
         .arg("--keep-open=always")
+        // Free window resizing: decorations on, and don't lock the window
+        // shape to the video aspect (mpv letterboxes instead), so
+        // horizontal / vertical / diagonal drags all work.
+        .arg("--border=yes")
+        .arg("--keepaspect-window=no")
         .arg("--ytdl=no")
         .arg("--cache=yes")
         .arg("--cache-secs=300")
@@ -275,16 +283,21 @@ pub mod ipc {
                     Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
                 }
             }
-            Err(format!("mpv IPC socket never appeared at {}", path.display()))
+            Err(format!(
+                "mpv IPC socket never appeared at {}",
+                path.display()
+            ))
         }
 
         async fn call(&self, args: Vec<serde_json::Value>) -> Result<serde_json::Value, String> {
             let mut inner = self.inner.lock().await;
             let id = inner.next_id;
             inner.next_id += 1;
-            let req = Request { command: args, request_id: id };
-            let mut line = serde_json::to_string(&req)
-                .map_err(|e| format!("serialize: {e}"))?;
+            let req = Request {
+                command: args,
+                request_id: id,
+            };
+            let mut line = serde_json::to_string(&req).map_err(|e| format!("serialize: {e}"))?;
             line.push('\n');
             inner
                 .writer
@@ -338,20 +351,22 @@ pub mod ipc {
         }
 
         pub async fn get_property_f64(&self, name: &str) -> Result<Option<f64>, String> {
-            let v = self.call(vec![
-                serde_json::Value::from("get_property"),
-                serde_json::Value::from(name),
-            ])
-            .await?;
+            let v = self
+                .call(vec![
+                    serde_json::Value::from("get_property"),
+                    serde_json::Value::from(name),
+                ])
+                .await?;
             Ok(v.as_f64())
         }
 
         pub async fn get_property_bool(&self, name: &str) -> Result<Option<bool>, String> {
-            let v = self.call(vec![
-                serde_json::Value::from("get_property"),
-                serde_json::Value::from(name),
-            ])
-            .await?;
+            let v = self
+                .call(vec![
+                    serde_json::Value::from("get_property"),
+                    serde_json::Value::from(name),
+                ])
+                .await?;
             Ok(v.as_bool())
         }
     }
@@ -366,9 +381,24 @@ pub mod ipc {
 
     pub async fn snapshot(ipc: &MpvIpc) -> Snapshot {
         Snapshot {
-            paused: ipc.get_property_bool("pause").await.ok().flatten().unwrap_or(false),
-            time_pos: ipc.get_property_f64("time-pos").await.ok().flatten().unwrap_or(0.0),
-            duration: ipc.get_property_f64("duration").await.ok().flatten().unwrap_or(0.0),
+            paused: ipc
+                .get_property_bool("pause")
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(false),
+            time_pos: ipc
+                .get_property_f64("time-pos")
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(0.0),
+            duration: ipc
+                .get_property_f64("duration")
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(0.0),
         }
     }
 }

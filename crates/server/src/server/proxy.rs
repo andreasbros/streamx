@@ -13,7 +13,8 @@ fn cache_key(url: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn ext_from_path(path: &str) -> &'static str {
+/// File extension implied by an image URL path.
+pub fn image_ext(path: &str) -> &'static str {
     if path.ends_with(".png") {
         "png"
     } else if path.ends_with(".webp") {
@@ -23,6 +24,31 @@ fn ext_from_path(path: &str) -> &'static str {
     } else {
         "jpg"
     }
+}
+
+/// Upstream base URL for a proxy provider id.
+pub fn provider_base_url(
+    provider_id: u32,
+    providers: &[crate::config::ProviderConfig],
+) -> Option<String> {
+    if provider_id == CINEMETA_PROXY_ID {
+        return Some(CINEMETA_IMAGE_BASE.to_string());
+    }
+    providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .map(|p| p.url.clone())
+}
+
+/// On-disk cache location for an upstream image URL. The desktop app
+/// reads/writes the same files as the HTTP proxy, so the key scheme
+/// must stay in sync with `fetch_proxy_bytes`.
+pub fn image_cache_path(data_dir: &std::path::Path, upstream_url: &str, path: &str) -> PathBuf {
+    let ext = image_ext(path);
+    data_dir
+        .join("cache")
+        .join("img")
+        .join(format!("{}.{}", cache_key(upstream_url), ext))
 }
 
 fn content_type_for(ext: &str) -> &str {
@@ -36,10 +62,6 @@ fn content_type_for(ext: &str) -> &str {
 
 pub const CINEMETA_PROXY_ID: u32 = 0;
 pub const CINEMETA_IMAGE_BASE: &str = "https://images.metahub.space";
-
-fn img_cache_dir(state: &AppState) -> PathBuf {
-    state.config.data_dir.join("cache").join("img")
-}
 
 /// Shared proxy fetch logic used by the HTTP handler and the desktop's
 /// in-process AssetSource. Returns `(bytes, extension)`. Serves from disk
@@ -57,20 +79,14 @@ pub async fn fetch_proxy_bytes(
         });
     }
 
-    let base_url = if provider_id == CINEMETA_PROXY_ID {
-        Some(CINEMETA_IMAGE_BASE.to_string())
-    } else {
-        providers.iter().find(|p| p.id == provider_id).map(|p| p.url.clone())
-    }
-    .ok_or_else(|| Error::NotFound {
+    let base_url = provider_base_url(provider_id, providers).ok_or_else(|| Error::NotFound {
         message: "Unknown provider".to_string(),
     })?;
 
     let upstream_url = format!("{}/{}", base_url, path);
-    let ext = ext_from_path(path);
-    let key = cache_key(&upstream_url);
+    let ext = image_ext(path);
+    let cache_path = image_cache_path(data_dir, &upstream_url, path);
     let cache_dir = data_dir.join("cache").join("img");
-    let cache_path = cache_dir.join(format!("{key}.{ext}"));
 
     if cache_path.exists() {
         let bytes = tokio::fs::read(&cache_path)
@@ -98,16 +114,6 @@ pub async fn fetch_proxy_bytes(
     let _ = tokio::fs::create_dir_all(&cache_dir).await;
     let _ = tokio::fs::write(&cache_path, &bytes).await;
     Ok((bytes.to_vec(), ext))
-}
-
-fn base_url_for_proxy(state: &AppState, provider_id: u32) -> Option<String> {
-    if provider_id == CINEMETA_PROXY_ID {
-        return Some(CINEMETA_IMAGE_BASE.to_string());
-    }
-    state
-        .config
-        .provider_by_id(provider_id)
-        .map(|p| p.url.clone())
 }
 
 /// Single handler for all providers. Route: /proxy/{provider_id}/{*path}

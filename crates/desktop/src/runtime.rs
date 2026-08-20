@@ -42,7 +42,10 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let handle = TOKIO_HANDLE.get().expect("runtime::init() not called").clone();
+    let handle = TOKIO_HANDLE
+        .get()
+        .expect("runtime::init() not called")
+        .clone();
     let (tx, rx) = oneshot::channel::<T>();
     handle.spawn(async move {
         let v = fut.await;
@@ -60,7 +63,10 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let handle = TOKIO_HANDLE.get().expect("runtime::init() not called").clone();
+    let handle = TOKIO_HANDLE
+        .get()
+        .expect("runtime::init() not called")
+        .clone();
     let (tx, rx) = std::sync::mpsc::channel::<T>();
     handle.spawn(async move {
         let v = fut.await;

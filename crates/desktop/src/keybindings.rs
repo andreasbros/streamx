@@ -56,9 +56,7 @@ pub fn translate(ev: &KeyDownEvent) -> Option<Shortcut> {
         "m" if !mods.control && !mods.platform && !mods.alt => Some(Shortcut::ToggleMenu),
         "f" if !mods.control && !mods.platform && !mods.alt => Some(Shortcut::Fullscreen),
         "space" => Some(Shortcut::PlayPause),
-        other if other.chars().count() == 1 => {
-            other.chars().next().map(Shortcut::Char)
-        }
+        other if other.chars().count() == 1 => other.chars().next().map(Shortcut::Char),
         _ => None,
     }
 }

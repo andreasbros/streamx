@@ -233,21 +233,58 @@ export function MusicSearch() {
   const [expandedAlbum, setExpandedAlbum] = useState<AlbumState | null>(null);
 
   const musicFavourites = favourites.filter((f) => f.content_type === "music");
+  const [userPlaylists, setUserPlaylists] = useState<import("../api/types").Playlist[]>([]);
+  const [playlistBusy, setPlaylistBusy] = useState<string | null>(null);
 
-  const defaultQuery = (() => {
-    const now = new Date();
-    const year = now.getMonth() < 2 ? now.getFullYear() - 1 : now.getFullYear();
-    return `top ${year}`;
-  })();
+  const refreshPlaylists = useCallback(async () => {
+    try {
+      const res = await api.getPlaylists();
+      setUserPlaylists(res.playlists);
+    } catch { /* not fatal */ }
+  }, []);
+
+  useEffect(() => { refreshPlaylists(); }, [refreshPlaylists]);
+
+  // Play a saved playlist in its stored position order.
+  const playUserPlaylist = async (playlistId: string) => {
+    setPlaylistBusy(playlistId);
+    try {
+      const res = await api.getPlaylistTracks(playlistId);
+      const tracks: AudioTrack[] = res.tracks.map((t) => ({
+        title: t.title,
+        artist: t.artist ?? undefined,
+        album: t.album ?? undefined,
+        artworkUrl: t.artwork_url ?? undefined,
+        streamId: t.info_hash,
+        fileIndex: t.file_index,
+      }));
+      if (tracks.length > 0) {
+        audioPlayer.playQueue(tracks, 0);
+      }
+    } catch { /* not fatal */ }
+    setPlaylistBusy(null);
+  };
+
+  const deleteUserPlaylist = async (playlistId: string, name: string) => {
+    if (!window.confirm(`Delete playlist "${name}"?`)) return;
+    setPlaylistBusy(playlistId);
+    try {
+      await api.deletePlaylist(playlistId);
+      await refreshPlaylists();
+    } catch { /* not fatal */ }
+    setPlaylistBusy(null);
+  };
 
   const fetchBrowse = useCallback(async () => {
     setBrowseLoading(true);
     try {
-      const res = await api.searchMusic({ query: defaultQuery });
+      // Live top-100 feed (refreshed continuously). The old literal
+      // "top <year>" text search surfaced months-old chart rips.
+      const res = await api.browseMusic({ page: 1 });
       setBrowseResults(res.results);
     } catch { /* ignore */ }
     setBrowseLoading(false);
-  }, [defaultQuery]);
+  }, []);
 
   useEffect(() => { fetchBrowse(); }, [fetchBrowse]);
 
@@ -504,6 +541,58 @@ export function MusicSearch() {
         />
       )}
 
+      {/* User playlists - shown when not searching */}
+      {!query && userPlaylists.length > 0 && (
+        <>
+          <Text size="3" weight="bold">
+            <PlayIcon width={14} height={14} style={{ verticalAlign: "middle", marginRight: 4 }} />
+            My Playlists
+          </Text>
+          <Flex direction="column" gap="2">
+            {userPlaylists.map((pl) => (
+              <Card key={pl.id} size="1">
+                <Flex align="center" gap="3">
+                  <Flex
+                    align="center"
+                    justify="center"
+                    style={{ width: 40, height: 40, borderRadius: 6, background: "var(--accent-a3)", flexShrink: 0 }}
+                  >
+                    <PlayIcon width={16} height={16} />
+                  </Flex>
+                  <Flex direction="column" gap="0" style={{ flex: 1, minWidth: 0 }}>
+                    <Text size="2" weight="medium" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {pl.name}
+                    </Text>
+                    <Text size="1" color="gray">
+                      {pl.track_count} track{pl.track_count === 1 ? "" : "s"}
+                    </Text>
+                  </Flex>
+                  <IconButton
+                    size="1"
+                    variant="soft"
+                    disabled={pl.track_count === 0 || playlistBusy === pl.id}
+                    onClick={() => playUserPlaylist(pl.id)}
+                    aria-label="Play playlist"
+                  >
+                    <PlayIcon width={14} height={14} />
+                  </IconButton>
+                  <IconButton
+                    size="1"
+                    variant="soft"
+                    color="red"
+                    disabled={playlistBusy === pl.id}
+                    onClick={() => deleteUserPlaylist(pl.id, pl.name)}
+                    aria-label="Delete playlist"
+                  >
+                    <Cross2Icon width={14} height={14} />
+                  </IconButton>
+                </Flex>
+              </Card>
+            ))}
+          </Flex>
+        </>
+      )}
+
       {/* Favourited albums - shown when not searching */}
       {!query && musicFavourites.length > 0 && (
         <>
@@ -563,7 +652,7 @@ export function MusicSearch() {
         </>
       )}
 
-      {!query && <Text size="3" weight="bold">Top {defaultQuery.split(" ")[1]}</Text>}
+      {!query && <Text size="3" weight="bold">Top 100</Text>}
 
       {displayLoading ? (
         <Flex direction="column" gap="2">

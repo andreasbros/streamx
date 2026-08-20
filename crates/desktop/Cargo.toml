@@ -16,6 +16,11 @@ default = []
 embedded = []
 # Thin client: no server, connect to a remote URL.
 thin-client = []
+# UI-test remote driver: JSON command listener on STREAMX_UI_TEST_PORT.
+# Used by crates/ui-harness; never enabled in release builds. Pulls
+# gpui/test-support for Window::render_to_image (OS-independent
+# screenshots that are pixel-identical across platforms).
+ui-test = ["gpui/test-support"]
 
 [dependencies]
 gpui.workspace = true
@@ -24,6 +29,7 @@ streamx-api = { path = "../api", features = ["client"] }
 streamx = { path = "../server" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

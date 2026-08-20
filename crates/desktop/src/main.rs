@@ -14,12 +14,12 @@
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::expect_used)]
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use gpui::{px, AppContext, Application, SharedString, WindowBounds, WindowKind, WindowOptions};
 use streamx_desktop::{
     app::MainView,
-    asset_source::LocalApiAssetSource,
+    asset_source::PosterAssetSource,
     runtime,
     state::{AppState, Mode},
 };
@@ -28,7 +28,12 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new("info,streamx_desktop=debug,streamx=info")
+                // Graphics/windowing crates chatter at INFO on every
+                // resize (blade surface reconfigure etc.) — keep them at
+                // warn so app logs stay readable and resize stays cheap.
+                tracing_subscriber::EnvFilter::new(
+                    "warn,streamx_desktop=info,streamx=info,streamx_api=info",
+                )
             }),
         )
         .init();
@@ -43,18 +48,18 @@ fn main() {
         "initial state"
     );
 
-    // Shared slot: the embedded server fills it once it's done bootstrapping,
-    // and the AssetSource reads from it lazily. Starts empty; image loads
-    // before that fall through to the default (no-op) loader.
-    let local_api_slot: Arc<OnceLock<Arc<streamx::LocalApi>>> = Arc::new(OnceLock::new());
-
     if *state.mode.read() == Mode::Embedded
         && std::env::var("STREAMX_DESKTOP_NO_EMBED").ok().as_deref() != Some("1")
     {
-        spawn_embedded(&state, local_api_slot.clone());
+        spawn_embedded(&state);
     }
 
-    let asset_source = LocalApiAssetSource::new(local_api_slot.clone());
+    #[cfg(feature = "ui-test")]
+    streamx_desktop::test_driver::maybe_start(&state);
+
+    // Poster loading is filesystem + direct HTTP; it never waits on the
+    // embedded server, so it can be installed before anything boots.
+    let asset_source = PosterAssetSource::new(state.clone());
 
     Application::new().with_assets(asset_source).run(move |cx| {
         let bounds = gpui::Bounds::centered(None, gpui::size(px(1100.0), px(720.0)), cx);
@@ -91,7 +96,7 @@ fn main() {
     });
 }
 
-fn spawn_embedded(state: &Arc<AppState>, local_api_slot: Arc<OnceLock<Arc<streamx::LocalApi>>>) {
+fn spawn_embedded(state: &Arc<AppState>) {
     let state = state.clone();
     let _ = runtime::spawn(async move {
         let cli = streamx::cli::Cli {
@@ -130,19 +135,13 @@ fn spawn_embedded(state: &Arc<AppState>, local_api_slot: Arc<OnceLock<Arc<stream
             }
         };
 
-        // Install the in-process backend for both the Client (API calls)
-        // and the AssetSource (poster image fetches).
+        // Install the in-process backend for API calls. Posters load
+        // through the PosterAssetSource (filesystem + direct HTTP) and
+        // don't depend on this.
         let local_api = Arc::new(streamx::LocalApi::new(
             components.clone(),
             loopback_url.clone(),
         ));
-        // Fill the asset slot BEFORE installing the data client. Browse
-        // data only flows once the client is installed, and the first
-        // render that draws posters happens right after. If the slot
-        // were set second, an in-process browse fetch could return and
-        // render posters in the gap, caching blank images (GPUI never
-        // retries a failed asset load).
-        let _ = local_api_slot.set(local_api.clone());
         state.install_in_process_client(local_api);
         tracing::info!(base_url = %loopback_url, "embedded server: in-process Api installed");
 

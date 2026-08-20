@@ -18,6 +18,7 @@ import { MusicSearch } from "./pages/MusicSearch";
 import { Settings } from "./pages/Settings";
 import { SurroundSound } from "./pages/SurroundSound";
 import { Admin } from "./pages/Admin";
+import { Downloads } from "./pages/Downloads";
 import { MusicPlayer } from "./pages/MusicPlayer";
 import type { ReactNode } from "react";
 
@@ -60,6 +61,7 @@ function AppRoutes({
         <Route path="tv/show" element={<TvShow />} />
         <Route path="music" element={<MusicSearch />} />
         <Route path="music/play/:streamId/:fileIndex" element={<MusicPlayer />} />
+        <Route path="downloads" element={<Downloads />} />
         <Route path="history" element={<History />} />
         <Route path="surround" element={<SurroundSound />} />
         <Route path="favourites" element={<Favourites />} />

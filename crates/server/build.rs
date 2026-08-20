@@ -19,21 +19,50 @@ fn main() {
     let mut y = 1970i64;
     let mut remaining = days;
     loop {
-        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) { 366 } else { 365 };
-        if remaining < days_in_year { break; }
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if remaining < days_in_year {
+            break;
+        }
         remaining -= days_in_year;
         y += 1;
     }
     let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
-    let month_days = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_days = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut m = 0usize;
     for md in &month_days {
-        if remaining < *md { break; }
+        if remaining < *md {
+            break;
+        }
         remaining -= md;
         m += 1;
     }
     let d = remaining + 1;
-    let timestamp = format!("{:02}{:02}{:02}{:02}{:02}{:02}", y % 100, m + 1, d, hours, minutes, seconds);
+    let timestamp = format!(
+        "{:02}{:02}{:02}{:02}{:02}{:02}",
+        y % 100,
+        m + 1,
+        d,
+        hours,
+        minutes,
+        seconds
+    );
     let version = format!("0.1.0-{timestamp}");
 
     // Short hash
@@ -48,7 +77,10 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../../web/dist/index.html");
 
-    if let Ok(output) = Command::new("git").args(["rev-parse", "--short", "HEAD"]).output() {
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+    {
         let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !commit.is_empty() {
             println!("cargo:rustc-env=STREAMX_GIT_COMMIT={commit}");

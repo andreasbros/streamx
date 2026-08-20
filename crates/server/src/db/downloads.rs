@@ -25,6 +25,9 @@ pub struct Download {
     /// JSON-encoded `Vec<ManifestFile>` (stable file list). `None`
     /// until the torrent metadata has been read at least once.
     pub files_json: Option<String>,
+    /// Pinned downloads keep downloading with no client connected and
+    /// auto-resume at boot.
+    pub pinned: bool,
 }
 
 /// One file in a torrent, with a stable alphabetical `seq_index` used
@@ -88,7 +91,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT info_hash, magnet_uri, title, file_name, file_index, file_size, \
-                 status, progress, partial_path, complete_path, created_at, updated_at, download_all, files_json \
+                 status, progress, partial_path, complete_path, created_at, updated_at, download_all, files_json, pinned \
                  FROM downloads WHERE info_hash = ?1",
             )
             .context(error::DatabaseSnafu)?;
@@ -109,6 +112,7 @@ impl Database {
                 updated_at: row.get(11)?,
                 download_all: row.get::<_, i64>(12)? != 0,
                 files_json: row.get(13)?,
+                pinned: row.get::<_, i64>(14)? != 0,
             })
         });
 
@@ -207,7 +211,7 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT info_hash, magnet_uri, title, file_name, file_index, file_size, \
-                 status, progress, partial_path, complete_path, created_at, updated_at, download_all, files_json \
+                 status, progress, partial_path, complete_path, created_at, updated_at, download_all, files_json, pinned \
                  FROM downloads ORDER BY updated_at DESC",
             )
             .context(error::DatabaseSnafu)?;
@@ -229,6 +233,7 @@ impl Database {
                     updated_at: row.get(11)?,
                     download_all: row.get::<_, i64>(12)? != 0,
                     files_json: row.get(13)?,
+                    pinned: row.get::<_, i64>(14)? != 0,
                 })
             })
             .context(error::DatabaseSnafu)?
@@ -236,6 +241,32 @@ impl Database {
             .context(error::DatabaseSnafu)?;
 
         Ok(entries)
+    }
+
+    /// Set or clear the pinned (background download) flag.
+    pub async fn set_download_pinned(&self, info_hash: &str, pinned: bool) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connection().lock().await;
+        conn.execute(
+            "UPDATE downloads SET pinned = ?1, updated_at = ?2 WHERE info_hash = ?3",
+            rusqlite::params![pinned as i64, now, info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        Ok(())
+    }
+
+    /// Pinned downloads that still need data — resumed at server boot.
+    pub async fn get_pinned_incomplete(&self) -> Result<Vec<String>> {
+        let conn = self.connection().lock().await;
+        let mut stmt = conn
+            .prepare("SELECT info_hash FROM downloads WHERE pinned = 1 AND status != 'complete'")
+            .context(error::DatabaseSnafu)?;
+        let hashes = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .context(error::DatabaseSnafu)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context(error::DatabaseSnafu)?;
+        Ok(hashes)
     }
 
     pub async fn reset_download(&self, info_hash: &str) -> Result<()> {
@@ -251,23 +282,40 @@ impl Database {
         Ok(())
     }
 
+    /// Remove every DB trace of a download: the downloads row itself plus
+    /// dependent rows in watch_history (keyed by magnet), media_metadata,
+    /// favourites and playlist_tracks (keyed by info_hash). Runs in a
+    /// transaction; watch_history goes first because its subquery needs
+    /// the downloads row to still exist.
     pub async fn delete_download(&self, info_hash: &str) -> Result<()> {
-        let conn = self.connection().lock().await;
-        conn.execute(
-            "DELETE FROM downloads WHERE info_hash = ?1",
-            rusqlite::params![info_hash],
-        )
-        .context(error::DatabaseSnafu)?;
-        conn.execute(
-            "DELETE FROM media_metadata WHERE info_hash = ?1",
-            rusqlite::params![info_hash],
-        )
-        .context(error::DatabaseSnafu)?;
-        conn.execute(
+        let mut conn = self.connection().lock().await;
+        let tx = conn.transaction().context(error::DatabaseSnafu)?;
+        tx.execute(
             "DELETE FROM watch_history WHERE magnet_uri IN (SELECT magnet_uri FROM downloads WHERE info_hash = ?1)",
             rusqlite::params![info_hash],
         )
         .context(error::DatabaseSnafu)?;
+        tx.execute(
+            "DELETE FROM favourites WHERE info_hash = ?1",
+            rusqlite::params![info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE info_hash = ?1",
+            rusqlite::params![info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        tx.execute(
+            "DELETE FROM media_metadata WHERE info_hash = ?1",
+            rusqlite::params![info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        tx.execute(
+            "DELETE FROM downloads WHERE info_hash = ?1",
+            rusqlite::params![info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        tx.commit().context(error::DatabaseSnafu)?;
         Ok(())
     }
 
@@ -281,5 +329,194 @@ impl Database {
         )
         .context(error::DatabaseSnafu)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_db() -> (Database, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let db =
+            Database::open(&tmp.path().join("test.db")).unwrap_or_else(|e| panic!("open: {e}"));
+        db.init().await.unwrap_or_else(|e| panic!("init: {e}"));
+        (db, tmp)
+    }
+
+    fn sample(hash: &str) -> Download {
+        Download {
+            info_hash: hash.to_string(),
+            magnet_uri: format!("magnet:?xt=urn:btih:{hash}&dn=test"),
+            title: "Test Movie".to_string(),
+            file_name: "test.mkv".to_string(),
+            file_index: 0,
+            file_size: 100,
+            download_all: false,
+            status: "downloading".to_string(),
+            progress: 42.0,
+            partial_path: None,
+            complete_path: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            files_json: None,
+            pinned: false,
+        }
+    }
+
+    const HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    async fn seed_related_rows(db: &Database, hash: &str, magnet: &str) {
+        let conn = db.connection().lock().await;
+        conn.execute(
+            "INSERT OR IGNORE INTO users (id, username, password_hash, created_at, is_admin) \
+             VALUES ('u1', 'tester', 'x', '2026-01-01', 1)",
+            [],
+        )
+        .unwrap_or_else(|e| panic!("seed users: {e}"));
+        conn.execute(
+            "INSERT INTO watch_history (id, user_id, magnet_uri, title, watched_at) \
+             VALUES ('wh1', 'u1', ?1, 'Test Movie', '2026-01-01')",
+            rusqlite::params![magnet],
+        )
+        .unwrap_or_else(|e| panic!("seed watch_history: {e}"));
+        conn.execute(
+            "INSERT INTO favourites (id, user_id, content_type, title, info_hash, created_at) \
+             VALUES ('f1', 'u1', 'movie', 'Test Movie', ?1, '2026-01-01')",
+            rusqlite::params![hash],
+        )
+        .unwrap_or_else(|e| panic!("seed favourites: {e}"));
+        conn.execute(
+            "INSERT INTO playlists (id, user_id, name, created_at, updated_at) \
+             VALUES ('p1', 'u1', 'My list', '2026-01-01', '2026-01-01')",
+            [],
+        )
+        .unwrap_or_else(|e| panic!("seed playlists: {e}"));
+        conn.execute(
+            "INSERT INTO playlist_tracks (id, playlist_id, info_hash, file_index, title, position, created_at) \
+             VALUES ('t1', 'p1', ?1, 0, 'Track', 0, '2026-01-01')",
+            rusqlite::params![hash],
+        )
+        .unwrap_or_else(|e| panic!("seed playlist_tracks: {e}"));
+        conn.execute(
+            "INSERT INTO media_metadata (info_hash, title, created_at) \
+             VALUES (?1, 'Test Movie', '2026-01-01')",
+            rusqlite::params![hash],
+        )
+        .unwrap_or_else(|e| panic!("seed media_metadata: {e}"));
+    }
+
+    async fn count(db: &Database, table: &str, col: &str, val: &str) -> i64 {
+        let conn = db.connection().lock().await;
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE {col} = ?1"),
+            rusqlite::params![val],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|e| panic!("count {table}: {e}"))
+    }
+
+    #[tokio::test]
+    async fn delete_download_removes_all_related_rows() {
+        let (db, _tmp) = test_db().await;
+        let dl = sample(HASH);
+        db.upsert_download(&dl)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        seed_related_rows(&db, HASH, &dl.magnet_uri).await;
+
+        db.delete_download(HASH)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(count(&db, "downloads", "info_hash", HASH).await, 0);
+        assert_eq!(count(&db, "media_metadata", "info_hash", HASH).await, 0);
+        assert_eq!(
+            count(&db, "watch_history", "magnet_uri", &dl.magnet_uri).await,
+            0
+        );
+        assert_eq!(count(&db, "favourites", "info_hash", HASH).await, 0);
+        assert_eq!(count(&db, "playlist_tracks", "info_hash", HASH).await, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_download_leaves_unrelated_rows() {
+        let (db, _tmp) = test_db().await;
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let dl_a = sample(HASH);
+        let dl_b = sample(other);
+        db.upsert_download(&dl_a)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        db.upsert_download(&dl_b)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        seed_related_rows(&db, other, &dl_b.magnet_uri).await;
+
+        db.delete_download(HASH)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        assert_eq!(count(&db, "downloads", "info_hash", other).await, 1);
+        assert_eq!(
+            count(&db, "watch_history", "magnet_uri", &dl_b.magnet_uri).await,
+            1
+        );
+        assert_eq!(count(&db, "favourites", "info_hash", other).await, 1);
+        assert_eq!(count(&db, "playlist_tracks", "info_hash", other).await, 1);
+        assert_eq!(count(&db, "media_metadata", "info_hash", other).await, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_download_missing_hash_is_noop() {
+        let (db, _tmp) = test_db().await;
+        db.delete_download("ffffffffffffffffffffffffffffffffffffffff")
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    #[tokio::test]
+    async fn pinned_flag_roundtrip_and_boot_list() {
+        let (db, _tmp) = test_db().await;
+        let mut dl = sample(HASH);
+        db.upsert_download(&dl)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let complete_hash = "cccccccccccccccccccccccccccccccccccccccc";
+        dl.info_hash = complete_hash.to_string();
+        dl.status = "complete".to_string();
+        db.upsert_download(&dl)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        db.set_download_pinned(HASH, true)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        db.set_download_pinned(complete_hash, true)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        let got = db
+            .get_download(HASH)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(got.map(|d| d.pinned).unwrap_or(false));
+
+        // Only incomplete pinned downloads are resumed at boot.
+        let boot = db
+            .get_pinned_incomplete()
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(boot, vec![HASH.to_string()]);
+
+        db.set_download_pinned(HASH, false)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let boot = db
+            .get_pinned_incomplete()
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(boot.is_empty());
     }
 }

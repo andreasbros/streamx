@@ -56,10 +56,7 @@ pub trait Api: Send + Sync {
     async fn me(&self) -> ClientResult<User>;
     async fn search(&self, query: &str, page: u32) -> ClientResult<SearchResponse>;
     async fn browse(&self, params: &BrowseParams) -> ClientResult<Vec<SearchResultGroup>>;
-    async fn create_stream(
-        &self,
-        req: &CreateStreamRequest,
-    ) -> ClientResult<CreateStreamResponse>;
+    async fn create_stream(&self, req: &CreateStreamRequest) -> ClientResult<CreateStreamResponse>;
     async fn stream_files(
         &self,
         stream_id: &str,
@@ -81,6 +78,16 @@ pub trait Api: Send + Sync {
         detail_url: &str,
     ) -> ClientResult<ResolveMagnetResponse>;
     async fn admin_kill_stream(&self, stream_id: &str) -> ClientResult<()>;
+    /// Pin a download so it keeps going with no client connected.
+    async fn pin_download(&self, stream_id: &str) -> ClientResult<()>;
+    /// Cancel a background download (unpin + pause).
+    async fn unpin_download(&self, stream_id: &str) -> ClientResult<()>;
+    /// Download queue: every known download with progress + live stats.
+    async fn list_downloads(&self) -> ClientResult<Vec<crate::types::DownloadItem>>;
+    /// Delete a download entirely: files and DB records (admin only).
+    async fn delete_stream(&self, stream_id: &str) -> ClientResult<()>;
+    /// Restart the torrent client: fresh session + DHT bootstrap (admin only).
+    async fn restart_torrent(&self) -> ClientResult<()>;
 }
 
 /// Public cloneable handle used across the desktop app. Internally holds
@@ -101,7 +108,9 @@ impl std::fmt::Debug for Client {
 impl Client {
     /// HTTP-backed client (thin-client mode).
     pub fn http(base_url: impl Into<String>) -> Self {
-        Self { inner: Arc::new(HttpClient::new(base_url)) }
+        Self {
+            inner: Arc::new(HttpClient::new(base_url)),
+        }
     }
 
     /// Legacy alias.
@@ -163,6 +172,11 @@ impl Client {
     delegate!(browse_tv(&self, page: u32) -> ClientResult<TvSearchResponse>);
     delegate!(resolve_magnet(&self, api_base: &str, detail_url: &str) -> ClientResult<ResolveMagnetResponse>);
     delegate!(admin_kill_stream(&self, stream_id: &str) -> ClientResult<()>);
+    delegate!(pin_download(&self, stream_id: &str) -> ClientResult<()>);
+    delegate!(unpin_download(&self, stream_id: &str) -> ClientResult<()>);
+    delegate!(list_downloads(&self) -> ClientResult<Vec<crate::types::DownloadItem>>);
+    delegate!(delete_stream(&self, stream_id: &str) -> ClientResult<()>);
+    delegate!(restart_torrent(&self) -> ClientResult<()>);
 }
 
 // ===================== HttpClient =====================
@@ -193,6 +207,12 @@ struct TracksEnvelope {
     tracks: Vec<PlaylistTrack>,
 }
 
+#[derive(Deserialize, Debug)]
+struct DownloadsEnvelope {
+    #[serde(default)]
+    downloads: Vec<crate::types::DownloadItem>,
+}
+
 #[derive(Debug)]
 pub struct HttpClient {
     http: HttpInner,
@@ -220,9 +240,7 @@ impl HttpClient {
         }
     }
 
-    async fn decode<T: serde::de::DeserializeOwned>(
-        resp: reqwest::Response,
-    ) -> ClientResult<T> {
+    async fn decode<T: serde::de::DeserializeOwned>(resp: reqwest::Response) -> ClientResult<T> {
         let status = resp.status();
         if status == StatusCode::UNAUTHORIZED {
             return Err(ClientError::Unauthorized);
@@ -234,12 +252,27 @@ impl HttpClient {
         Ok(resp.json::<T>().await?)
     }
 
+    async fn expect_ok(&self, resp: reqwest::Response) -> ClientResult<()> {
+        let status = resp.status();
+        if status == StatusCode::UNAUTHORIZED {
+            return Err(ClientError::Unauthorized);
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ClientError::Server { status, body });
+        }
+        Ok(())
+    }
+
     async fn post_search<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         query: &str,
     ) -> ClientResult<T> {
-        let body = SearchRequest { query: query.to_string(), page: 1 };
+        let body = SearchRequest {
+            query: query.to_string(),
+            page: 1,
+        };
         Self::decode(
             self.authed(self.http.post(self.url(path)).json(&body))
                 .send()
@@ -298,11 +331,19 @@ impl Api for HttpClient {
     }
 
     async fn me(&self) -> ClientResult<User> {
-        Self::decode(self.authed(self.http.get(self.url(routes::ME))).send().await?).await
+        Self::decode(
+            self.authed(self.http.get(self.url(routes::ME)))
+                .send()
+                .await?,
+        )
+        .await
     }
 
     async fn search(&self, query: &str, page: u32) -> ClientResult<SearchResponse> {
-        let body = SearchRequest { query: query.to_string(), page };
+        let body = SearchRequest {
+            query: query.to_string(),
+            page,
+        };
         Self::decode(
             self.authed(self.http.post(self.url(routes::SEARCH)).json(&body))
                 .send()
@@ -337,10 +378,7 @@ impl Api for HttpClient {
         Ok(env.results)
     }
 
-    async fn create_stream(
-        &self,
-        req: &CreateStreamRequest,
-    ) -> ClientResult<CreateStreamResponse> {
+    async fn create_stream(&self, req: &CreateStreamRequest) -> ClientResult<CreateStreamResponse> {
         Self::decode(
             self.authed(self.http.post(self.url(routes::CREATE_STREAM)).json(req))
                 .send()
@@ -399,28 +437,38 @@ impl Api for HttpClient {
     }
 
     async fn history(&self) -> ClientResult<WatchHistoryResponse> {
-        Self::decode(self.authed(self.http.get(self.url("/api/history"))).send().await?).await
+        Self::decode(
+            self.authed(self.http.get(self.url("/api/history")))
+                .send()
+                .await?,
+        )
+        .await
     }
 
     async fn favourites(&self) -> ClientResult<FavouritesResponse> {
-        Self::decode(self.authed(self.http.get(self.url("/api/favourites"))).send().await?).await
+        Self::decode(
+            self.authed(self.http.get(self.url("/api/favourites")))
+                .send()
+                .await?,
+        )
+        .await
     }
 
     async fn playlists(&self) -> ClientResult<Vec<Playlist>> {
         let env: PlaylistsEnvelope = Self::decode(
-            self.authed(self.http.get(self.url(routes::PLAYLISTS))).send().await?,
+            self.authed(self.http.get(self.url(routes::PLAYLISTS)))
+                .send()
+                .await?,
         )
         .await?;
         Ok(env.playlists)
     }
 
-    async fn playlist_tracks(
-        &self,
-        playlist_id: &str,
-    ) -> ClientResult<Vec<PlaylistTrack>> {
+    async fn playlist_tracks(&self, playlist_id: &str) -> ClientResult<Vec<PlaylistTrack>> {
         let env: TracksEnvelope = Self::decode(
             self.authed(
-                self.http.get(self.url(&routes::playlist_tracks(playlist_id))),
+                self.http
+                    .get(self.url(&routes::playlist_tracks(playlist_id))),
             )
             .send()
             .await?,
@@ -438,23 +486,20 @@ impl Api for HttpClient {
         Self::decode(self.authed(self.http.get(url)).send().await?).await
     }
 
-    async fn search_music_videos(
-        &self,
-        query: &str,
-    ) -> ClientResult<MusicVideoSearchResponse> {
+    async fn search_music_videos(&self, query: &str) -> ClientResult<MusicVideoSearchResponse> {
         self.post_search("/api/music-videos/search", query).await
     }
 
-    async fn browse_music_videos(
-        &self,
-        page: u32,
-    ) -> ClientResult<MusicVideoSearchResponse> {
+    async fn browse_music_videos(&self, page: u32) -> ClientResult<MusicVideoSearchResponse> {
         let url = self.url(&format!("/api/music-videos/browse?page={page}"));
         Self::decode(self.authed(self.http.get(url)).send().await?).await
     }
 
     async fn search_tv(&self, query: &str) -> ClientResult<TvSearchResponse> {
-        let body = SearchRequest { query: query.to_string(), page: 1 };
+        let body = SearchRequest {
+            query: query.to_string(),
+            page: 1,
+        };
         Self::decode(
             self.authed(self.http.post(self.url("/api/tv/search")).json(&body))
                 .send()
@@ -480,15 +525,41 @@ impl Api for HttpClient {
 
     async fn admin_kill_stream(&self, stream_id: &str) -> ClientResult<()> {
         let url = self.url(&format!("/api/admin/kill/{}", stream_id));
-        let resp = self.authed(self.http.delete(url)).send().await?;
-        let status = resp.status();
-        if status == StatusCode::UNAUTHORIZED {
-            return Err(ClientError::Unauthorized);
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ClientError::Server { status, body });
-        }
-        Ok(())
+        self.expect_ok(self.authed(self.http.delete(url)).send().await?)
+            .await
+    }
+
+    async fn pin_download(&self, stream_id: &str) -> ClientResult<()> {
+        let url = self.url(&format!("/api/stream/{stream_id}/download"));
+        self.expect_ok(self.authed(self.http.post(url)).send().await?)
+            .await
+    }
+
+    async fn unpin_download(&self, stream_id: &str) -> ClientResult<()> {
+        let url = self.url(&format!("/api/stream/{stream_id}/download"));
+        self.expect_ok(self.authed(self.http.delete(url)).send().await?)
+            .await
+    }
+
+    async fn list_downloads(&self) -> ClientResult<Vec<crate::types::DownloadItem>> {
+        let env: DownloadsEnvelope = Self::decode(
+            self.authed(self.http.get(self.url("/api/downloads")))
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(env.downloads)
+    }
+
+    async fn delete_stream(&self, stream_id: &str) -> ClientResult<()> {
+        let url = self.url(&format!("/api/stream/{stream_id}"));
+        self.expect_ok(self.authed(self.http.delete(url)).send().await?)
+            .await
+    }
+
+    async fn restart_torrent(&self) -> ClientResult<()> {
+        let url = self.url("/api/admin/restart-torrent");
+        self.expect_ok(self.authed(self.http.post(url)).send().await?)
+            .await
     }
 }

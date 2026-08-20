@@ -101,6 +101,9 @@
             imagemagick
             vulkan-tools      # vulkaninfo, vkcube
           ]
+          ++ lib.optionals stdenv.isLinux [
+            xdotool           # ui-harness: window lookup for screenshots
+          ]
           ++ commonBuildInputs
           ++ commonNativeBuildInputs;
 

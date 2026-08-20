@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
   Flex,
@@ -6,13 +6,24 @@ import {
   Card,
   Badge,
   Button,
+  IconButton,
   Separator,
 } from "@radix-ui/themes";
-import { ArrowLeftIcon, PlayIcon, VideoIcon } from "@radix-ui/react-icons";
+import {
+  ArrowLeftIcon,
+  Cross2Icon,
+  DownloadIcon,
+  PlayIcon,
+  TrashIcon,
+  VideoIcon,
+} from "@radix-ui/react-icons";
 import { TrailerModal } from "../components/TrailerModal";
 import { FavouriteButton } from "../components/FavouriteButton";
-import { formatBytes, formatRuntime } from "../lib/utils";
-import type { SearchResultGroup, SearchResult } from "../api/types";
+import { api } from "../api/client";
+import { useAuth } from "../hooks/useAuth";
+import { useServerSettings } from "../hooks/useServerSettings";
+import { formatBytes, formatRuntime, infoHashFromMagnet } from "../lib/utils";
+import type { DownloadItem, SearchResultGroup, SearchResult } from "../api/types";
 
 function qualityLabel(q: string | undefined): string {
   if (!q) return "?";
@@ -44,9 +55,48 @@ export function Movie() {
   const navigate = useNavigate();
   const location = useLocation();
   const group = location.state as SearchResultGroup | null;
+  const { user } = useAuth();
+  const isAdmin = user?.is_admin === true;
+  const serverSettings = useServerSettings();
+  const transcodeDisabled = serverSettings?.disable_transcode ?? true;
   const [imgError, setImgError] = useState(false);
   const [summaryExpanded, setSummaryExpanded] = useState(false);
   const [showTrailer, setShowTrailer] = useState(false);
+  const [downloads, setDownloads] = useState<Record<string, DownloadItem>>({});
+  const [busyHash, setBusyHash] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Track download state for each variant by info hash so the buttons
+  // reflect active/complete downloads, and keep polling while any is live.
+  const refreshDownloads = useCallback(async () => {
+    if (!group) return;
+    const hashes = new Set(
+      group.variants
+        .map((v) => infoHashFromMagnet(v.magnet))
+        .filter((h): h is string => h !== null)
+    );
+    if (hashes.size === 0) return;
+    try {
+      const res = await api.listDownloads();
+      const map: Record<string, DownloadItem> = {};
+      for (const dl of res.downloads) {
+        if (hashes.has(dl.info_hash.toLowerCase())) {
+          map[dl.info_hash.toLowerCase()] = dl;
+        }
+      }
+      setDownloads(map);
+    } catch {
+      // Non-fatal: buttons fall back to the plain download state.
+    }
+  }, [group]);
+
+  useEffect(() => {
+    refreshDownloads();
+    pollRef.current = setInterval(refreshDownloads, 3000);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [refreshDownloads]);
 
   if (!group) {
     return (
@@ -89,6 +139,69 @@ export function Movie() {
         },
       },
     });
+  };
+
+  // Start (or resume) a background download for a variant: create the
+  // stream server-side with full metadata, then pin it so it keeps
+  // downloading after the user leaves.
+  const handleDownload = async (variant: SearchResult) => {
+    const hash = infoHashFromMagnet(variant.magnet);
+    setBusyHash(hash);
+    try {
+      const res = await api.startStream({
+        magnet_uri: variant.magnet,
+        poster_url: group.poster_large || group.poster || group.poster_medium || undefined,
+        title: group.title,
+        year: group.year ?? undefined,
+        rating: group.rating ?? undefined,
+        runtime: group.runtime ?? undefined,
+        genres: group.genres ?? undefined,
+        language: group.language ?? undefined,
+        video_codec: variant.video_codec ?? undefined,
+        audio_channels: variant.audio_channels ?? undefined,
+        source_type: variant.source_type ?? undefined,
+        summary: group.summary ?? undefined,
+        imdb_code: group.imdb_code ?? undefined,
+        mpa_rating: group.mpa_rating ?? undefined,
+        bit_depth: variant.bit_depth ?? undefined,
+        trailer_code: group.trailer_code ?? undefined,
+        poster_small: group.poster_small ?? undefined,
+        poster_medium: group.poster_medium ?? undefined,
+        poster_large: group.poster_large ?? undefined,
+        backdrop: group.backdrop ?? undefined,
+      });
+      await api.pinDownload(res.stream_id);
+      await refreshDownloads();
+    } catch (err) {
+      console.error("Download start failed:", err);
+    } finally {
+      setBusyHash(null);
+    }
+  };
+
+  const handleCancelDownload = async (hash: string) => {
+    setBusyHash(hash);
+    try {
+      await api.unpinDownload(hash);
+      await refreshDownloads();
+    } catch (err) {
+      console.error("Cancel download failed:", err);
+    } finally {
+      setBusyHash(null);
+    }
+  };
+
+  const handleDeleteDownload = async (hash: string, name: string) => {
+    if (!window.confirm(`Delete "${name}" and all its files?`)) return;
+    setBusyHash(hash);
+    try {
+      await api.deleteStream(hash);
+      await refreshDownloads();
+    } catch (err) {
+      console.error("Delete download failed:", err);
+    } finally {
+      setBusyHash(null);
+    }
   };
 
   const bgImage = group.backdrop || group.poster_large || group.poster || null;
@@ -208,47 +321,128 @@ export function Movie() {
 
       <Text size="3" weight="bold">Available Qualities</Text>
       <Flex direction="column" gap="2">
-        {group.variants.map((variant) => (
-          <Card
-            key={variant.magnet}
-            size="1"
-            onClick={() => handlePlay(variant)}
-            style={{ cursor: "pointer" }}
-          >
-            <Flex align="center" gap="3">
-              <Badge size="2" variant="solid" color={qualityColor(variant.quality)}>
-                {qualityLabel(variant.quality)}
-              </Badge>
+        {group.variants.map((variant) => {
+          const hash = infoHashFromMagnet(variant.magnet);
+          const dl = hash ? downloads[hash] : undefined;
+          const complete = dl?.status === "complete";
+          const activeBackground = !!dl && dl.pinned && !complete;
+          const busy = busyHash === hash;
+          // With transcode disabled, only WEB source releases are
+          // playable in the browser. Others stay downloadable; a
+          // double-click still attempts direct playback.
+          const notWebCompatible =
+            transcodeDisabled && variant.source_type !== "web";
+          return (
+            <Card
+              key={variant.magnet}
+              size="1"
+              onClick={() => {
+                if (!notWebCompatible) handlePlay(variant);
+              }}
+              onDoubleClick={() => {
+                if (notWebCompatible) handlePlay(variant);
+              }}
+              style={{ cursor: notWebCompatible ? "default" : "pointer" }}
+            >
+              <Flex align="center" gap="3">
+                <Badge size="2" variant="solid" color={qualityColor(variant.quality)}>
+                  {qualityLabel(variant.quality)}
+                </Badge>
 
-              <Flex direction="column" gap="0" style={{ flex: 1, minWidth: 0 }}>
-                <Flex gap="2" align="center" wrap="wrap">
-                  {variant.source_type && (
-                    <Text size="1" color="gray">{formatSourceType(variant.source_type)}</Text>
-                  )}
-                  {variant.video_codec && (
-                    <Text size="1" color="gray">{variant.video_codec}</Text>
-                  )}
-                  {variant.audio_channels && (
-                    <Text size="1" color="gray">{variant.audio_channels}ch</Text>
-                  )}
-                  {variant.bit_depth && (
-                    <Text size="1" color="gray">{variant.bit_depth}bit</Text>
-                  )}
+                <Flex direction="column" gap="0" style={{ flex: 1, minWidth: 0 }}>
+                  <Flex gap="2" align="center" wrap="wrap">
+                    {variant.source_type && (
+                      <Text size="1" color="gray">{formatSourceType(variant.source_type)}</Text>
+                    )}
+                    {variant.video_codec && (
+                      <Text size="1" color="gray">{variant.video_codec}</Text>
+                    )}
+                    {variant.audio_channels && (
+                      <Text size="1" color="gray">{variant.audio_channels}ch</Text>
+                    )}
+                    {variant.bit_depth && (
+                      <Text size="1" color="gray">{variant.bit_depth}bit</Text>
+                    )}
+                  </Flex>
+                  <Text size="2" color="gray">
+                    {variant.size || formatBytes(variant.size_bytes)}
+                  </Text>
                 </Flex>
-                <Text size="2" color="gray">
-                  {variant.size || formatBytes(variant.size_bytes)}
-                </Text>
-              </Flex>
 
-              <Flex direction="column" align="end" gap="0" style={{ flexShrink: 0 }}>
-                <Text size="1" color="green" weight="medium">{variant.seeds} seeds</Text>
-                <Text size="1" color="red">{variant.leeches} peers</Text>
-              </Flex>
+                <Flex direction="column" align="end" gap="0" style={{ flexShrink: 0 }}>
+                  <Text size="1" color="green" weight="medium">{variant.seeds} seeds</Text>
+                  <Text size="1" color="red">{variant.leeches} peers</Text>
+                </Flex>
 
-              <PlayIcon width={16} height={16} style={{ flexShrink: 0 }} />
-            </Flex>
-          </Card>
-        ))}
+                {hash && (
+                  <Flex
+                    align="center"
+                    gap="2"
+                    style={{ flexShrink: 0 }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {complete && (
+                      <Badge size="1" variant="soft" color="green">
+                        Downloaded
+                      </Badge>
+                    )}
+                    {activeBackground && (
+                      <Button
+                        size="1"
+                        variant="soft"
+                        color="orange"
+                        disabled={busy}
+                        onClick={() => handleCancelDownload(hash)}
+                      >
+                        <Cross2Icon width={12} height={12} />
+                        {dl ? `${dl.progress.toFixed(0)}% · Cancel Download` : "Cancel Download"}
+                      </Button>
+                    )}
+                    {!complete && !activeBackground && (
+                      <IconButton
+                        size="1"
+                        variant="soft"
+                        disabled={busy}
+                        onClick={() => handleDownload(variant)}
+                        aria-label="Download"
+                        title="Download in background"
+                      >
+                        <DownloadIcon width={14} height={14} />
+                      </IconButton>
+                    )}
+                    {dl && isAdmin && (
+                      <IconButton
+                        size="1"
+                        variant="soft"
+                        color="red"
+                        disabled={busy}
+                        onClick={() => handleDeleteDownload(hash, group.title)}
+                        aria-label="Delete download"
+                        title="Delete files and records"
+                      >
+                        <TrashIcon width={14} height={14} />
+                      </IconButton>
+                    )}
+                  </Flex>
+                )}
+
+                {notWebCompatible ? (
+                  <Badge
+                    size="1"
+                    variant="soft"
+                    color="gray"
+                    style={{ flexShrink: 0 }}
+                    title="Server transcoding is disabled; double-click to try direct playback"
+                  >
+                    Not WEB compatible
+                  </Badge>
+                ) : (
+                  <PlayIcon width={16} height={16} style={{ flexShrink: 0 }} />
+                )}
+              </Flex>
+            </Card>
+          );
+        })}
       </Flex>
     </Flex>
   );

@@ -37,6 +37,12 @@ export function detectQuality(title: string): string | null {
   return null;
 }
 
+export function infoHashFromMagnet(magnet: string): string | null {
+  const m = magnet.match(/xt=urn:btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/);
+  const hash = m?.[1];
+  return hash ? hash.toLowerCase() : null;
+}
+
 export function isMagnetLink(text: string): boolean {
   return text.trim().startsWith("magnet:");
 }

@@ -13,7 +13,65 @@ pub const TILE_POSTER_W: f32 = 180.0;
 pub const TILE_POSTER_H: f32 = 270.0;
 pub const TILE_TOTAL_W: f32 = 180.0;
 pub const TILE_TOTAL_H: f32 = 360.0;
+
+/// Responsive tile bounds: tiles never shrink below MIN or stretch past
+/// MAX; column count adapts instead, like CSS
+/// `repeat(auto-fit, minmax(MIN, 1fr))`.
+pub const TILE_MIN_W: f32 = 132.0;
+pub const TILE_MAX_W: f32 = 224.0;
+pub const TILE_GAP: f32 = 12.0;
+
+/// Resolved tile sizing for a given available width.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TileLayout {
+    pub tile_w: f32,
+    pub poster_h: f32,
+    pub total_h: f32,
+    /// Multiplier applied to tile text sizes so type scales with the
+    /// tile instead of drowning in it or overflowing it.
+    pub font_scale: f32,
+    /// Columns that fit fully at this width.
+    pub per_row: usize,
+}
+
+/// Fit as many columns as possible at >= the (UI-scaled) minimum width,
+/// stretch them evenly up to the maximum, and scale tile text with the
+/// tile. Extra space beyond max-width columns stays as margin;
+/// fewer-than-min columns never happen (tiles overflow into scrolling
+/// instead). The global UI scale grows the bounds themselves so tiles
+/// keep pace with the rest of the interface on large displays.
+pub fn tile_layout(available_width: f32) -> TileLayout {
+    let s = crate::theme::ui_scale();
+    let min = TILE_MIN_W * s;
+    let max = TILE_MAX_W * s;
+    let gap = TILE_GAP * s;
+    let avail = available_width.max(min);
+    let cols = ((avail + gap) / (min + gap)).floor().max(1.0);
+    let tile_w = ((avail - (cols - 1.0) * gap) / cols).clamp(min, max);
+    let font_scale = (tile_w / (TILE_POSTER_W * s)).clamp(0.85, 1.2);
+    let poster_h = tile_w * 1.5;
+    TileLayout {
+        tile_w,
+        poster_h,
+        total_h: poster_h + 64.0 * font_scale * s,
+        font_scale,
+        per_row: cols as usize,
+    }
+}
 use streamx_api::types::SearchResultGroup;
+
+/// Build a GPUI image source for a poster URL. Server-relative paths
+/// ("/proxy/...", "/api/posters/...") go through our AssetSource via the
+/// Embedded resource variant; GPUI's default `From<&str>` would route
+/// them to the HTTP loader with a relative URI, which fails. Absolute
+/// URLs use GPUI's own HTTP loader.
+pub fn poster_image_source(url: &str) -> ImageSource {
+    if url.starts_with('/') {
+        ImageSource::Resource(Resource::Embedded(SharedString::from(url.to_string())))
+    } else {
+        ImageSource::from(SharedString::from(url.to_string()))
+    }
+}
 
 /// Flat card container. Call `.child(...)` on the returned div.
 pub fn card(theme: &Theme) -> gpui::Div {
@@ -94,11 +152,16 @@ pub fn movie_tile(
     group: &SearchResultGroup,
     theme: &Theme,
     id: impl Into<SharedString>,
+    layout: TileLayout,
 ) -> gpui::Stateful<gpui::Div> {
     let title: SharedString = group.title.clone().into();
     let id = id.into();
     let year = group.year.map(|y| y.to_string()).unwrap_or_default();
-    let rating = group.rating.map(|r| format!("{:.1}", r)).unwrap_or_default();
+    let rating = group
+        .rating
+        .map(|r| format!("{:.1}", r))
+        .unwrap_or_default();
+    let fs = layout.font_scale;
 
     // Pick the best available poster URL. GPUI's `img()` accepts URLs
     // and streams them over HTTP with its own cache.
@@ -110,24 +173,14 @@ pub fn movie_tile(
         .or(group.poster.as_ref())
         .cloned();
 
-    // Tile sizing: classic 2:3 movie poster ratio, sized for readability
-    // on desktop viewports. The container below caps text height so the
-    // overall card stays a predictable aspect.
-    let poster_w = TILE_POSTER_W;
-    let poster_h = TILE_POSTER_H;
+    // Responsive 2:3 poster sized by the caller's TileLayout; text below
+    // scales with the tile.
+    let poster_w = layout.tile_w;
+    let poster_h = layout.poster_h;
     let poster_placeholder = match poster_url {
         Some(url) => {
             let fallback_bg = theme.bg_panel();
-            // GPUI's default `From<&str> for ImageSource` treats any
-            // hyper-parseable string as a URI (including relative paths
-            // like "/proxy/..."), which routes it to the HTTP loader
-            // and fails. For /proxy/ we construct the Embedded variant
-            // by hand so our AssetSource is consulted instead.
-            let source: ImageSource = if url.starts_with("/proxy/") {
-                ImageSource::Resource(Resource::Embedded(SharedString::from(url)))
-            } else {
-                ImageSource::from(SharedString::from(url))
-            };
+            let source: ImageSource = poster_image_source(&url);
             div()
                 .w(px(poster_w))
                 .h(px(poster_h))
@@ -162,7 +215,7 @@ pub fn movie_tile(
         .flex()
         .gap(px(theme.space_2()))
         .items_center()
-        .text_size(px(theme.fs_1()))
+        .text_size(px(theme.fs_1() * fs))
         .child(
             div()
                 .text_color(theme.fg_muted())
@@ -180,8 +233,8 @@ pub fn movie_tile(
 
     div()
         .id(id)
-        .w(px(TILE_TOTAL_W))
-        .h(px(TILE_TOTAL_H))
+        .w(px(layout.tile_w))
+        .h(px(layout.total_h))
         .flex()
         .flex_col()
         .gap(px(theme.space_1()))
@@ -190,9 +243,9 @@ pub fn movie_tile(
         .child(poster_placeholder)
         .child(
             div()
-                .max_h(px(48.0))
+                .max_h(px(40.0 * fs))
                 .overflow_hidden()
-                .text_size(px(theme.fs_1()))
+                .text_size(px(theme.fs_1() * fs))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.fg_primary())
                 .child(title),
@@ -206,7 +259,7 @@ pub fn movie_tile(
 pub fn browse_section(
     title: impl Into<SharedString>,
     theme: &Theme,
-    groups: &[SearchResultGroup],
+    groups: &[std::sync::Arc<SearchResultGroup>],
 ) -> gpui::Div {
     let title: SharedString = title.into();
 
@@ -231,7 +284,12 @@ pub fn browse_section(
         }
     } else {
         for (i, g) in groups.iter().enumerate() {
-            row = row.child(movie_tile(g, theme, format!("bs-{title}-{i}")));
+            row = row.child(movie_tile(
+                g.as_ref(),
+                theme,
+                format!("bs-{title}-{i}"),
+                tile_layout(1060.0),
+            ));
         }
     }
 
@@ -245,11 +303,7 @@ pub fn browse_section(
 }
 
 /// Badge (small pill for quality/codec labels).
-pub fn badge(
-    label: impl Into<SharedString>,
-    color: gpui::Rgba,
-    theme: &Theme,
-) -> gpui::Div {
+pub fn badge(label: impl Into<SharedString>, color: gpui::Rgba, theme: &Theme) -> gpui::Div {
     div()
         .px(px(theme.space_2()))
         .py(px(2.0))

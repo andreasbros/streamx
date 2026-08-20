@@ -7,8 +7,8 @@ use common::fixtures::*;
 use rstest::rstest;
 use std::path::PathBuf;
 use streamx::config::TranscodeConfig;
-use streamx::transcode::HlsManager;
 use streamx::transcode::hls::PlaylistResponse;
+use streamx::transcode::HlsManager;
 
 fn test_config() -> TranscodeConfig {
     TranscodeConfig {
@@ -23,7 +23,8 @@ fn test_config() -> TranscodeConfig {
         threads: Some(2),
         gpu: false,
         hls_downscale: true,
-        hls_max_height: 1080, hls_force_stereo: true,
+        hls_max_height: 1080,
+        hls_force_stereo: true,
     }
 }
 
@@ -31,7 +32,9 @@ async fn create_mgr(name: &str) -> (HlsManager, PathBuf) {
     let cache_dir = PathBuf::from(format!("/tmp/streamx_matrix_test/{name}"));
     let _ = std::fs::remove_dir_all(&cache_dir);
     std::fs::create_dir_all(&cache_dir).expect("create cache dir");
-    let mgr = HlsManager::new(&test_config(), cache_dir.clone()).await.expect("create manager");
+    let mgr = HlsManager::new(&test_config(), cache_dir.clone())
+        .await
+        .expect("create manager");
     (mgr, cache_dir)
 }
 
@@ -56,7 +59,10 @@ async fn hls_transcode(
 ) {
     let clip = match get_clip(clip_id) {
         Some(c) => c,
-        None => { eprintln!("SKIP: clip {clip_id} not generated"); return; }
+        None => {
+            eprintln!("SKIP: clip {clip_id} not generated");
+            return;
+        }
     };
 
     let test_name = format!("{clip_id}_{quality}");
@@ -70,18 +76,27 @@ async fn hls_transcode(
     // Wait for transcode (ultrafast preset, small clips)
     tokio::time::sleep(std::time::Duration::from_secs(8)).await;
 
-    let resp = mgr.generate_playlist(stream_id, quality).await.expect("playlist");
+    let resp = mgr
+        .generate_playlist(stream_id, quality)
+        .await
+        .expect("playlist");
     match resp {
         PlaylistResponse::Content(content) => {
             assert!(content.contains("#EXTM3U"), "[{test_name}] Missing EXTM3U");
-            assert!(content.contains("#EXTINF:"), "[{test_name}] No segments in playlist");
+            assert!(
+                content.contains("#EXTINF:"),
+                "[{test_name}] No segments in playlist"
+            );
 
             if expect_variant_prefix {
                 // Variant playlists should have quality-prefixed segment paths
-                let has_prefix = content.lines().any(|l| {
-                    !l.starts_with('#') && !l.is_empty() && l.contains('/')
-                });
-                assert!(has_prefix, "[{test_name}] Missing quality prefix in segments");
+                let has_prefix = content
+                    .lines()
+                    .any(|l| !l.starts_with('#') && !l.is_empty() && l.contains('/'));
+                assert!(
+                    has_prefix,
+                    "[{test_name}] Missing quality prefix in segments"
+                );
             }
         }
         PlaylistResponse::Redirect(_) => panic!("[{test_name}] Unexpected redirect"),
@@ -100,8 +115,11 @@ async fn hls_transcode(
         assert!(data.len() >= 8, "[{test_name}] segment too small");
         let box_type = &data[4..8];
         assert!(
-            [b"styp", b"moof", b"ftyp", b"moov", b"sidx"].iter().any(|t| box_type == *t),
-            "[{test_name}] Invalid fMP4 box type: {:?}", box_type
+            [b"styp", b"moof", b"ftyp", b"moov", b"sidx"]
+                .iter()
+                .any(|t| box_type == *t),
+            "[{test_name}] Invalid fMP4 box type: {:?}",
+            box_type
         );
     }
 }
@@ -115,13 +133,13 @@ async fn hls_transcode(
 #[case::slow_start("h264_ac3_mkv", "slow_start")]
 #[case::stalling("h264_ac3_mkv", "stalling")]
 #[tokio::test]
-async fn mock_torrent_transcode(
-    #[case] clip_id: &str,
-    #[case] download_pattern: &str,
-) {
+async fn mock_torrent_transcode(#[case] clip_id: &str, #[case] download_pattern: &str) {
     let clip = match get_clip(clip_id) {
         Some(c) => c,
-        None => { eprintln!("SKIP: clip {clip_id} not generated"); return; }
+        None => {
+            eprintln!("SKIP: clip {clip_id} not generated");
+            return;
+        }
     };
 
     let test_name = format!("torrent_{clip_id}_{download_pattern}");
@@ -136,7 +154,8 @@ async fn mock_torrent_transcode(
         "slow_start" => MockTorrentWriter::slow_start(&clip, growing_file.clone()),
         "stalling" => MockTorrentWriter::stalling(&clip, growing_file.clone(), 3000),
         _ => panic!("Unknown pattern: {download_pattern}"),
-    }.expect("create writer");
+    }
+    .expect("create writer");
 
     // Start the mock download and transcode concurrently
     let write_handle = tokio::spawn(async move { writer.execute().await });
@@ -154,14 +173,19 @@ async fn mock_torrent_transcode(
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     // Verify some output was produced (may be partial for stalling pattern)
-    let resp = mgr.generate_playlist(stream_id, "source").await.expect("playlist");
+    let resp = mgr
+        .generate_playlist(stream_id, "source")
+        .await
+        .expect("playlist");
     match resp {
         PlaylistResponse::Content(content) => {
             assert!(content.contains("#EXTM3U"), "[{test_name}] Missing EXTM3U");
             // For stalling pattern, we may not have segments yet
             if download_pattern != "stalling" {
-                assert!(content.contains("#EXTINF:") || content.contains("segment"),
-                    "[{test_name}] Expected some segments");
+                assert!(
+                    content.contains("#EXTINF:") || content.contains("segment"),
+                    "[{test_name}] Expected some segments"
+                );
             }
         }
         _ => panic!("[{test_name}] Unexpected response"),
@@ -177,13 +201,13 @@ async fn mock_torrent_transcode(
 #[case::surround_ac3("h264_ac3_mkv", 6)]
 #[case::surround_eac3("hevc_eac3_mkv", 6)]
 #[tokio::test]
-async fn audio_channels_preserved(
-    #[case] clip_id: &str,
-    #[case] expected_channels: u32,
-) {
+async fn audio_channels_preserved(#[case] clip_id: &str, #[case] expected_channels: u32) {
     let clip = match get_clip(clip_id) {
         Some(c) => c,
-        None => { eprintln!("SKIP: clip {clip_id} not generated"); return; }
+        None => {
+            eprintln!("SKIP: clip {clip_id} not generated");
+            return;
+        }
     };
 
     let test_name = format!("audio_{clip_id}");
@@ -191,7 +215,8 @@ async fn audio_channels_preserved(
     let stream_id = &format!("test_{test_name}");
 
     mgr.start_stream(stream_id, clip.to_str().unwrap(), "source")
-        .await.expect("start_stream");
+        .await
+        .expect("start_stream");
 
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
@@ -204,7 +229,9 @@ async fn audio_channels_preserved(
     for seg_dir in &seg_dirs {
         let seg = seg_dir.join("segment_0000.m4s");
         let init = seg_dir.join("init.mp4");
-        if !seg.exists() { continue; }
+        if !seg.exists() {
+            continue;
+        }
 
         // fMP4 segments need the init segment for codec metadata
         // Use ffprobe on init.mp4 which contains the stream configuration
@@ -217,14 +244,19 @@ async fn audio_channels_preserved(
         if let Ok(out) = output {
             let json = String::from_utf8_lossy(&out.stdout);
             // Check audio stream exists
-            assert!(json.contains("\"codec_type\":\"audio\"") || json.contains("\"codec_type\": \"audio\""),
-                "[{clip_id}] Audio stream missing from segment");
+            assert!(
+                json.contains("\"codec_type\":\"audio\"")
+                    || json.contains("\"codec_type\": \"audio\""),
+                "[{clip_id}] Audio stream missing from segment"
+            );
 
             // For surround sources, verify channels are preserved (not downmixed to 2)
             if expected_channels > 2 {
                 // The output should have more than 2 channels (AAC can carry 5.1)
-                let has_multi = json.contains("\"channels\":6") || json.contains("\"channels\": 6")
-                    || json.contains("\"channels\":5") || json.contains("\"channels\": 5");
+                let has_multi = json.contains("\"channels\":6")
+                    || json.contains("\"channels\": 6")
+                    || json.contains("\"channels\":5")
+                    || json.contains("\"channels\": 5");
                 // Note: some codecs report differently, so we just verify audio exists
                 if !has_multi {
                     eprintln!("[{clip_id}] WARNING: Expected {expected_channels} channels but audio may have been downmixed");

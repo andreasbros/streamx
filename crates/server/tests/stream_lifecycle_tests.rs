@@ -26,7 +26,7 @@ async fn start_test_server() -> TestServer {
             bind: "127.0.0.1".to_string(),
             open_browser: false,
             log_level: None,
-},
+        },
         torrent: streamx::config::TorrentConfig {
             max_connections: 200,
             sequential: true,
@@ -46,7 +46,8 @@ async fn start_test_server() -> TestServer {
             threads: None,
             gpu: false,
             hls_downscale: true,
-            hls_max_height: 1080, hls_force_stereo: true,
+            hls_max_height: 1080,
+            hls_force_stereo: true,
         },
         auth: streamx::config::AuthConfig {
             jwt_secret: "test-secret-key-for-integration-tests".to_string(),

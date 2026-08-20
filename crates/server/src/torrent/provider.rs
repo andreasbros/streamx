@@ -173,7 +173,7 @@ impl SearchProvider {
 
     /// Parse "provider_name: query" prefix from search query.
     /// Returns (provider_name, actual_query) or (None, original_query).
-    fn parse_provider_prefix<'a>(query: &'a str) -> (Option<&'a str>, &'a str) {
+    fn parse_provider_prefix(query: &str) -> (Option<&str>, &str) {
         if let Some((prefix, rest)) = query.split_once(':') {
             let prefix = prefix.trim();
             let rest = rest.trim();
@@ -256,7 +256,12 @@ impl SearchProvider {
         let response = self
             .client
             .get(&api_url)
-            .query(&[("query_term", query), ("sort_by", "seeds"), ("limit", "20"), ("page", &page_str)])
+            .query(&[
+                ("query_term", query),
+                ("sort_by", "seeds"),
+                ("limit", "20"),
+                ("page", &page_str),
+            ])
             .send()
             .await;
 
@@ -319,7 +324,7 @@ impl SearchProvider {
                     })
                     .collect();
 
-                variants.sort_by(|a, b| b.seeds.cmp(&a.seeds));
+                variants.sort_by_key(|v| std::cmp::Reverse(v.seeds));
 
                 SearchResultGroup {
                     title: movie.title,
@@ -448,7 +453,7 @@ impl SearchProvider {
                         }
                     })
                     .collect();
-                variants.sort_by(|a, b| b.seeds.cmp(&a.seeds));
+                variants.sort_by_key(|v| std::cmp::Reverse(v.seeds));
                 SearchResultGroup {
                     title: movie.title,
                     year: Some(year),
@@ -495,10 +500,14 @@ impl SearchProvider {
             .get(&url)
             .send()
             .await
-            .map_err(|e| crate::error::Error::Internal { message: e.to_string() })?
+            .map_err(|e| crate::error::Error::Internal {
+                message: e.to_string(),
+            })?
             .json::<Vec<serde_json::Value>>()
             .await
-            .map_err(|e| crate::error::Error::Internal { message: e.to_string() })?;
+            .map_err(|e| crate::error::Error::Internal {
+                message: e.to_string(),
+            })?;
 
         let mut groups = Vec::new();
 
@@ -563,9 +572,7 @@ impl SearchProvider {
                     video_codec: None,
                     audio_channels: None,
                     bit_depth: None,
-                    source_type: Some(
-                        provider.name.as_deref().unwrap_or("tpb").to_string(),
-                    ),
+                    source_type: Some(provider.name.as_deref().unwrap_or("tpb").to_string()),
                 }],
             });
         }
@@ -831,7 +838,7 @@ impl SearchProvider {
                         }
                     })
                     .collect();
-                variants.sort_by(|a, b| b.seeds.cmp(&a.seeds));
+                variants.sort_by_key(|v| std::cmp::Reverse(v.seeds));
                 episodes.push(TvEpisode {
                     episode: ep_num,
                     title: None,
@@ -948,7 +955,7 @@ impl SearchProvider {
                 })
                 .collect();
 
-            variants.sort_by(|a, b| b.seeds.cmp(&a.seeds));
+            variants.sort_by_key(|v| std::cmp::Reverse(v.seeds));
 
             // Use detail for richer metadata, fall back to search result
             let d = detail.as_ref().unwrap_or(&meta);
@@ -1112,8 +1119,53 @@ impl SearchProvider {
                     .api_url
                     .as_deref()
                     .map_or_else(|| format!("{}/q.php", provider.url), String::from);
-                let results = self.fetch_apibay(&api_url, "", cat).await?;
-                Ok(apibay_to_music_results(results))
+                // "Top 100" must be CURRENT: merge the live top-100 feed
+                // with this-year searches, dedupe by info hash, and rank
+                // recent uploads (newest first) ahead of evergreen
+                // compilations that dominate pure seeder counts.
+                let year = chrono::Utc::now().format("%Y").to_string();
+                let q_top = format!("top 100 {year}");
+                let q_hits = format!("hits {year}");
+                let (top, y1, y2) = tokio::join!(
+                    self.fetch_apibay(&api_url, "", cat),
+                    self.fetch_apibay(&api_url, &q_top, cat),
+                    self.fetch_apibay(&api_url, &q_hits, cat),
+                );
+                let mut merged: Vec<ApibayTorrent> = Vec::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for batch in [
+                    y1.unwrap_or_default(),
+                    y2.unwrap_or_default(),
+                    top.unwrap_or_default(),
+                ] {
+                    for t in batch {
+                        if t.seeders.parse::<u32>().unwrap_or(0) == 0 {
+                            continue;
+                        }
+                        if seen.insert(t.info_hash.to_lowercase()) {
+                            merged.push(t);
+                        }
+                    }
+                }
+                let now = chrono::Utc::now().timestamp();
+                let fresh_cutoff = now - 180 * 24 * 3600;
+                let added = |t: &ApibayTorrent| t.added.parse::<i64>().unwrap_or(0);
+                let seeders = |t: &ApibayTorrent| t.seeders.parse::<u32>().unwrap_or(0);
+                merged.sort_by(|a, b| {
+                    let fa = added(a) >= fresh_cutoff;
+                    let fb = added(b) >= fresh_cutoff;
+                    // Fresh uploads first (newest first); stale ones
+                    // trail, ordered by popularity.
+                    fb.cmp(&fa).then_with(|| {
+                        if fa && fb {
+                            added(b).cmp(&added(a))
+                        } else {
+                            seeders(b).cmp(&seeders(a))
+                        }
+                    })
+                });
+                merged.truncate(100);
+                Ok(apibay_to_music_results(merged))
             }
         }
     }
@@ -1124,6 +1176,31 @@ impl SearchProvider {
         query: &str,
         cat: &str,
     ) -> Result<Vec<ApibayTorrent>> {
+        // Browsing (no query): use apibay's live top-100 feed, which is
+        // continuously refreshed. The old literal `q=top100` search
+        // surfaced stale "Top 100 <month>" chart rips instead of what is
+        // actually popular right now.
+        if query.is_empty() {
+            let base = api_url.trim_end_matches("/q.php").trim_end_matches('/');
+            let first_cat = cat.split(',').next().unwrap_or(cat).trim();
+            let url = format!("{base}/precompiled/data_top100_{first_cat}.json");
+            match self.client.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    match resp.json::<Vec<ApibayTorrent>>().await {
+                        Ok(items) if !items.is_empty() => return Ok(items),
+                        Ok(_) => {}
+                        Err(err) => {
+                            tracing::warn!("Apibay top100 parse failed, falling back: {err}")
+                        }
+                    }
+                }
+                Ok(resp) => {
+                    tracing::warn!(status = %resp.status(), "Apibay top100 fetch failed, falling back")
+                }
+                Err(err) => tracing::warn!("Apibay top100 request failed, falling back: {err}"),
+            }
+        }
+
         let mut params = vec![("cat", cat.to_string())];
         if query.is_empty() {
             params.push(("q", "top100".to_string()));
@@ -1330,7 +1407,7 @@ fn group_eztv_torrents(torrents: Vec<EztvTorrent>) -> Vec<TvSearchResultGroup> {
                     let mut episodes: Vec<TvEpisode> = episodes_map
                         .into_iter()
                         .map(|(ep_num, mut variants)| {
-                            variants.sort_by(|a, b| b.seeds.cmp(&a.seeds));
+                            variants.sort_by_key(|v| std::cmp::Reverse(v.seeds));
                             TvEpisode {
                                 episode: ep_num,
                                 title: None,
@@ -1491,9 +1568,7 @@ fn extract_date_from_title(title: &str) -> Option<String> {
             let year: u32 = std::str::from_utf8(&slice[0..4]).ok()?.parse().ok()?;
             let month: u32 = std::str::from_utf8(&slice[5..7]).ok()?.parse().ok()?;
             let day: u32 = std::str::from_utf8(&slice[8..10]).ok()?.parse().ok()?;
-            if (1900..=2100).contains(&year)
-                && (1..=12).contains(&month)
-                && (1..=31).contains(&day)
+            if (1900..=2100).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day)
             {
                 return Some(format!("{year:04}-{month:02}-{day:02}"));
             }
@@ -1619,7 +1694,9 @@ fn merge_movie_groups(groups: &mut Vec<SearchResultGroup>) {
                     let hash = extract_magnet_hash(&v.magnet);
                     seen.insert(hash)
                 });
-                merged[idx].variants.sort_by(|a, b| b.seeds.cmp(&a.seeds));
+                merged[idx]
+                    .variants
+                    .sort_by_key(|v| std::cmp::Reverse(v.seeds));
                 continue;
             }
             by_imdb.insert(imdb.clone(), merged.len());

@@ -140,6 +140,28 @@ const MIGRATIONS: &[&str] = &[
     // streaming, independent of what is currently on disk or whether
     // the torrent is loaded in the session.
     "ALTER TABLE downloads ADD COLUMN files_json TEXT;",
+    // Migration 12: Pinned (background) downloads keep downloading when
+    // every client disconnects and auto-resume at server boot.
+    "ALTER TABLE downloads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;",
+    // Migration 13: Server-wide settings (admin-managed key/value):
+    // transcode gating and WEB-only search/download.
+    "CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );",
+    // Migration 14: Track identity is (info_hash, file_index) — indexed
+    // lookups for deletion/cleanup, dedupe of playlist tracks, and fast
+    // pinned/status scans for the stall watchdog and boot resume.
+    "DELETE FROM playlist_tracks WHERE id NOT IN (
+        SELECT MIN(id) FROM playlist_tracks GROUP BY playlist_id, info_hash, file_index
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_playlist_tracks_identity
+        ON playlist_tracks(playlist_id, info_hash, file_index);
+    CREATE INDEX IF NOT EXISTS idx_playlist_tracks_hash ON playlist_tracks(info_hash);
+    CREATE INDEX IF NOT EXISTS idx_favourites_hash ON favourites(info_hash);
+    CREATE INDEX IF NOT EXISTS idx_downloads_status ON downloads(status);
+    CREATE INDEX IF NOT EXISTS idx_watch_history_magnet ON watch_history(magnet_uri);",
 ];
 
 pub fn run_migrations(conn: &Connection) -> Result<()> {

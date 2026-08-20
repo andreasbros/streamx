@@ -6,6 +6,7 @@ import {
   Card,
   Badge,
   Button,
+  Switch,
   TextField,
 } from "@radix-ui/themes";
 import { ArrowLeftIcon, PlayIcon, Cross2Icon, MagnifyingGlassIcon, ChevronDownIcon, ChevronUpIcon, CopyIcon, TrashIcon } from "@radix-ui/react-icons";
@@ -13,7 +14,10 @@ import { useAuth } from "../hooks/useAuth";
 import { useAdminMonitor, useAdminLogs } from "../hooks/useAdminMonitor";
 import type { SystemStats, LogEntry } from "../hooks/useAdminMonitor";
 import { formatBytes, formatSpeed } from "../lib/utils";
+import { getToken } from "../lib/auth";
 import { api } from "../api/client";
+import { invalidateServerSettings, useServerSettings } from "../hooks/useServerSettings";
+import type { ServerSettings } from "../api/types";
 
 function formatTimeAgo(iso: string): string {
   const d = new Date(iso);
@@ -243,6 +247,137 @@ function DownloadsCard({ stats }: { stats: SystemStats }) {
   );
 }
 
+function ServerSettingsCard() {
+  const settings = useServerSettings();
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const toggle = async (patch: Partial<ServerSettings>) => {
+    if (!settings) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const next = { ...settings, ...patch };
+      const saved = await api.updateServerSettings(next);
+      invalidateServerSettings(saved);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card size="2">
+      <Flex direction="column" gap="3">
+        <Text size="3" weight="bold">Playback & Search</Text>
+        <Flex align="center" justify="between" gap="3">
+          <Flex direction="column" gap="0" style={{ flex: 1 }}>
+            <Text size="2">Disable server-side transcoding</Text>
+            <Text size="1" color="gray">
+              Non-WEB releases lose their Play button (still downloadable);
+              WEB releases play directly in the browser without transcoding.
+            </Text>
+          </Flex>
+          <Switch
+            checked={settings?.disable_transcode ?? true}
+            disabled={!settings || saving}
+            onCheckedChange={(v) => toggle({ disable_transcode: v })}
+          />
+        </Flex>
+        <Flex align="center" justify="between" gap="3">
+          <Flex direction="column" gap="0" style={{ flex: 1 }}>
+            <Text size="2">WEB releases only</Text>
+            <Text size="1" color="gray">
+              Search results and new downloads are restricted to WEB source releases.
+            </Text>
+          </Flex>
+          <Switch
+            checked={settings?.web_only ?? false}
+            disabled={!settings || saving}
+            onCheckedChange={(v) => toggle({ web_only: v })}
+          />
+        </Flex>
+        {error && <Text size="2" color="red">{error}</Text>}
+      </Flex>
+    </Card>
+  );
+}
+
+function MaintenanceCard() {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+
+  const restartTorrent = async () => {
+    if (!window.confirm("Restart the torrent client? All peer connections close and DHT discovery starts fresh.")) return;
+    setBusy("torrent");
+    setMessage(null);
+    try {
+      const res = await fetch("/api/admin/restart-torrent", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const body = await res.json();
+      setMessage(`Torrent client restarted (${body.readded ?? 0} downloads re-added).`);
+    } catch (err) {
+      setMessage(`Restart failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const restartServer = async () => {
+    if (!window.confirm("Restart the whole server? The app will briefly disconnect.")) return;
+    setBusy("server");
+    setMessage(null);
+    try {
+      const res = await fetch("/api/admin/restart-server", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${getToken() ?? ""}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setMessage("Server restarting; the page will reconnect shortly.");
+      setTimeout(() => window.location.reload(), 4000);
+    } catch (err) {
+      setMessage(`Restart failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Card size="2">
+      <Flex direction="column" gap="3">
+        <Text size="3" weight="bold">Maintenance</Text>
+        <Flex gap="3" wrap="wrap" align="center">
+          <Button
+            variant="soft"
+            color="orange"
+            disabled={busy !== null}
+            onClick={restartTorrent}
+          >
+            {busy === "torrent" ? "Restarting…" : "Restart Torrent Client"}
+          </Button>
+          <Button
+            variant="soft"
+            color="red"
+            disabled={busy !== null}
+            onClick={restartServer}
+          >
+            {busy === "server" ? "Restarting…" : "Restart Server"}
+          </Button>
+        </Flex>
+        <Text size="1" color="gray">
+          Torrent restart closes every peer connection and rediscovers seed nodes;
+          active and background downloads are re-added automatically.
+        </Text>
+        {message && <Text size="2">{message}</Text>}
+      </Flex>
+    </Card>
+  );
+}
+
 function levelColor(level: string): string {
   switch (level) {
     case "ERROR": return "var(--red-11)";
@@ -462,6 +597,8 @@ export function Admin() {
 
           <TranscodesCard stats={stats} />
           <DownloadsCard stats={stats} />
+          <ServerSettingsCard />
+          <MaintenanceCard />
           <LogViewer />
         </>
       ) : (

@@ -98,10 +98,7 @@ fn extract_token(parts: &Parts) -> std::result::Result<String, Error> {
             parts
                 .uri
                 .query()
-                .and_then(|q| {
-                    q.split('&')
-                        .find_map(|pair| pair.strip_prefix("token="))
-                })
+                .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
                 .map(|t| t.to_string())
         })
         .or_else(|| {
@@ -109,10 +106,7 @@ fn extract_token(parts: &Parts) -> std::result::Result<String, Error> {
             parts
                 .uri
                 .query()
-                .and_then(|q| {
-                    q.split('&')
-                        .find_map(|pair| pair.strip_prefix("guest="))
-                })
+                .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("guest=")))
                 .map(|t| t.to_string())
         })
         .ok_or_else(|| Error::Unauthorized {
@@ -199,11 +193,7 @@ pub fn create_jwt(
     encode(&header, &claims, &key).map_err(|source| Error::Jwt { source })
 }
 
-pub fn create_guest_token(
-    stream_id: &str,
-    secret: &str,
-    duration_hours: i64,
-) -> Result<String> {
+pub fn create_guest_token(stream_id: &str, secret: &str, duration_hours: i64) -> Result<String> {
     let expiration = Utc::now()
         .checked_add_signed(Duration::hours(duration_hours))
         .ok_or_else(|| Error::Internal {
@@ -226,6 +216,20 @@ pub fn create_guest_token(
 pub fn validate_jwt(token: &str, secret: &str) -> Result<Claims> {
     let key = DecodingKey::from_secret(secret.as_bytes());
     let validation = Validation::default();
+
+    let token_data =
+        decode::<Claims>(token, &key, &validation).map_err(|source| Error::Jwt { source })?;
+
+    Ok(token_data.claims)
+}
+
+/// Validate signature but accept an expired token. Used by the embedded
+/// desktop backend to transparently renew the local session instead of
+/// bouncing the local user to a login screen.
+pub fn validate_jwt_allow_expired(token: &str, secret: &str) -> Result<Claims> {
+    let key = DecodingKey::from_secret(secret.as_bytes());
+    let mut validation = Validation::default();
+    validation.validate_exp = false;
 
     let token_data =
         decode::<Claims>(token, &key, &validation).map_err(|source| Error::Jwt { source })?;
@@ -310,7 +314,13 @@ pub async fn register(
     let user = state.db.create_user(&username, &password_hash).await?;
 
     let duration_hours = parse_session_duration(&state.config.auth.session_duration)?;
-    let token = create_jwt(&user.id, &user.username, user.is_admin, &state.jwt_secret, duration_hours)?;
+    let token = create_jwt(
+        &user.id,
+        &user.username,
+        user.is_admin,
+        &state.jwt_secret,
+        duration_hours,
+    )?;
 
     Ok((StatusCode::CREATED, Json(AuthResponse { token })))
 }
@@ -341,7 +351,13 @@ pub async fn login(
     }
 
     let duration_hours = parse_session_duration(&state.config.auth.session_duration)?;
-    let token = create_jwt(&user.id, &user.username, user.is_admin, &state.jwt_secret, duration_hours)?;
+    let token = create_jwt(
+        &user.id,
+        &user.username,
+        user.is_admin,
+        &state.jwt_secret,
+        duration_hours,
+    )?;
 
     Ok(Json(AuthResponse { token }))
 }

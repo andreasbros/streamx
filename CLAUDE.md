@@ -12,6 +12,10 @@ cd web && pnpm install && pnpm build && cd ..
 cargo build --manifest-path crates/server/Cargo.toml
 ```
 
+Always set `CARGO_TARGET_DIR=target/nix` for cargo commands: the plain
+`target/` dir is shared with the editor's host-toolchain rust-analyzer and
+gets poisoned (E0514 stale-rmeta errors).
+
 ## Code standards
 
 - Rust: `cargo fmt --all`, `cargo clippy -- -D warnings`, `cargo check` must all pass with zero warnings
@@ -29,7 +33,9 @@ cargo build --manifest-path crates/server/Cargo.toml
 ## Project structure
 
 - `crates/server/` - Rust backend (Axum, librqbit, FFmpeg transcoding, SQLite). Cargo workspace member; binary still named `streamx`.
-- `crates/` - future crates (`core`, `api`, `desktop`) land here. See feat/workspace-split.
+- `crates/api/` - shared API types + client (`Api` trait: HTTP and in-process backends).
+- `crates/desktop/` - GPUI desktop app (`streamx-desktop`); `ui-test` feature adds the JSON test driver.
+- `crates/ui-harness/` - Playwright-style desktop UI tests (see its README).
 - `web/` - React/TypeScript frontend (Vite, Radix UI, hls.js, framer-motion). Built assets (`web/dist/`) are embedded into the server binary via rust-embed.
 - `flake.nix` - Nix flake for dev shell and builds
 
@@ -37,6 +43,7 @@ cargo build --manifest-path crates/server/Cargo.toml
 
 - Rust: `cargo test` (unit + integration)
 - Frontend: `pnpm test` (vitest) and `pnpm test:e2e` (Playwright)
+- Desktop UI: `cargo build -p streamx-desktop --features ui-test && cargo build -p streamx && cargo run -p streamx-ui-harness` (add `--live` for real-poster verification). Screenshots export to `$TEST_SCREENSHOTS_DIR` (repo `.env`) as timestamped JPEG runs; macOS via `scripts/ui-test-macos.sh user@macmini`.
 - E2E tests use real backend with mock streaming endpoint
 - All tests must run inside `nix develop`
 - Performance metrics tracked in `benchmarks/e2e_perf.json` (git-tracked)

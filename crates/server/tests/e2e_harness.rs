@@ -40,7 +40,7 @@ async fn start_e2e_server() -> E2eServer {
             bind: "127.0.0.1".to_string(),
             open_browser: false,
             log_level: None,
-},
+        },
         torrent: streamx::config::TorrentConfig {
             max_connections: 10,
             sequential: true,
@@ -60,7 +60,8 @@ async fn start_e2e_server() -> E2eServer {
             threads: Some(2),
             gpu: false,
             hls_downscale: true,
-            hls_max_height: 1080, hls_force_stereo: true,
+            hls_max_height: 1080,
+            hls_force_stereo: true,
         },
         auth: streamx::config::AuthConfig {
             jwt_secret: "e2e_test_jwt_secret_not_real_do_not_use".to_string(),
@@ -88,32 +89,51 @@ async fn start_e2e_server() -> E2eServer {
     database.create_user("admin", &admin_hash).await.ok();
 
     let torrent_engine = streamx::torrent::TorrentEngine::create(
-        &config.torrent, &data_dir_path, database.clone(), None,
-    ).await.expect("torrent engine");
+        &config.torrent,
+        &data_dir_path,
+        database.clone(),
+        None,
+    )
+    .await
+    .expect("torrent engine");
 
     let search_provider = streamx::torrent::SearchProvider::new(vec![], None);
     let cache_dir = data_dir_path.join("cache");
     let hls_pipeline = streamx::transcode::HlsManager::new(&config.transcode, cache_dir)
-        .await.expect("hls pipeline");
+        .await
+        .expect("hls pipeline");
 
     let (log_tx, _) = tokio::sync::broadcast::channel::<String>(100);
     let (_, log_history) = streamx::logging::BroadcastLayer::new(log_tx.clone());
     let app = streamx::server::build_router(
-        database, config, torrent_engine, search_provider, hls_pipeline, log_tx, log_history,
+        database,
+        config,
+        torrent_engine,
+        search_provider,
+        hls_pipeline,
+        log_tx,
+        log_history,
     );
 
     let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().expect("addr");
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind");
     tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .await.ok();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .ok();
     });
 
     // Login to get token
     let client = reqwest::Client::new();
-    let login_resp = client.post(format!("http://127.0.0.1:{port}/api/auth/login"))
+    let login_resp = client
+        .post(format!("http://127.0.0.1:{port}/api/auth/login"))
         .json(&serde_json::json!({"username": "admin", "password": "password"}))
-        .send().await.expect("login");
+        .send()
+        .await
+        .expect("login");
     let body: serde_json::Value = login_resp.json().await.expect("login json");
     let token = body["token"].as_str().expect("token").to_string();
 
@@ -144,7 +164,8 @@ struct PlaywrightResult {
 
 fn generate_playwright_config(port: u16, output_dir: &Path, grep: &str) -> PathBuf {
     let ui_tests_dir = ui_dir().join("tests");
-    let config = format!(r#"
+    let config = format!(
+        r#"
 import {{ defineConfig }} from "@playwright/test";
 export default defineConfig({{
   testDir: "{test_dir}",
@@ -167,10 +188,11 @@ export default defineConfig({{
   grep: /{grep}/,
 }});
 "#,
-    test_dir = ui_tests_dir.to_string_lossy().replace('\\', "/"),
-    port = port,
-    output = output_dir.to_string_lossy().replace('\\', "/"),
-    grep = grep);
+        test_dir = ui_tests_dir.to_string_lossy().replace('\\', "/"),
+        port = port,
+        output = output_dir.to_string_lossy().replace('\\', "/"),
+        grep = grep
+    );
 
     let config_path = output_dir.join("playwright.e2e.config.ts");
     std::fs::write(&config_path, config).expect("write playwright config");
@@ -201,9 +223,9 @@ async fn run_playwright(config_path: &Path, ui_dir: &Path) -> PlaywrightResult {
     // Parse results
     let results_path = config_path.parent().unwrap().join("results.json");
     let (passed, failed) = if results_path.exists() {
-        let json: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&results_path).unwrap_or_default()
-        ).unwrap_or_default();
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&results_path).unwrap_or_default())
+                .unwrap_or_default();
         let suites = json["suites"].as_array();
         let mut p = 0u32;
         let mut f = 0u32;
@@ -214,7 +236,11 @@ async fn run_playwright(config_path: &Path, ui_dir: &Path) -> PlaywrightResult {
                         if let Some(tests) = spec["tests"].as_array() {
                             for test in tests {
                                 let status = test["results"][0]["status"].as_str().unwrap_or("");
-                                if status == "passed" { p += 1; } else { f += 1; }
+                                if status == "passed" {
+                                    p += 1;
+                                } else {
+                                    f += 1;
+                                }
                             }
                         }
                     }
@@ -233,10 +259,19 @@ async fn run_playwright(config_path: &Path, ui_dir: &Path) -> PlaywrightResult {
 
     // Strip EXIF from screenshots
     for ss in &screenshot_files {
-        let _ = std::process::Command::new("mogrify").arg("-strip").arg(ss).status();
+        let _ = std::process::Command::new("mogrify")
+            .arg("-strip")
+            .arg(ss)
+            .status();
     }
 
-    PlaywrightResult { passed, failed, duration_ms, video_files, screenshot_files }
+    PlaywrightResult {
+        passed,
+        failed,
+        duration_ms,
+        video_files,
+        screenshot_files,
+    }
 }
 
 fn collect_files(dir: &Path, ext: &str) -> Vec<PathBuf> {
@@ -272,7 +307,8 @@ fn walkdir(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 
 fn record_metrics(test_name: &str, duration_ms: u64) {
     let perf_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent().unwrap()
+        .parent()
+        .unwrap()
         .join("benchmarks/e2e_perf.json");
 
     let mut history: Vec<serde_json::Value> = if perf_file.exists() {
@@ -301,7 +337,7 @@ fn record_metrics(test_name: &str, duration_ms: u64) {
 
     history.push(entry);
     if history.len() > 100 {
-        history = history[history.len()-100..].to_vec();
+        history = history[history.len() - 100..].to_vec();
     }
 
     if let Ok(json) = serde_json::to_string_pretty(&history) {
@@ -309,12 +345,19 @@ fn record_metrics(test_name: &str, duration_ms: u64) {
     }
 
     // Print comparison with last run of same test
-    let prev = history.iter().rev().skip(1)
+    let prev = history
+        .iter()
+        .rev()
+        .skip(1)
         .find(|e| e["test"].as_str() == Some(test_name));
     if let Some(prev) = prev {
         let prev_ms = prev["duration_ms"].as_u64().unwrap_or(0);
         let delta = duration_ms as f64 - prev_ms as f64;
-        let pct = if prev_ms > 0 { delta / prev_ms as f64 * 100.0 } else { 0.0 };
+        let pct = if prev_ms > 0 {
+            delta / prev_ms as f64 * 100.0
+        } else {
+            0.0
+        };
         let sign = if delta >= 0.0 { "+" } else { "" };
         eprintln!("  Perf: {test_name} = {duration_ms}ms (prev: {prev_ms}ms, {sign}{pct:.1}%)");
     } else {
@@ -326,13 +369,15 @@ fn record_metrics(test_name: &str, duration_ms: u64) {
 // Report serving
 // ============================================================
 
-
 // ============================================================
 // Tests
 // ============================================================
 
 fn ui_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("ui")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("ui")
 }
 
 #[tokio::test]
@@ -344,15 +389,21 @@ async fn e2e_smoke_login_and_navigate() {
     let client = reqwest::Client::new();
 
     // Login works
-    let resp = client.post(format!("{}/api/auth/login", server.base_url))
+    let resp = client
+        .post(format!("{}/api/auth/login", server.base_url))
         .json(&serde_json::json!({"username": "admin", "password": "password"}))
-        .send().await.expect("login");
+        .send()
+        .await
+        .expect("login");
     assert_eq!(resp.status(), 200);
 
     // Auth works
-    let resp = client.get(format!("{}/api/auth/me", server.base_url))
+    let resp = client
+        .get(format!("{}/api/auth/me", server.base_url))
         .header("Authorization", format!("Bearer {}", server.token))
-        .send().await.expect("me");
+        .send()
+        .await
+        .expect("me");
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.expect("json");
     assert_eq!(body["username"], "admin");
@@ -364,7 +415,10 @@ async fn e2e_smoke_login_and_navigate() {
 async fn e2e_hls_playlist_from_seeded_file() {
     let server = start_e2e_server().await;
     let clip = common::h264_720p_clip();
-    if !clip.exists() { eprintln!("SKIP: fixture not generated"); return; }
+    if !clip.exists() {
+        eprintln!("SKIP: fixture not generated");
+        return;
+    }
     let start = Instant::now();
 
     // Seed a download
@@ -388,21 +442,33 @@ async fn e2e_hls_playlist_from_seeded_file() {
         complete_path: Some(dest.to_string_lossy().to_string()),
         created_at: chrono::Utc::now().to_rfc3339(),
         updated_at: chrono::Utc::now().to_rfc3339(),
-    }).await.expect("seed");
+    })
+    .await
+    .expect("seed");
 
     // Request playlist
     let client = reqwest::Client::new();
-    let resp = client.get(format!(
-        "{}/api/stream/{stream_id}/playlist.m3u8?quality=source&token={}", server.base_url, server.token
-    )).send().await.expect("playlist");
+    let resp = client
+        .get(format!(
+            "{}/api/stream/{stream_id}/playlist.m3u8?quality=source&token={}",
+            server.base_url, server.token
+        ))
+        .send()
+        .await
+        .expect("playlist");
     assert_eq!(resp.status(), 200);
 
     // Wait for transcode
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    let resp = client.get(format!(
-        "{}/api/stream/{stream_id}/playlist.m3u8?quality=source&token={}", server.base_url, server.token
-    )).send().await.expect("playlist2");
+    let resp = client
+        .get(format!(
+            "{}/api/stream/{stream_id}/playlist.m3u8?quality=source&token={}",
+            server.base_url, server.token
+        ))
+        .send()
+        .await
+        .expect("playlist2");
     let body = resp.text().await.expect("body");
     assert!(body.contains("#EXTINF:"), "No segments in playlist");
 
@@ -424,15 +490,16 @@ async fn e2e_browser_playback() {
     let server = start_e2e_server().await;
     let start = Instant::now();
 
-    let config_path = generate_playwright_config(
-        server.port, &server.artifact_dir, "HLS Playback"
-    );
+    let config_path = generate_playwright_config(server.port, &server.artifact_dir, "HLS Playback");
 
     let result = run_playwright(&config_path, &ui_dir()).await;
 
     record_metrics("e2e_browser_playback", start.elapsed().as_millis() as u64);
 
-    eprintln!("Playwright: {} passed, {} failed, {}ms", result.passed, result.failed, result.duration_ms);
+    eprintln!(
+        "Playwright: {} passed, {} failed, {}ms",
+        result.passed, result.failed, result.duration_ms
+    );
     eprintln!("Videos: {:?}", result.video_files);
     eprintln!("Screenshots: {:?}", result.screenshot_files);
 
@@ -448,12 +515,12 @@ async fn e2e_report() {
     }
 
     let server = start_e2e_server().await;
-    let config_path = generate_playwright_config(
-        server.port, &server.artifact_dir, "."
-    );
+    let config_path = generate_playwright_config(server.port, &server.artifact_dir, ".");
 
     let result = run_playwright(&config_path, &ui_dir()).await;
 
-
-    eprintln!("Results: {} passed, {} failed", result.passed, result.failed);
+    eprintln!(
+        "Results: {} passed, {} failed",
+        result.passed, result.failed
+    );
 }
