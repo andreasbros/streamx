@@ -11,17 +11,10 @@ use streamx::config::TranscodeConfig;
 use streamx::transcode::hls::PlaylistResponse;
 use streamx::transcode::HlsManager;
 
-/// Checks that the given data starts with a valid ISO BMFF box header.
-/// fMP4 segments begin with a 4-byte size followed by a 4-byte box type.
-fn is_valid_fmp4(data: &[u8]) -> bool {
-    if data.len() < 8 {
-        return false;
-    }
-    let box_type = &data[4..8];
-    matches!(
-        box_type,
-        b"styp" | b"moof" | b"mdat" | b"ftyp" | b"moov" | b"sidx"
-    )
+/// MPEG-TS segments are fixed 188-byte packets, each led by a 0x47
+/// sync byte.
+fn is_valid_mpegts(data: &[u8]) -> bool {
+    data.len() >= 188 && data.chunks(188).take(5).all(|c| c[0] == 0x47)
 }
 
 fn test_config() -> TranscodeConfig {
@@ -80,14 +73,14 @@ async fn transcode_to_segments(
     let mut segment_names = Vec::new();
 
     for dir in &seg_dirs {
-        let seg_path = dir.join("segment_0000.m4s");
+        let seg_path = dir.join("segment_0000.ts");
         if seg_path.exists() {
             first_segment = std::fs::read(&seg_path).unwrap_or_default();
             // Collect all segment names
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name().to_string_lossy().to_string();
-                    if name.ends_with(".m4s") {
+                    if name.ends_with(".ts") {
                         segment_names.push(name);
                     }
                 }
@@ -126,7 +119,10 @@ async fn sequential_vs_sparse_same_segments(#[case] clip_id: &str) {
         transcode_to_segments(&seq_path, "source", &format!("seq_{clip_id}")).await;
 
     assert!(!seq_seg.is_empty(), "Sequential: no segment produced");
-    assert!(is_valid_fmp4(&seq_seg), "Sequential: invalid fMP4 segment");
+    assert!(
+        is_valid_mpegts(&seq_seg),
+        "Sequential: invalid MPEG-TS segment"
+    );
     eprintln!(
         "[{clip_id}] Sequential: {} segments, first={} bytes",
         seq_names.len(),
@@ -159,7 +155,10 @@ async fn sequential_vs_sparse_same_segments(#[case] clip_id: &str) {
         transcode_to_segments(&sparse_path, "source", &format!("sparse_{clip_id}")).await;
 
     assert!(!sparse_seg.is_empty(), "Sparse: no segment produced");
-    assert!(is_valid_fmp4(&sparse_seg), "Sparse: invalid fMP4 segment");
+    assert!(
+        is_valid_mpegts(&sparse_seg),
+        "Sparse: invalid MPEG-TS segment"
+    );
     eprintln!(
         "[{clip_id}] Sparse: {} segments, first={} bytes",
         sparse_names.len(),
@@ -250,7 +249,7 @@ async fn sparse_write_pattern_produces_valid_hls(#[case] pattern: &str, #[case] 
     // Transcode and verify segments
     let (seg, names) = transcode_to_segments(&output_path, "source", &test_name).await;
     assert!(!seg.is_empty(), "[{pattern}] No segments produced");
-    assert!(is_valid_fmp4(&seg), "[{pattern}] Invalid fMP4 segment");
+    assert!(is_valid_mpegts(&seg), "[{pattern}] Invalid MPEG-TS segment");
     assert!(!names.is_empty(), "[{pattern}] No segment files");
     eprintln!(
         "[{pattern}] PASS: {} segments, first={} bytes",
@@ -293,7 +292,7 @@ async fn sparse_file_quality_tiers(#[case] quality: &str) {
         !seg.is_empty(),
         "[{quality}] No segments produced from sparse file"
     );
-    assert!(is_valid_fmp4(&seg), "[{quality}] Invalid fMP4 segment");
+    assert!(is_valid_mpegts(&seg), "[{quality}] Invalid MPEG-TS segment");
     eprintln!(
         "[{quality}] PASS: {} segments from sparse HEVC file",
         names.len()

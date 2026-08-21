@@ -322,7 +322,7 @@ impl MainView {
                     && !*state.category_done.read()
                 {
                     let st = state.clone();
-                    let _ = runtime::spawn(async move { load_category_page(&st).await });
+                    runtime::spawn_detached(async move { load_category_page(&st).await });
                 }
 
                 // Keep download progress fresh on the pages that show it.
@@ -332,7 +332,7 @@ impl MainView {
                 {
                     last_dl_refresh = std::time::Instant::now();
                     let st = state.clone();
-                    let _ = runtime::spawn(async move { load_downloads(&st).await });
+                    runtime::spawn_detached(async move { load_downloads(&st).await });
                 }
 
                 // The embedded backend renews expired session tokens in
@@ -387,19 +387,19 @@ impl MainView {
 
                 fire_debounced(&sv, ss, &mut search_db, debounce, |q| {
                     let st = state.clone();
-                    let _ = runtime::spawn(async move { run_search(st, q).await });
+                    runtime::spawn_detached(async move { run_search(st, q).await });
                 });
                 fire_debounced(&mv, ms, &mut music_db, debounce, |q| {
                     let st = state.clone();
-                    let _ = runtime::spawn(async move { run_music_search(st, q).await });
+                    runtime::spawn_detached(async move { run_music_search(st, q).await });
                 });
                 fire_debounced(&mvv, mvs, &mut mv_db, debounce, |q| {
                     let st = state.clone();
-                    let _ = runtime::spawn(async move { run_music_video_search(st, q).await });
+                    runtime::spawn_detached(async move { run_music_video_search(st, q).await });
                 });
                 fire_debounced(&tv, ts, &mut tv_db, debounce, |q| {
                     let st = state.clone();
-                    let _ = runtime::spawn(async move { run_tv_search(st, q).await });
+                    runtime::spawn_detached(async move { run_tv_search(st, q).await });
                 });
 
                 // Repaint only when something rendered actually changed.
@@ -628,7 +628,7 @@ impl MainView {
                     }
                     // Connect IPC in the background once mpv has created the socket.
                     let player_ref = player.clone();
-                    let _ = runtime::spawn(async move {
+                    runtime::spawn_detached(async move {
                         match MpvIpc::connect(&socket).await {
                             Ok(ipc) => {
                                 player_ref.lock().ipc = Some(ipc);
@@ -685,7 +685,7 @@ impl MainView {
                 Ok(r) => r.magnet,
                 Err(e) => {
                     player.lock().error = Some(format!("resolve_magnet failed: {e}"));
-                    let _ = this_self.update(cx, |_, cx| cx.notify());
+                    this_self.update(cx, |_, cx| cx.notify());
                     return;
                 }
             };
@@ -694,7 +694,7 @@ impl MainView {
                 title: Some(title),
                 ..Default::default()
             };
-            let _ = this_self.update(cx, |view, cx| view.play_request(req, cx));
+            this_self.update(cx, |view, cx| view.play_request(req, cx));
         })
         .detach();
     }
@@ -1388,7 +1388,7 @@ impl MainView {
                                             cx.listener(|this, _ev, _w, _cx| {
                                                 let ipc = this.player.lock().ipc.clone();
                                                 if let Some(ipc) = ipc {
-                                                    let _ = runtime::spawn(async move {
+                                                    runtime::spawn_detached(async move {
                                                         let _ = ipc.toggle_pause().await;
                                                     });
                                                 }
@@ -1400,7 +1400,7 @@ impl MainView {
                                             .on_click(cx.listener(|this, _ev, _w, _cx| {
                                                 let ipc = this.player.lock().ipc.clone();
                                                 if let Some(ipc) = ipc {
-                                                    let _ = runtime::spawn(async move {
+                                                    runtime::spawn_detached(async move {
                                                         let _ = ipc.seek(-10.0, true).await;
                                                     });
                                                 }
@@ -1411,7 +1411,7 @@ impl MainView {
                                             cx.listener(|this, _ev, _w, _cx| {
                                                 let ipc = this.player.lock().ipc.clone();
                                                 if let Some(ipc) = ipc {
-                                                    let _ = runtime::spawn(async move {
+                                                    runtime::spawn_detached(async move {
                                                         let _ = ipc.seek(30.0, true).await;
                                                     });
                                                 }
@@ -1825,39 +1825,37 @@ impl MainView {
         match page {
             Page::Search => {
                 if state.browse.read().latest.is_empty() && !*state.browse_loading.read() {
-                    let _ = runtime::spawn(async move { load_browse(&state).await });
+                    runtime::spawn_detached(async move { load_browse(&state).await });
                 }
             }
             Page::History => {
                 if !*state.history_loading.read() {
-                    let _ = runtime::spawn(async move { load_history(&state).await });
+                    runtime::spawn_detached(async move { load_history(&state).await });
                 }
             }
             Page::Downloads => {
                 if !*state.downloads_loading.read() {
-                    let _ = runtime::spawn(async move { load_downloads(&state).await });
+                    runtime::spawn_detached(async move { load_downloads(&state).await });
                 }
             }
             Page::Favourites => {
                 if !*state.favourites_loading.read() {
-                    let _ = runtime::spawn(async move { load_favourites(&state).await });
+                    runtime::spawn_detached(async move { load_favourites(&state).await });
                 }
             }
             Page::MusicSearch => {
                 if state.music_results.read().is_empty() && !*state.music_loading.read() {
-                    let _ = runtime::spawn(async move { load_music(&state).await });
+                    runtime::spawn_detached(async move { load_music(&state).await });
                 }
             }
             Page::MusicVideoSearch => {
                 if state.music_video_results.read().is_empty() && !*state.music_video_loading.read()
                 {
-                    let _ = runtime::spawn(async move { load_music_videos(&state).await });
+                    runtime::spawn_detached(async move { load_music_videos(&state).await });
                 }
             }
-            Page::TvSearch => {
-                if state.tv_results.read().is_empty() && !*state.tv_loading.read() {
-                    let _ = runtime::spawn(async move { load_tv(&state).await });
-                }
+            Page::TvSearch if state.tv_results.read().is_empty() && !*state.tv_loading.read() => {
+                runtime::spawn_detached(async move { load_tv(&state).await });
             }
             _ => {}
         }
@@ -4093,7 +4091,7 @@ fn home_section_block(
         .on_click(move |_ev, _window, cx| {
             let state = state.clone();
             let spec = spec_for_click.clone();
-            let _ = runtime::spawn(async move { open_category(state, spec).await });
+            runtime::spawn_detached(async move { open_category(state, spec).await });
             let _ = weak_for_click.update(cx, |_, cx| cx.notify());
         });
 
@@ -4133,8 +4131,8 @@ fn virtual_tile_grid(
                 let mut row_div = div().flex().gap(px(gap)).pb(px(gap));
                 let start = row * cols;
                 let end = (start + cols).min(items.len());
-                for i in start..end {
-                    let g = items[i].clone();
+                for (i, item) in items.iter().enumerate().take(end).skip(start) {
+                    let g = item.clone();
                     let g_click = g.clone();
                     let weak = weak.clone();
                     row_div = row_div.child(

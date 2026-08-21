@@ -26,6 +26,7 @@ async fn start_test_server() -> TestServer {
             log_level: None,
         },
         torrent: streamx::config::TorrentConfig {
+            download_dir: None,
             max_connections: 200,
             sequential: true,
             seed_after_complete: true,
@@ -697,6 +698,7 @@ async fn admin_user_creation_via_config() {
             log_level: None,
         },
         torrent: streamx::config::TorrentConfig {
+            download_dir: None,
             max_connections: 200,
             sequential: true,
             seed_after_complete: true,

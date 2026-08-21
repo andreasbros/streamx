@@ -543,7 +543,7 @@ impl SparseTorrentWriter {
         delay_ms: u64,
     ) -> std::io::Result<Self> {
         let data = std::fs::read(source_path)?;
-        let piece_count = (data.len() + piece_size - 1) / piece_size;
+        let piece_count = data.len().div_ceil(piece_size);
         let schedule: Vec<PieceWrite> = (0..piece_count)
             .map(|i| PieceWrite {
                 piece_index: i,
@@ -565,7 +565,7 @@ impl SparseTorrentWriter {
         piece_size: usize,
     ) -> std::io::Result<Self> {
         let data = std::fs::read(source_path)?;
-        let piece_count = (data.len() + piece_size - 1) / piece_size;
+        let piece_count = data.len().div_ceil(piece_size);
         let schedule: Vec<PieceWrite> = (0..piece_count)
             .map(|i| PieceWrite {
                 piece_index: i,
@@ -597,7 +597,7 @@ impl SparseTorrentWriter {
         delay_ms: u64,
     ) -> std::io::Result<Self> {
         let data = std::fs::read(source_path)?;
-        let piece_count = (data.len() + piece_size - 1) / piece_size;
+        let piece_count = data.len().div_ceil(piece_size);
         let mut order: Vec<usize> = Vec::with_capacity(piece_count);
         // First piece (needed for container header)
         order.push(0);
@@ -637,7 +637,7 @@ impl SparseTorrentWriter {
         stall_ms: u64,
     ) -> std::io::Result<Self> {
         let data = std::fs::read(source_path)?;
-        let piece_count = (data.len() + piece_size - 1) / piece_size;
+        let piece_count = data.len().div_ceil(piece_size);
         let stall_at = piece_count / 3;
         let schedule: Vec<PieceWrite> = (0..piece_count)
             .map(|i| PieceWrite {

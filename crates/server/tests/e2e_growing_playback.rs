@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 // ============================================================
 
 struct GrowingServer {
+    #[allow(dead_code)]
     base_url: String,
     port: u16,
     token: String,
@@ -46,6 +47,7 @@ async fn start_server() -> GrowingServer {
             log_level: None,
         },
         torrent: streamx::config::TorrentConfig {
+            download_dir: None,
             max_connections: 10,
             sequential: true,
             seed_after_complete: false,
@@ -177,6 +179,9 @@ impl GrowingServer {
                 .to_string(),
             file_index: 0,
             file_size,
+            download_all: false,
+            files_json: None,
+            pinned: false,
             status: "downloading".to_string(),
             progress: 5.0,
             partial_path: Some(growing_path.to_string_lossy().to_string()),

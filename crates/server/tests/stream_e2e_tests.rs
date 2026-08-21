@@ -32,6 +32,7 @@ async fn start_test_server() -> TestServer {
             log_level: None,
         },
         torrent: streamx::config::TorrentConfig {
+            download_dir: None,
             max_connections: 10,
             sequential: true,
             seed_after_complete: false,
@@ -172,6 +173,12 @@ impl TestServer {
         let db_path = self.data_dir.path().join("db/streamx.db");
         let db = streamx::db::Database::open(&db_path).expect("open db");
         db.init().await.expect("init");
+        db.set_server_settings(&streamx::db::settings::ServerSettings {
+            disable_transcode: false,
+            ..Default::default()
+        })
+        .await
+        .expect("enable transcode");
 
         let dl = streamx::db::downloads::Download {
             info_hash: stream_id.to_string(),
@@ -180,6 +187,9 @@ impl TestServer {
             file_name: file_name.clone(),
             file_index: 0,
             file_size: std::fs::metadata(source_file).map(|m| m.len()).unwrap_or(0),
+            download_all: false,
+            files_json: None,
+            pinned: false,
             status: "complete".to_string(),
             progress: 100.0,
             partial_path: None,
@@ -318,11 +328,11 @@ async fn playlist_returns_hls_for_hevc() {
 }
 
 // ============================================================
-// Segment endpoint tests (fMP4 / ISO BMFF)
+// Segment endpoint tests (MPEG-TS)
 // ============================================================
 
 #[tokio::test]
-async fn variant_segment_returns_valid_fmp4() {
+async fn variant_segment_returns_valid_mpegts() {
     let server = start_test_server().await;
     let clip = hevc_720p_clip();
     if !clip.exists() {
@@ -349,7 +359,7 @@ async fn variant_segment_returns_valid_fmp4() {
     // Fetch segment
     let resp = client
         .get(format!(
-            "{}/api/stream/{stream_id}/source/segment_0000.m4s",
+            "{}/api/stream/{stream_id}/source/segment_0000.ts",
             server.base_url
         ))
         .send()
@@ -364,22 +374,17 @@ async fn variant_segment_returns_valid_fmp4() {
         .to_str()
         .unwrap();
     assert!(
-        ct.contains("mp4") || ct.contains("video") || ct.contains("octet-stream"),
+        ct.contains("mp2t") || ct.contains("video") || ct.contains("octet-stream"),
         "Wrong content type: {ct}"
     );
 
     let bytes = resp.bytes().await.expect("segment bytes");
     assert!(
-        bytes.len() > 100,
+        bytes.len() >= 188,
         "Segment too small: {} bytes",
         bytes.len()
     );
-    let box_type = &bytes[4..8];
-    assert!(
-        box_type == b"styp" || box_type == b"moof" || box_type == b"mdat" || box_type == b"ftyp",
-        "Invalid fMP4 box type: {:?}",
-        box_type
-    );
+    assert_eq!(bytes[0], 0x47, "Missing MPEG-TS sync byte");
 }
 
 // ============================================================
@@ -414,7 +419,7 @@ async fn quality_param_selects_tier() {
     // 360p directory should exist
     let resp = client
         .get(format!(
-            "{}/api/stream/{stream_id}/360p/segment_0000.m4s",
+            "{}/api/stream/{stream_id}/360p/segment_0000.ts",
             server.base_url
         ))
         .send()
@@ -430,15 +435,8 @@ async fn quality_param_selects_tier() {
 
     if status == StatusCode::OK {
         let bytes = resp.bytes().await.expect("bytes");
-        let box_type = &bytes[4..8];
-        assert!(
-            box_type == b"styp"
-                || box_type == b"moof"
-                || box_type == b"mdat"
-                || box_type == b"ftyp",
-            "Invalid fMP4 box type: {:?}",
-            box_type
-        );
+        assert!(bytes.len() >= 188, "Segment too small for MPEG-TS");
+        assert_eq!(bytes[0], 0x47, "Missing MPEG-TS sync byte");
     }
 }
 

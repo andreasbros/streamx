@@ -44,7 +44,7 @@ impl Mode {
             Mode::ThinClient => "thin-client",
         }
     }
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "thin-client" => Mode::ThinClient,
             _ => Mode::Embedded,
@@ -179,6 +179,9 @@ pub struct AppState {
     /// Data dir for the server (~/.streamx). Used in Embedded mode to
     /// resolve local playback paths directly.
     pub data_dir: PathBuf,
+    /// Torrent data root, honoring `torrent.download_dir` from the
+    /// server config file. Local playback and posters resolve here.
+    pub downloads_dir: PathBuf,
 }
 
 const DEFAULT_LOCAL_URL: &str = "http://localhost:8999";
@@ -206,6 +209,8 @@ impl AppState {
                 .unwrap_or_else(|| PathBuf::from(".streamx")),
         };
 
+        let downloads_dir = streamx::config::downloads_dir_for(&data_dir);
+
         // Load persisted session.
         let token_file = config_dir.join("token");
         let mode_file = config_dir.join("mode");
@@ -217,7 +222,7 @@ impl AppState {
             .filter(|s| !s.is_empty());
         let saved_mode = std::fs::read_to_string(&mode_file)
             .ok()
-            .map(|s| Mode::from_str(s.trim()))
+            .map(|s| Mode::parse(s.trim()))
             .unwrap_or(Mode::Embedded);
         let saved_url = std::fs::read_to_string(&url_file)
             .ok()
@@ -290,6 +295,7 @@ impl AppState {
             search_input_mirror: RwLock::new(String::new()),
             config_dir,
             data_dir,
+            downloads_dir,
         })
     }
 

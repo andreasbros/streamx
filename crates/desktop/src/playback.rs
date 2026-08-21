@@ -73,7 +73,7 @@ pub async fn resolve(
         // and survives the move transparently.
         let is_complete = matches!(status.as_deref(), Some("complete"));
         if is_complete {
-            let candidates = candidate_paths(&state.data_dir, &files, file);
+            let candidates = candidate_paths(&state.downloads_dir, &files, file);
             for cand in &candidates {
                 if cand.exists() {
                     tracing::info!(
@@ -120,7 +120,7 @@ pub async fn resolve(
 /// `complete` first, then `partial`; nested (inside a folder named after the
 /// torrent) first, then flat.
 pub fn candidate_paths(
-    data_dir: &std::path::Path,
+    downloads_dir: &std::path::Path,
     files: &[TorrentFile],
     target: &TorrentFile,
 ) -> Vec<PathBuf> {
@@ -131,8 +131,8 @@ pub fn candidate_paths(
     let common_dir = longest_common_dir(files);
     let tail = target.path.as_str();
 
-    let complete = data_dir.join("downloads").join("complete");
-    let partial = data_dir.join("downloads").join("partial");
+    let complete = downloads_dir.join("complete");
+    let partial = downloads_dir.join("partial");
 
     let mut out = Vec::new();
 

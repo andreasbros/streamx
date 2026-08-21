@@ -98,7 +98,7 @@ fn main() {
 
 fn spawn_embedded(state: &Arc<AppState>) {
     let state = state.clone();
-    let _ = runtime::spawn(async move {
+    runtime::spawn_detached(async move {
         // Honor the same admin-seeding env vars as the server binary, so
         // a fresh install can bootstrap its admin straight from the
         // desktop app: STREAMX_ADMIN_USER + STREAMX_ADMIN_PASSWORD.

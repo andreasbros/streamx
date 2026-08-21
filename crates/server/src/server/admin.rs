@@ -101,8 +101,9 @@ async fn handle_admin_ws(mut socket: WebSocket, state: AppState) {
                 // Disk stats: recompute dir sizes every 10 seconds (expensive)
                 if tick_count % 5 == 0 {
                     let data_dir = state.config.data_dir.clone();
+                    let downloads_dir = state.config.downloads_dir();
                     cached_disk = tokio::task::spawn_blocking(move || {
-                        collect_disk_stats(&data_dir)
+                        collect_disk_stats(&data_dir, &downloads_dir)
                     })
                     .await
                     .unwrap_or(cached_disk);
@@ -219,10 +220,10 @@ async fn handle_admin_ws(mut socket: WebSocket, state: AppState) {
     }
 }
 
-fn collect_disk_stats(data_dir: &std::path::Path) -> DiskStats {
+fn collect_disk_stats(data_dir: &std::path::Path, downloads_dir: &std::path::Path) -> DiskStats {
     let (total, free) = disk_space(data_dir);
     let cache_bytes = dir_size(&data_dir.join("cache"));
-    let downloads_bytes = dir_size(&data_dir.join("downloads"));
+    let downloads_bytes = dir_size(downloads_dir);
 
     DiskStats {
         total_bytes: total,

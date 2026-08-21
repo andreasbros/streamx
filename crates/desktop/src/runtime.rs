@@ -54,6 +54,22 @@ where
     async move { rx.await.expect("tokio task was cancelled before sending") }
 }
 
+/// Fire-and-forget variant of [`spawn`]: the result is discarded and
+/// nothing is left for the caller to await.
+pub fn spawn_detached<F, T>(fut: F)
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let handle = TOKIO_HANDLE
+        .get()
+        .expect("runtime::init() not called")
+        .clone();
+    handle.spawn(async move {
+        let _ = fut.await;
+    });
+}
+
 /// Block the current thread on a future running on the tokio runtime.
 /// Safe to call from GPUI's background threads (they are not tokio
 /// worker threads). Used by the AssetSource, whose `load` method is

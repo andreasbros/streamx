@@ -42,6 +42,7 @@ async fn start_e2e_server() -> E2eServer {
             log_level: None,
         },
         torrent: streamx::config::TorrentConfig {
+            download_dir: None,
             max_connections: 10,
             sequential: true,
             seed_after_complete: false,
@@ -429,6 +430,12 @@ async fn e2e_hls_playlist_from_seeded_file() {
     let db_path = server.data_dir.path().join("db/streamx.db");
     let db = streamx::db::Database::open(&db_path).expect("db");
     db.init().await.ok();
+    db.set_server_settings(&streamx::db::settings::ServerSettings {
+        disable_transcode: false,
+        ..Default::default()
+    })
+    .await
+    .expect("enable transcode");
     db.upsert_download(&streamx::db::downloads::Download {
         info_hash: stream_id.to_string(),
         magnet_uri: format!("magnet:?xt=urn:btih:{stream_id}"),
@@ -436,6 +443,9 @@ async fn e2e_hls_playlist_from_seeded_file() {
         file_name: "test.mp4".to_string(),
         file_index: 0,
         file_size: std::fs::metadata(&clip).unwrap().len(),
+        download_all: false,
+        files_json: None,
+        pinned: false,
         status: "complete".to_string(),
         progress: 100.0,
         partial_path: None,

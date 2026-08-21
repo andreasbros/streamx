@@ -34,6 +34,7 @@ async fn start_server() -> HlsBrowserServer {
             log_level: None,
         },
         torrent: streamx::config::TorrentConfig {
+            download_dir: None,
             max_connections: 10,
             sequential: true,
             seed_after_complete: false,
@@ -141,6 +142,9 @@ impl HlsBrowserServer {
             file_name: source.file_name().unwrap().to_string_lossy().into(),
             file_index: 0,
             file_size: std::fs::metadata(source).map(|m| m.len()).unwrap_or(0),
+            download_all: false,
+            files_json: None,
+            pinned: false,
             status: "complete".into(),
             progress: 100.0,
             partial_path: None,

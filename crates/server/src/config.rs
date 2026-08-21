@@ -44,6 +44,43 @@ impl AppConfig {
     pub fn provider_by_id(&self, id: u32) -> Option<&ProviderConfig> {
         self.providers.iter().find(|p| p.id == id)
     }
+
+    /// Root of torrent data (`partial/`, `complete/`, `posters/` live under it).
+    pub fn downloads_dir(&self) -> PathBuf {
+        resolve_downloads_dir(self.torrent.download_dir.as_deref(), &self.data_dir)
+    }
+}
+
+pub fn resolve_downloads_dir(download_dir: Option<&str>, data_dir: &Path) -> PathBuf {
+    match download_dir.map(str::trim) {
+        Some(dir) if !dir.is_empty() => expand_tilde(dir),
+        _ => data_dir.join("downloads"),
+    }
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
+
+/// Downloads dir for a data dir without a full config load (no directory
+/// creation). For processes that resolve paths before or without booting
+/// the server, e.g. the desktop app. Honors `STREAMX_CONFIG`.
+pub fn downloads_dir_for(data_dir: &Path) -> PathBuf {
+    let path = std::env::var("STREAMX_CONFIG")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("config.toml"));
+    let download_dir = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+        .and_then(|v| Some(v.get("torrent")?.get("download_dir")?.as_str()?.to_string()));
+    resolve_downloads_dir(download_dir.as_deref(), data_dir)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +97,10 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TorrentConfig {
+    /// Where torrent data lands. Relative to nothing: absolute path or
+    /// `~/...`. Unset means `<data_dir>/downloads`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_dir: Option<String>,
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
     #[serde(default = "default_true")]
@@ -207,6 +248,7 @@ fn default_server() -> ServerConfig {
 
 fn default_torrent() -> TorrentConfig {
     TorrentConfig {
+        download_dir: None,
         max_connections: default_max_connections(),
         sequential: true,
         seed_after_complete: true,
@@ -327,6 +369,7 @@ bind = "127.0.0.1"
 open_browser = false
 
 [torrent]
+# download_dir = "~/.streamx/downloads"
 max_connections = 200
 sequential = true
 seed_after_complete = true
@@ -526,14 +569,10 @@ fn ensure_directories(config: &AppConfig) -> Result<()> {
     let cache_dir = config.data_dir.join("cache");
     std::fs::create_dir_all(&cache_dir).context(error::IoSnafu)?;
 
-    let partial_dir = config.data_dir.join("downloads").join("partial");
-    std::fs::create_dir_all(&partial_dir).context(error::IoSnafu)?;
-
-    let complete_dir = config.data_dir.join("downloads").join("complete");
-    std::fs::create_dir_all(&complete_dir).context(error::IoSnafu)?;
-
-    let posters_dir = config.data_dir.join("downloads").join("posters");
-    std::fs::create_dir_all(&posters_dir).context(error::IoSnafu)?;
+    let downloads_dir = config.downloads_dir();
+    for sub in ["partial", "complete", "posters"] {
+        std::fs::create_dir_all(downloads_dir.join(sub)).context(error::IoSnafu)?;
+    }
 
     let dht_dir = config.data_dir.join("dht");
     std::fs::create_dir_all(&dht_dir).context(error::IoSnafu)?;

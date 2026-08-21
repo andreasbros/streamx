@@ -236,9 +236,9 @@ fn play_target_display() {
 
 #[test]
 fn mode_roundtrip() {
-    assert_eq!(Mode::from_str("embedded"), Mode::Embedded);
-    assert_eq!(Mode::from_str("thin-client"), Mode::ThinClient);
-    assert_eq!(Mode::from_str("unknown"), Mode::Embedded); // default
+    assert_eq!(Mode::parse("embedded"), Mode::Embedded);
+    assert_eq!(Mode::parse("thin-client"), Mode::ThinClient);
+    assert_eq!(Mode::parse("unknown"), Mode::Embedded); // default
     assert_eq!(Mode::Embedded.as_str(), "embedded");
     assert_eq!(Mode::ThinClient.as_str(), "thin-client");
 }
@@ -677,7 +677,7 @@ fn global_scale_grows_ui_and_tiles_together() {
     // Small window: modest shrink, never below the floor.
     with_viewport(800.0, || {
         let s = ui_scale();
-        assert!(s < 1.0 && s >= 0.85);
+        assert!((0.85..1.0).contains(&s));
         let l = tile_layout(760.0);
         assert!(l.tile_w >= TILE_MIN_W * s - 0.01);
     });

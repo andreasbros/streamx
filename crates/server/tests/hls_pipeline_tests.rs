@@ -1,6 +1,6 @@
 /// Integration tests for the HLS pipeline (HlsManager + TranscodePipeline).
 /// Tests the full flow: start_stream -> generate_playlist -> get_segment.
-/// Segments are fMP4 (.m4s) with an init.mp4 init segment.
+/// Segments are MPEG-TS (.ts).
 mod common;
 
 use common::*;
@@ -78,20 +78,14 @@ async fn passthrough_h264_mp4() {
         PlaylistResponse::Redirect(_) => panic!("Expected content, got redirect"),
     }
 
-    // Verify segment can be fetched (fMP4 .m4s)
     let seg = mgr
-        .get_segment(stream_id, "segment_0000.m4s")
+        .get_segment(stream_id, "segment_0000.ts")
         .await
         .expect("get_segment");
     assert!(seg.is_some(), "Segment 0 missing");
     let data = seg.unwrap();
-    assert!(data.len() > 8, "Segment too small for fMP4 box header");
-    let box_type = &data[4..8];
-    assert!(
-        box_type == b"styp" || box_type == b"moof" || box_type == b"ftyp",
-        "Invalid fMP4 box type: {:?}",
-        std::str::from_utf8(box_type).unwrap_or("<non-utf8>")
-    );
+    assert!(data.len() >= 188, "Segment too small for MPEG-TS");
+    assert_eq!(data[0], 0x47, "Missing MPEG-TS sync byte");
 
     mgr.cleanup(stream_id).await.expect("cleanup");
     assert!(!cache_dir.join(stream_id).exists(), "Cache not cleaned up");
@@ -108,7 +102,7 @@ async fn transcode_hevc_source_copies_video() {
         eprintln!("SKIP: fixture not generated");
         return;
     }
-    let (mgr, cache_dir) = create_hls_manager("hevc_source_copy").await;
+    let (mgr, _cache_dir) = create_hls_manager("hevc_source_copy").await;
     let stream_id = "test_hevc_source";
 
     mgr.start_stream(stream_id, clip.to_str().unwrap(), "source")
@@ -138,24 +132,18 @@ async fn transcode_hevc_source_copies_video() {
         PlaylistResponse::Redirect(_) => panic!("Expected content, got redirect"),
     }
 
-    // Verify variant segment (fMP4 .m4s)
     let seg = mgr
-        .get_variant_segment(stream_id, "source", "segment_0000.m4s")
+        .get_variant_segment(stream_id, "source", "segment_0000.ts")
         .await
         .expect("get_variant_segment");
     assert!(seg.is_some(), "Variant segment missing");
     let data = seg.unwrap();
-    assert!(data.len() > 8, "Segment too small for fMP4 box header");
-    let box_type = &data[4..8];
-    assert!(
-        box_type == b"styp" || box_type == b"moof" || box_type == b"ftyp",
-        "Invalid fMP4 box type: {:?}",
-        std::str::from_utf8(box_type).unwrap_or("<non-utf8>")
-    );
+    assert!(data.len() >= 188, "Segment too small for MPEG-TS");
+    assert_eq!(data[0], 0x47, "Missing MPEG-TS sync byte");
 
     // Verify segment cache works (second call returns same data)
     let seg2 = mgr
-        .get_variant_segment(stream_id, "source", "segment_0000.m4s")
+        .get_variant_segment(stream_id, "source", "segment_0000.ts")
         .await
         .expect("cached get");
     assert_eq!(
@@ -198,7 +186,7 @@ async fn transcode_hevc_720p() {
     }
 
     let seg = mgr
-        .get_variant_segment(stream_id, "720p", "segment_0000.m4s")
+        .get_variant_segment(stream_id, "720p", "segment_0000.ts")
         .await
         .expect("get segment");
     assert!(seg.is_some(), "720p segment missing");

@@ -102,7 +102,7 @@ impl PosterAssetSource {
         let state = self.state.clone();
         let client = self.client().clone();
         let path = path.to_string();
-        let _ = runtime::spawn(async move {
+        runtime::spawn_detached(async move {
             let sem = FETCH_SEMAPHORE
                 .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FETCHES)))
                 .clone();
@@ -177,8 +177,7 @@ impl PosterAssetSource {
         if file.contains("..") || file.contains('/') {
             anyhow::bail!("invalid poster filename");
         }
-        let (_, data_dir) = self.ensure_config();
-        let local = data_dir.join("downloads").join("posters").join(file);
+        let local = self.state.downloads_dir.join("posters").join(file);
         if let Ok(bytes) = std::fs::read(&local) {
             return Ok(Some(bytes));
         }

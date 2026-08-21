@@ -195,7 +195,7 @@ fn run_command(cmd: &cli::Command, config: &config::AppConfig) -> Result<()> {
     match cmd {
         cli::Command::Clean => {
             let cache_dir = data_dir.join("cache");
-            let downloads_dir = data_dir.join("downloads");
+            let downloads_dir = config.downloads_dir();
 
             if cache_dir.exists() {
                 std::fs::remove_dir_all(&cache_dir).map_err(|e| error::Error::Io { source: e })?;

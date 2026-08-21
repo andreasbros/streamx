@@ -222,10 +222,10 @@ pub async fn create_stream(
         // Resolve proxy URLs back to absolute upstream URLs for downloading
         let download_url = proxy::resolve_proxy_url(&url, &state.config.providers);
         let db = state.db.clone();
-        let data_dir = state.config.data_dir.clone();
+        let downloads_dir = state.config.downloads_dir();
         let hash = info_hash.clone();
         tokio::spawn(async move {
-            let posters_dir = data_dir.join("downloads").join("posters");
+            let posters_dir = downloads_dir.join("posters");
             if let Err(e) = tokio::fs::create_dir_all(&posters_dir).await {
                 tracing::warn!(info_hash = %hash, "Failed to create posters dir: {e}");
                 return;
@@ -387,7 +387,7 @@ pub async fn cleanup_stream(state: &AppState, id: &str) -> std::result::Result<(
     }
 
     if let Some(dl) = dl {
-        let downloads_dir = state.config.data_dir.join("downloads");
+        let downloads_dir = state.config.downloads_dir();
         let partial_dir = downloads_dir.join("partial");
         let complete_dir = downloads_dir.join("complete");
 
@@ -951,12 +951,7 @@ pub async fn serve_poster(
         });
     }
 
-    let poster_path = state
-        .config
-        .data_dir
-        .join("downloads")
-        .join("posters")
-        .join(&filename);
+    let poster_path = state.config.downloads_dir().join("posters").join(&filename);
 
     if !poster_path.exists() {
         return Err(Error::NotFound {

@@ -151,8 +151,10 @@ impl TorrentEngine {
         db: Database,
         socks5: Option<String>,
     ) -> Result<Self> {
-        let partial_dir = data_dir.join("downloads").join("partial");
-        let complete_dir = data_dir.join("downloads").join("complete");
+        let downloads_dir =
+            crate::config::resolve_downloads_dir(config.download_dir.as_deref(), data_dir);
+        let partial_dir = downloads_dir.join("partial");
+        let complete_dir = downloads_dir.join("complete");
         let dht_dir = data_dir.join("dht");
 
         std::fs::create_dir_all(&partial_dir).map_err(|e| Error::Torrent {
