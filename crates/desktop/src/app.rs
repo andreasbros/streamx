@@ -973,14 +973,15 @@ impl MainView {
             // rows build tiles, so wheel/trackpad scrolling stays fluid.
             let specs = category_specs();
             let sections: Vec<(crate::state::CategorySpec, Vec<Arc<_>>)> = vec![
-                (specs[0].clone(), browse.latest.clone()),
-                (specs[1].clone(), browse.popular.clone()),
-                (specs[2].clone(), browse.top_rated.clone()),
-                (specs[3].clone(), browse.action.clone()),
-                (specs[4].clone(), browse.comedy.clone()),
-                (specs[5].clone(), browse.thriller.clone()),
-                (specs[6].clone(), browse.scifi.clone()),
-                (specs[7].clone(), browse.horror.clone()),
+                (specs[0].clone(), browse.this_year.clone()),
+                (specs[1].clone(), browse.latest.clone()),
+                (specs[2].clone(), browse.popular.clone()),
+                (specs[3].clone(), browse.top_rated.clone()),
+                (specs[4].clone(), browse.action.clone()),
+                (specs[5].clone(), browse.comedy.clone()),
+                (specs[6].clone(), browse.thriller.clone()),
+                (specs[7].clone(), browse.scifi.clone()),
+                (specs[8].clone(), browse.horror.clone()),
             ];
             let state = self.state.clone();
             let weak = cx.entity().downgrade();
@@ -3666,7 +3667,16 @@ async fn load_browse(state: &Arc<AppState>) {
     *state.browse_loading.write() = true;
     state.mark_dirty();
     let client: Client = state.client.read().clone();
-    let sections: [(&str, BrowseParams); 8] = [
+    let sections: [(&str, BrowseParams); 9] = [
+        (
+            "this_year",
+            BrowseParams {
+                sort_by: Some("download_count".into()),
+                query_term: Some(current_year_title().into()),
+                limit: Some(24),
+                ..Default::default()
+            },
+        ),
         (
             "latest",
             BrowseParams {
@@ -3752,6 +3762,7 @@ async fn load_browse(state: &Arc<AppState>) {
             let rows: Vec<std::sync::Arc<streamx_api::types::SearchResultGroup>> =
                 rows.into_iter().map(std::sync::Arc::new).collect();
             match name {
+                "this_year" => out.this_year = rows,
                 "latest" => out.latest = rows,
                 "popular" => out.popular = rows,
                 "top_rated" => out.top_rated = rows,
@@ -3954,7 +3965,15 @@ const SURROUND_DEMOS: &[SurroundDemo] = &[
 
 /// The eight home categories, shared by the home rows and the category
 /// drill-down page.
-pub fn category_specs() -> [crate::state::CategorySpec; 8] {
+/// The current year as a leaked static string: browse sections and
+/// category titles want `&'static str`, and the year changes at most
+/// once per process lifetime.
+fn current_year_title() -> &'static str {
+    static YEAR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    YEAR.get_or_init(|| chrono::Utc::now().format("%Y").to_string())
+}
+
+pub fn category_specs() -> [crate::state::CategorySpec; 9] {
     use streamx_api::client::BrowseParams;
     let p = |sort: &str, genre: Option<&str>, min: Option<u32>| BrowseParams {
         sort_by: Some(sort.into()),
@@ -3963,6 +3982,14 @@ pub fn category_specs() -> [crate::state::CategorySpec; 8] {
         ..Default::default()
     };
     [
+        crate::state::CategorySpec {
+            title: current_year_title(),
+            params: streamx_api::client::BrowseParams {
+                sort_by: Some("download_count".into()),
+                query_term: Some(current_year_title().into()),
+                ..Default::default()
+            },
+        },
         crate::state::CategorySpec {
             title: "Latest",
             params: p("date_added", None, None),

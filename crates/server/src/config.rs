@@ -571,7 +571,16 @@ fn ensure_directories(config: &AppConfig) -> Result<()> {
 
     let downloads_dir = config.downloads_dir();
     for sub in ["partial", "complete", "posters"] {
-        std::fs::create_dir_all(downloads_dir.join(sub)).context(error::IoSnafu)?;
+        if let Err(e) = std::fs::create_dir_all(downloads_dir.join(sub)) {
+            return Err(Error::Config {
+                message: format!(
+                    "Downloads directory {} is unavailable ({e}). If it lives \
+                     on an external volume, make sure the drive is mounted, \
+                     then restart.",
+                    downloads_dir.display()
+                ),
+            });
+        }
     }
 
     let dht_dir = config.data_dir.join("dht");

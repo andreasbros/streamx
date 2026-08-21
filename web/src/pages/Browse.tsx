@@ -12,7 +12,9 @@ import { Button } from "@radix-ui/themes";
 import { api } from "../api/client";
 import type { SearchResultGroup } from "../api/types";
 
-const CATEGORIES: Record<string, { title: string; sort_by: string; genre?: string; minimum_rating?: number }> = {
+const THIS_YEAR = String(new Date().getFullYear());
+const CATEGORIES: Record<string, { title: string; sort_by: string; query_term?: string; genre?: string; minimum_rating?: number }> = {
+  "this-year": { title: THIS_YEAR, sort_by: "download_count", query_term: THIS_YEAR },
   latest: { title: "Latest", sort_by: "date_added" },
   popular: { title: "Most Popular", sort_by: "download_count" },
   "top-rated": { title: "Top Rated", sort_by: "rating", minimum_rating: 8 },
@@ -95,6 +97,7 @@ export function Browse() {
     try {
       const res = await api.browse({
         sort_by: config.sort_by,
+        query_term: config.query_term,
         genre: config.genre,
         minimum_rating: config.minimum_rating,
         limit: 20,

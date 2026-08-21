@@ -76,6 +76,7 @@ const POSTER_RETRY_MAX_ATTEMPTS: u32 = 6;
 /// typing sluggish).
 #[derive(Debug, Default, Clone)]
 pub struct BrowseData {
+    pub this_year: Vec<Arc<SearchResultGroup>>,
     pub latest: Vec<Arc<SearchResultGroup>>,
     pub popular: Vec<Arc<SearchResultGroup>>,
     pub top_rated: Vec<Arc<SearchResultGroup>>,

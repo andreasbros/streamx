@@ -363,6 +363,7 @@ impl SearchProvider {
     pub async fn browse(
         &self,
         sort_by: &str,
+        query_term: Option<&str>,
         genre: Option<&str>,
         minimum_rating: Option<u32>,
         limit: u32,
@@ -393,6 +394,9 @@ impl SearchProvider {
         if let Some(r) = minimum_rating {
             rating_str = r.to_string();
             params.push(("minimum_rating", &rating_str));
+        }
+        if let Some(q) = query_term {
+            params.push(("query_term", q));
         }
         if let Some(g) = genre {
             params.push(("genre", g));

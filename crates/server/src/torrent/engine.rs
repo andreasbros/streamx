@@ -420,6 +420,17 @@ impl TorrentEngine {
                 );
                 return Ok(());
             }
+            if !self.downloads_root_available() {
+                tracing::warn!(
+                    info_hash = %info_hash,
+                    title = %dl.title,
+                    "downloads volume unavailable; refusing to re-activate a complete download"
+                );
+                return Err(Error::Torrent {
+                    message: "Downloads volume is unavailable; mount the drive and retry"
+                        .to_string(),
+                });
+            }
             tracing::warn!(
                 info_hash = %info_hash,
                 title = %dl.title,
@@ -659,6 +670,16 @@ impl TorrentEngine {
 
     pub fn complete_dir(&self) -> &PathBuf {
         &self.complete_dir
+    }
+
+    /// False when the downloads root itself is gone — e.g. an external
+    /// volume that unmounted. Callers must then treat missing files as
+    /// "volume offline", never as "user deleted them".
+    pub fn downloads_root_available(&self) -> bool {
+        self.complete_dir
+            .parent()
+            .map(|p| p.exists())
+            .unwrap_or(false)
     }
 
     fn spawn_add_torrent(

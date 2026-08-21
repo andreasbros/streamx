@@ -6913,6 +6913,7 @@ name = "streamx-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "directories",
  "gpui",
  "once_cell",

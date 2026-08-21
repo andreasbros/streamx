@@ -301,6 +301,7 @@ impl Api for LocalApi {
     async fn browse(&self, p: &BrowseParams) -> ClientResult<Vec<SearchResultGroup>> {
         let components = self.components.clone();
         let sort_by = p.sort_by.clone().unwrap_or_else(|| "date_added".into());
+        let query_term = p.query_term.clone();
         let genre = p.genre.clone();
         let minimum_rating = p.minimum_rating;
         let limit = p.limit.unwrap_or(10).min(20);
@@ -308,7 +309,14 @@ impl Api for LocalApi {
         self.run(async move {
             components
                 .search_provider
-                .browse(&sort_by, genre.as_deref(), minimum_rating, limit, page)
+                .browse(
+                    &sort_by,
+                    query_term.as_deref(),
+                    genre.as_deref(),
+                    minimum_rating,
+                    limit,
+                    page,
+                )
                 .await
                 .map_err(err_to_client)
         })

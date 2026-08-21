@@ -599,7 +599,9 @@ export function Search() {
   });
 
   // Browse sections
+  const currentYear = String(new Date().getFullYear());
   const browseSections = [
+    { title: currentYear, category: "this-year", params: { sort_by: "download_count", query_term: currentYear } },
     { title: "Latest", category: "latest", params: { sort_by: "date_added" } },
     { title: "Most Popular", category: "popular", params: { sort_by: "download_count" } },
     { title: "Top Rated", category: "top-rated", params: { sort_by: "rating", minimum_rating: 8 } },
@@ -609,7 +611,11 @@ export function Search() {
     { title: "Sci-Fi", category: "scifi", params: { sort_by: "download_count", genre: "sci-fi" } },
     { title: "Horror", category: "horror", params: { sort_by: "download_count", genre: "horror" } },
   ];
-  const BROWSE_CACHE_KEY = "streamx_browse_cache";
+  // Key derives from the section definitions, so changing categories or
+  // sort params automatically invalidates stale caches.
+  const BROWSE_CACHE_KEY = `streamx_browse_cache_${browseSections
+    .map((s) => `${s.category}:${JSON.stringify(s.params)}`)
+    .join("|")}`;
   const BROWSE_CACHE_TTL = 3600000; // 1 hour
 
   const [browseData, setBrowseData] = useState<Record<string, SearchResultGroup[]>>(() => {
@@ -645,8 +651,7 @@ export function Search() {
     if (saved && saved.trim() && !isMagnetLink(saved) && results.length === 0) {
       search(saved);
     }
-    const hasContent = Object.values(browseData).some((arr) => arr.length > 0);
-    if (!hasContent) fetchBrowse();
+    fetchBrowse();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleClear = () => {

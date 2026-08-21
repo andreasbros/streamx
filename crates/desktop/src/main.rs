@@ -119,6 +119,8 @@ fn spawn_embedded(state: &Arc<AppState>) {
             Ok(c) => c,
             Err(e) => {
                 tracing::error!(error = %e, "embedded server: failed to load config");
+                *state.connection_error.write() = Some(format!("Server failed to start: {e}"));
+                state.mark_dirty();
                 return;
             }
         };

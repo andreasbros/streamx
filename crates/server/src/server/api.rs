@@ -56,6 +56,7 @@ pub async fn browse(
         .get("sort_by")
         .map(|s| s.as_str())
         .unwrap_or("date_added");
+    let query_term = params.get("query_term").map(|s| s.as_str());
     let genre = params.get("genre").map(|s| s.as_str());
     let minimum_rating = params.get("minimum_rating").and_then(|s| s.parse().ok());
     let limit = params
@@ -70,7 +71,7 @@ pub async fn browse(
 
     let mut results = state
         .search_provider
-        .browse(sort_by, genre, minimum_rating, limit, page)
+        .browse(sort_by, query_term, genre, minimum_rating, limit, page)
         .await?;
     filter_web_only(&state, &mut results).await;
 
@@ -374,6 +375,14 @@ pub async fn delete_stream(
 /// torrent put on disk (manifest files, torrent folders, legacy paths)
 /// plus the downloaded poster. DB rows are the caller's concern.
 pub async fn cleanup_stream(state: &AppState, id: &str) -> std::result::Result<(), Error> {
+    // With the downloads volume offline, deleting would drop DB rows
+    // while the files survive on the unmounted drive — orphaning them.
+    if !state.torrent_engine.downloads_root_available() {
+        return Err(Error::BadRequest {
+            message: "Downloads volume is unavailable; mount the drive before deleting".to_string(),
+        });
+    }
+
     // Never delete a stream out from under a connected viewer: any
     // client that pulled data in the last 30s blocks the cleanup.
     if state.torrent_engine.watched_within(id, 30) {

@@ -109,9 +109,10 @@ class ApiClient {
     });
   }
 
-  async browse(params: { sort_by?: string; genre?: string; minimum_rating?: number; limit?: number; page?: number }): Promise<SearchResponse> {
+  async browse(params: { sort_by?: string; query_term?: string; genre?: string; minimum_rating?: number; limit?: number; page?: number }): Promise<SearchResponse> {
     const q = new URLSearchParams();
     if (params.sort_by) q.set("sort_by", params.sort_by);
+    if (params.query_term) q.set("query_term", params.query_term);
     if (params.genre) q.set("genre", params.genre);
     if (params.minimum_rating) q.set("minimum_rating", String(params.minimum_rating));
     if (params.limit) q.set("limit", String(params.limit));

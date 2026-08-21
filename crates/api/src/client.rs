@@ -36,6 +36,9 @@ pub type ClientResult<T> = Result<T, ClientError>;
 #[derive(Debug, Clone, Default)]
 pub struct BrowseParams {
     pub sort_by: Option<String>,
+    /// Free-text filter passed to the catalog provider; a year string
+    /// restricts results to that release year.
+    pub query_term: Option<String>,
     pub genre: Option<String>,
     pub minimum_rating: Option<u32>,
     pub limit: Option<u32>,
@@ -356,6 +359,9 @@ impl Api for HttpClient {
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(ref v) = p.sort_by {
             params.push(("sort_by", v.clone()));
+        }
+        if let Some(ref v) = p.query_term {
+            params.push(("query_term", v.clone()));
         }
         if let Some(ref v) = p.genre {
             params.push(("genre", v.clone()));
