@@ -99,6 +99,10 @@ fn main() {
 fn spawn_embedded(state: &Arc<AppState>) {
     let state = state.clone();
     let _ = runtime::spawn(async move {
+        // Honor the same admin-seeding env vars as the server binary, so
+        // a fresh install can bootstrap its admin straight from the
+        // desktop app: STREAMX_ADMIN_USER + STREAMX_ADMIN_PASSWORD.
+        let env_opt = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let cli = streamx::cli::Cli {
             command: None,
             port: None,
@@ -108,8 +112,8 @@ fn spawn_embedded(state: &Arc<AppState>) {
             log_level: None,
             log_dir: None,
             open: false,
-            admin_user: None,
-            admin_password: None,
+            admin_user: env_opt("STREAMX_ADMIN_USER"),
+            admin_password: env_opt("STREAMX_ADMIN_PASSWORD"),
         };
         let config = match streamx::config::load_config(&cli) {
             Ok(c) => c,
