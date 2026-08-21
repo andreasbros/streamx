@@ -182,6 +182,8 @@ pub struct AppState {
     /// Torrent data root, honoring `torrent.download_dir` from the
     /// server config file. Local playback and posters resolve here.
     pub downloads_dir: PathBuf,
+    /// Two-step delete: info_hash awaiting a confirming second click.
+    pub confirm_delete: RwLock<Option<String>>,
 }
 
 const DEFAULT_LOCAL_URL: &str = "http://localhost:8999";
@@ -296,6 +298,7 @@ impl AppState {
             config_dir,
             data_dir,
             downloads_dir,
+            confirm_delete: RwLock::new(None),
         })
     }
 
@@ -363,6 +366,7 @@ impl AppState {
     /// that page; the stack is capped so long sessions can't grow it
     /// without bound.
     pub fn navigate(&self, page: Page) {
+        *self.confirm_delete.write() = None;
         {
             let mut stack = self.page_stack.write();
             if stack.last() == Some(&page) {

@@ -9,6 +9,16 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  test: {
+    // Playwright specs live in tests/ too; they run via `pnpm test:e2e`.
+    // Vitest only owns the four unit specs.
+    include: [
+      "tests/auth.spec.ts",
+      "tests/debug-log.spec.ts",
+      "tests/hooks.spec.ts",
+      "tests/utils.spec.ts",
+    ],
+  },
   server: {
     port: 9000,
     host: "0.0.0.0",

@@ -136,6 +136,27 @@ pub fn secondary_button(
         .child(div().child(label.into()))
 }
 
+pub fn danger_button(
+    id: impl Into<SharedString>,
+    label: impl Into<SharedString>,
+    theme: &Theme,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id.into())
+        .px(px(theme.space_4()))
+        .py(px(theme.space_2()))
+        .rounded(px(theme.radius_md()))
+        .bg(theme.bg_elevated())
+        .text_color(theme.error())
+        .text_size(px(theme.fs_2()))
+        .font_weight(FontWeight::MEDIUM)
+        .border_1()
+        .border_color(theme.error())
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.error()).text_color(theme.fg_on_accent()))
+        .child(div().child(label.into()))
+}
+
 /// Section header with title and optional subtitle row.
 pub fn section_title(text: impl Into<SharedString>, theme: &Theme) -> gpui::Div {
     div()

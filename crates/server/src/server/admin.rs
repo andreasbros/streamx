@@ -221,7 +221,13 @@ async fn handle_admin_ws(mut socket: WebSocket, state: AppState) {
 }
 
 fn collect_disk_stats(data_dir: &std::path::Path, downloads_dir: &std::path::Path) -> DiskStats {
-    let (total, free) = disk_space(data_dir);
+    // Capacity of the volume movies actually land on. Falls back to the
+    // data dir volume when the downloads volume is unavailable
+    // (e.g. external drive unmounted).
+    let (total, free) = match disk_space(downloads_dir) {
+        (0, 0) => disk_space(data_dir),
+        space => space,
+    };
     let cache_bytes = dir_size(&data_dir.join("cache"));
     let downloads_bytes = dir_size(downloads_dir);
 

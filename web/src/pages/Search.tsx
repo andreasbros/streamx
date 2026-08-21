@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { NotWebBadge } from "../components/NotWebBadge";
 import { useNavigate } from "react-router-dom";
 import {
   Box,
@@ -317,14 +318,10 @@ function GroupCard({
                     py="2"
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (!notWebCompatible) onPlayVariant(variant, group);
-                    }}
-                    onDoubleClick={(e) => {
-                      e.stopPropagation();
-                      if (notWebCompatible) onPlayVariant(variant, group);
+                      onPlayVariant(variant, group);
                     }}
                     style={{
-                      cursor: notWebCompatible ? "default" : "pointer",
+                      cursor: "pointer",
                       borderTop:
                         idx > 0
                           ? "1px solid var(--gray-a4)"
@@ -361,15 +358,7 @@ function GroupCard({
                       </Text>
                     )}
                     {notWebCompatible ? (
-                      <Badge
-                        size="1"
-                        variant="soft"
-                        color="gray"
-                        style={{ flexShrink: 0 }}
-                        title="Server transcoding is disabled; double-click to try direct playback"
-                      >
-                        Not WEB compatible
-                      </Badge>
+                      <NotWebBadge />
                     ) : (
                       <PlayIcon width={14} height={14} style={{ flexShrink: 0 }} />
                     )}

@@ -198,16 +198,16 @@ async fn basic_stream_lifecycle() {
         .unwrap();
     assert_eq!(delete_resp.status(), StatusCode::OK);
     let delete_body: Value = delete_resp.json().await.unwrap();
-    assert_eq!(delete_body["status"], "stopped");
+    assert_eq!(delete_body["status"], "deleted");
 
-    // GET /api/stream/:id still returns the download (DB persists it)
+    // GET /api/stream/:id no longer finds it (files and records removed)
     let still_resp = client
         .get(format!("{}/api/stream/{stream_id}", server.base_url))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
         .unwrap();
-    assert_eq!(still_resp.status(), StatusCode::OK);
+    assert_eq!(still_resp.status(), StatusCode::NOT_FOUND);
 }
 
 // ---------------------------------------------------------------------------

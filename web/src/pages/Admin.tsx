@@ -273,16 +273,17 @@ function ServerSettingsCard() {
         <Text size="3" weight="bold">Playback & Search</Text>
         <Flex align="center" justify="between" gap="3">
           <Flex direction="column" gap="0" style={{ flex: 1 }}>
-            <Text size="2">Disable server-side transcoding</Text>
+            <Text size="2">Enable WEB Transcode</Text>
             <Text size="1" color="gray">
-              Non-WEB releases lose their Play button (still downloadable);
-              WEB releases play directly in the browser without transcoding.
+              Transcode non-WEB releases for browser playback. Off by default:
+              non-WEB releases show a crossed-out WEB badge (still downloadable);
+              WEB releases always play directly.
             </Text>
           </Flex>
           <Switch
-            checked={settings?.disable_transcode ?? true}
+            checked={settings ? !settings.disable_transcode : false}
             disabled={!settings || saving}
-            onCheckedChange={(v) => toggle({ disable_transcode: v })}
+            onCheckedChange={(v) => toggle({ disable_transcode: !v })}
           />
         </Flex>
         <Flex align="center" justify="between" gap="3">

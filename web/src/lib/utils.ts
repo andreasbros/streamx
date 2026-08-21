@@ -43,6 +43,16 @@ export function infoHashFromMagnet(magnet: string): string | null {
   return hash ? hash.toLowerCase() : null;
 }
 
+export function displayNameFromMagnet(magnet: string): string | null {
+  const raw = magnet.match(/[?&]dn=([^&]+)/)?.[1];
+  if (!raw) return null;
+  try {
+    return decodeURIComponent(raw.replace(/\+/g, " "));
+  } catch {
+    return raw;
+  }
+}
+
 export function isMagnetLink(text: string): boolean {
   return text.trim().startsWith("magnet:");
 }

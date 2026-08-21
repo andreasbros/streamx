@@ -134,6 +134,20 @@ impl Database {
         Ok(())
     }
 
+    /// Terminal transition: status and progress land in one statement so
+    /// a finished download can never linger below 100%.
+    pub async fn mark_download_complete(&self, info_hash: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.connection().lock().await;
+        conn.execute(
+            "UPDATE downloads SET status = 'complete', progress = 100.0, updated_at = ?1 \
+             WHERE info_hash = ?2",
+            rusqlite::params![now, info_hash],
+        )
+        .context(error::DatabaseSnafu)?;
+        Ok(())
+    }
+
     pub async fn update_download_progress(
         &self,
         info_hash: &str,

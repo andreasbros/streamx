@@ -8,6 +8,20 @@ use axum::response::{Html, IntoResponse, Response};
 pub const BUILD_HASH: &str = env!("STREAMX_BUILD_HASH");
 pub const VERSION: &str = env!("STREAMX_VERSION");
 
+fn cache_policy(path: &str) -> &'static str {
+    // Releases must never serve stale UI: html/css/js always
+    // revalidate. Media and icons keep the immutable cache.
+    if path.ends_with(".html")
+        || path.ends_with(".css")
+        || path.ends_with(".js")
+        || path.ends_with(".mjs")
+    {
+        "no-cache, no-store"
+    } else {
+        "public, max-age=31536000, immutable"
+    }
+}
+
 pub async fn static_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -42,10 +56,7 @@ pub async fn static_handler(
                             StatusCode::OK,
                             [
                                 (header::CONTENT_TYPE, mime),
-                                (
-                                    header::CACHE_CONTROL,
-                                    "public, max-age=31536000, immutable".to_string(),
-                                ),
+                                (header::CACHE_CONTROL, cache_policy(candidate).to_string()),
                             ],
                             content.data.to_vec(),
                         )
@@ -70,10 +81,7 @@ pub async fn static_handler(
                         StatusCode::OK,
                         [
                             (header::CONTENT_TYPE, mime),
-                            (
-                                header::CACHE_CONTROL,
-                                "public, max-age=31536000, immutable".to_string(),
-                            ),
+                            (header::CACHE_CONTROL, cache_policy(path).to_string()),
                         ],
                         content.data.to_vec(),
                     )
@@ -89,12 +97,7 @@ pub async fn static_handler(
             .first_or_octet_stream()
             .to_string();
 
-        // index.html: no cache (must always be fresh, triggers versioned asset URLs)
-        let cache = if path == "index.html" {
-            "no-cache, no-store".to_string()
-        } else {
-            "public, max-age=31536000, immutable".to_string()
-        };
+        let cache = cache_policy(path).to_string();
 
         return (
             StatusCode::OK,

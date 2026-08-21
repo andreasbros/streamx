@@ -252,7 +252,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, Props>(
           const player = mod.default(videoEl!, {
             controls: true,
             responsive: true,
-            fluid: true,
+            // The parent Box is a fixed 16:9 frame with overflow hidden;
+            // fluid mode adds its own aspect-ratio height and pushes the
+            // control bar past the clip edge. fill sizes to the parent.
+            fill: true,
             bigPlayButton: false,
             preload: "auto",
             liveui: isHls,

@@ -91,25 +91,41 @@ impl LocalApi {
     /// Embedded mode is native/local: an *expired* token with a valid
     /// signature identifies the same local user, so instead of failing
     /// the call it is transparently renewed for a fresh session.
-    fn user_id(&self) -> ClientResult<String> {
-        let token = self.http.token().ok_or(ClientError::Unauthorized)?;
-        let secret = &self.components.config.auth.jwt_secret;
-        match validate_jwt(&token, secret) {
-            Ok(claims) => Ok(claims.user_id),
-            Err(_) => {
-                let claims = crate::server::auth::validate_jwt_allow_expired(&token, secret)
-                    .map_err(err_to_client)?;
+    async fn user_id(&self) -> ClientResult<String> {
+        let secret = self.components.config.auth.jwt_secret.clone();
+        if let Some(token) = self.http.token() {
+            if let Ok(claims) = validate_jwt(&token, &secret) {
+                return Ok(claims.user_id);
+            }
+            if let Ok(claims) = crate::server::auth::validate_jwt_allow_expired(&token, &secret) {
                 let hours = self.session_hours()?;
                 let is_admin = matches!(claims.role, crate::server::auth::Role::Admin);
                 if let Ok(fresh) =
-                    create_jwt(&claims.user_id, &claims.username, is_admin, secret, hours)
+                    create_jwt(&claims.user_id, &claims.username, is_admin, &secret, hours)
                 {
                     tracing::info!("embedded session token expired; renewed in place");
                     self.http.set_token(Some(fresh));
                 }
-                Ok(claims.user_id)
+                return Ok(claims.user_id);
             }
         }
+        // No token, or one signed by another server (e.g. a thin-client
+        // session). Embedded mode is native/local: identify as the local
+        // default user and mint a fresh session instead of failing.
+        let db = self.components.database.clone();
+        let user = self
+            .handle
+            .spawn(async move { db.local_default_user().await })
+            .await
+            .map_err(|e| ClientError::Backend(format!("join error: {e}")))?
+            .map_err(err_to_client)?
+            .ok_or(ClientError::Unauthorized)?;
+        let hours = self.session_hours()?;
+        if let Ok(fresh) = create_jwt(&user.id, &user.username, user.is_admin, &secret, hours) {
+            tracing::info!(username = %user.username, "embedded session self-issued for local user");
+            self.http.set_token(Some(fresh));
+        }
+        Ok(user.id)
     }
 
     fn session_hours(&self) -> ClientResult<i64> {
@@ -237,7 +253,7 @@ impl Api for LocalApi {
 
     async fn me(&self) -> ClientResult<User> {
         let components = self.components.clone();
-        let uid = self.user_id()?;
+        let uid = self.user_id().await?;
         self.run(async move {
             let user = components
                 .database
@@ -261,7 +277,7 @@ impl Api for LocalApi {
     async fn search(&self, query: &str, page: u32) -> ClientResult<SearchResponse> {
         let components = self.components.clone();
         let q = query.trim().to_string();
-        let uid = self.user_id().ok();
+        let uid = self.user_id().await.ok();
         self.run(async move {
             if q.is_empty() {
                 return Err(ClientError::Backend("Query must not be empty".into()));
@@ -306,7 +322,7 @@ impl Api for LocalApi {
         let magnet = req.magnet_uri.trim().to_string();
         let file_index = req.file_index;
         let poster_url = req.poster_url.clone();
-        let uid = self.user_id().ok();
+        let uid = self.user_id().await.ok();
         self.run(async move {
             if magnet.is_empty() || magnet.len() > 2048 {
                 return Err(ClientError::Backend("Invalid magnet URI".into()));
@@ -373,75 +389,28 @@ impl Api for LocalApi {
         let components = self.components.clone();
         let sid = stream_id.to_string();
         self.run(async move {
-            use crate::torrent::types::TorrentFile as CoreFile;
             let download = components
                 .torrent_engine
                 .get_download(&sid)
                 .await
                 .map_err(err_to_client)?;
             let status = download.as_ref().map(|d| d.status.clone());
-            let _ = components.torrent_engine.ensure_active(&sid).await;
-            let files = components
-                .torrent_engine
-                .list_torrent_files(&sid)
-                .await
-                .map_err(err_to_client)?;
-
-            let mut out = Vec::with_capacity(files.len());
-            for f in files {
-                out.push(TorrentFile {
-                    index: f.index,
+            let sorted = crate::torrent::files::sorted_torrent_files(
+                &components.torrent_engine,
+                &sid,
+                download.as_ref(),
+            )
+            .await;
+            let out = sorted
+                .into_iter()
+                .map(|f| TorrentFile {
+                    index: f.seq_index,
                     path: f.path,
                     size: f.size,
                     is_video: f.is_video,
                     is_audio: f.is_audio,
-                });
-            }
-            // Disk-scan fallback for completed downloads with no live
-            // handle. Only safe when we have a real torrent title —
-            // joining an empty title onto the base dir would scan every
-            // past download and return files from unrelated torrents.
-            if out.is_empty() {
-                if let Some(ref dl) = download {
-                    if !dl.title.trim().is_empty() {
-                        let partial = components.torrent_engine.partial_dir();
-                        let complete = components.torrent_engine.complete_dir();
-                        for base in [complete, partial] {
-                            let dir = base.join(&dl.title);
-                            if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
-                                let mut idx = 0;
-                                while let Ok(Some(entry)) = entries.next_entry().await {
-                                    let path = entry.file_name().to_string_lossy().to_string();
-                                    if let Ok(meta) = entry.metadata().await {
-                                        if meta.is_file() {
-                                            out.push(TorrentFile {
-                                                index: idx,
-                                                path: path.clone(),
-                                                size: meta.len(),
-                                                is_video: CoreFile::detect_video(&path),
-                                                is_audio: CoreFile::detect_audio(&path),
-                                            });
-                                            idx += 1;
-                                        }
-                                    }
-                                }
-                            }
-                            if !out.is_empty() {
-                                out.sort_by(|a, b| a.path.cmp(&b.path));
-                                for (i, f) in out.iter_mut().enumerate() {
-                                    f.index = i;
-                                }
-                                break;
-                            }
-                        }
-                    } else {
-                        tracing::debug!(
-                            stream_id = %sid,
-                            "torrent metadata not yet available; returning empty files"
-                        );
-                    }
-                }
-            }
+                })
+                .collect();
             Ok((out, status))
         })
         .await
@@ -451,7 +420,7 @@ impl Api for LocalApi {
 
     async fn history(&self) -> ClientResult<WatchHistoryResponse> {
         let components = self.components.clone();
-        let uid = self.user_id()?;
+        let uid = self.user_id().await?;
         self.run(async move {
             let raw = components
                 .database
@@ -486,7 +455,7 @@ impl Api for LocalApi {
 
     async fn favourites(&self) -> ClientResult<FavouritesResponse> {
         let components = self.components.clone();
-        let uid = self.user_id()?;
+        let uid = self.user_id().await?;
         self.run(async move {
             let items = components
                 .database
@@ -500,7 +469,7 @@ impl Api for LocalApi {
 
     async fn playlists(&self) -> ClientResult<Vec<Playlist>> {
         let components = self.components.clone();
-        let uid = self.user_id()?;
+        let uid = self.user_id().await?;
         self.run(async move {
             components
                 .database
@@ -646,7 +615,7 @@ impl Api for LocalApi {
     async fn pin_download(&self, stream_id: &str) -> ClientResult<()> {
         let components = self.components.clone();
         let sid = stream_id.to_string();
-        let _ = self.user_id()?;
+        let _ = self.user_id().await?;
         self.run(async move {
             let dl = components
                 .torrent_engine
@@ -674,14 +643,18 @@ impl Api for LocalApi {
     async fn unpin_download(&self, stream_id: &str) -> ClientResult<()> {
         let components = self.components.clone();
         let sid = stream_id.to_string();
-        let _ = self.user_id()?;
+        let _ = self.user_id().await?;
         self.run(async move {
             components
                 .database
                 .set_download_pinned(&sid, false)
                 .await
                 .map_err(err_to_client)?;
-            let _ = components.torrent_engine.pause(&sid).await;
+            if components.torrent_engine.watched_within(&sid, 30) {
+                tracing::info!(stream_id = %sid, "unpinned; connected viewer keeps it active");
+            } else {
+                let _ = components.torrent_engine.pause(&sid).await;
+            }
             Ok(())
         })
         .await
@@ -689,7 +662,7 @@ impl Api for LocalApi {
 
     async fn list_downloads(&self) -> ClientResult<Vec<streamx_api::types::DownloadItem>> {
         let components = self.components.clone();
-        let _ = self.user_id()?;
+        let _ = self.user_id().await?;
         self.run(async move {
             let downloads = components
                 .database
@@ -738,7 +711,7 @@ impl Api for LocalApi {
     async fn delete_stream(&self, stream_id: &str) -> ClientResult<()> {
         let components = self.components.clone();
         let sid = stream_id.to_string();
-        let uid = self.user_id()?;
+        let uid = self.user_id().await?;
         self.run(async move {
             let user = components
                 .database
@@ -764,7 +737,7 @@ impl Api for LocalApi {
 
     async fn restart_torrent(&self) -> ClientResult<()> {
         let components = self.components.clone();
-        let uid = self.user_id()?;
+        let uid = self.user_id().await?;
         self.run(async move {
             let user = components
                 .database
@@ -787,7 +760,7 @@ impl Api for LocalApi {
     async fn admin_kill_stream(&self, stream_id: &str) -> ClientResult<()> {
         let components = self.components.clone();
         let sid = stream_id.to_string();
-        let uid = self.user_id()?;
+        let uid = self.user_id().await?;
         // Admin check can happen on the caller thread because it's
         // synchronous after `user_id()`.
         let is_admin = self

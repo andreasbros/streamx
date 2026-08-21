@@ -79,6 +79,35 @@ impl Database {
         }
     }
 
+    /// The local machine's user: the admin account, falling back to the
+    /// oldest account. Embedded mode identifies with this when no valid
+    /// session token exists.
+    pub async fn local_default_user(&self) -> Result<Option<User>> {
+        let conn = self.connection().lock().await;
+        let row = conn
+            .query_row(
+                "SELECT id, username, password_hash, created_at, is_admin FROM users \
+                 ORDER BY is_admin DESC, created_at ASC LIMIT 1",
+                [],
+                |r| {
+                    Ok(User {
+                        id: r.get(0)?,
+                        username: r.get(1)?,
+                        password_hash: r.get(2)?,
+                        created_at: r.get(3)?,
+                        is_admin: r.get::<_, i64>(4)? != 0,
+                    })
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .context(error::DatabaseSnafu)?;
+        Ok(row)
+    }
+
     pub async fn user_count(&self) -> Result<i64> {
         let conn = self.connection().lock().await;
         let count: i64 = conn

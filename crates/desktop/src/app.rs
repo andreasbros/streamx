@@ -1672,12 +1672,11 @@ impl MainView {
                     .find(|d| d.info_hash.eq_ignore_ascii_case(h))
                     .cloned()
             });
-            let dl_complete = dl.as_ref().map(|d| d.status == "complete").unwrap_or(false);
-            let dl_active = dl
-                .as_ref()
-                .map(|d| d.pinned && d.status != "complete")
-                .unwrap_or(false);
+            let dl_status = dl.as_ref().map(|d| d.status.clone());
             let dl_progress = dl.as_ref().map(|d| d.progress).unwrap_or(0.0);
+            let hash_s = hash.clone().unwrap_or_default();
+            let confirming = !hash_s.is_empty()
+                && self.state.confirm_delete.read().as_deref() == Some(hash_s.as_str());
 
             let row = div()
                 .flex()
@@ -1737,42 +1736,98 @@ impl MainView {
                         })),
                 );
 
-            let row = if dl_complete {
-                row.child(
-                    div()
-                        .px(px(theme.space_2()))
-                        .py(px(2.0))
-                        .rounded(px(theme.radius_sm()))
-                        .text_size(px(theme.fs_1()))
-                        .text_color(theme.success())
-                        .border_1()
-                        .border_color(theme.success())
-                        .child("Downloaded"),
-                )
-            } else if dl_active {
-                let h = hash.clone().unwrap_or_default();
-                row.child(
-                    secondary_button(
-                        SharedString::from(format!("cancel-dl-{i}")),
-                        SharedString::from(format!("{dl_progress:.0}% · Cancel Download")),
+            // Download lifecycle controls, driven by the DB status:
+            // none → Download; downloading → progress + Stop; paused/error →
+            // Resume; complete → Downloaded. Any known download can be
+            // deleted (files + records) behind a two-click confirmation.
+            let mut controls = div().flex().items_center().gap(px(theme.space_2()));
+            match dl_status.as_deref() {
+                None => {
+                    controls = controls.child(
+                        secondary_button(
+                            SharedString::from(format!("start-dl-{i}")),
+                            "⬇ Download",
+                            &theme,
+                        )
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            this.start_background_download(i, cx);
+                        })),
+                    );
+                }
+                Some("complete") => {
+                    controls = controls.child(crate::components::badge(
+                        "Downloaded",
+                        theme.success(),
+                        &theme,
+                    ));
+                }
+                Some("paused") | Some("error") => {
+                    let label = if dl_status.as_deref() == Some("error") {
+                        "Failed".to_string()
+                    } else {
+                        format!("Paused · {dl_progress:.0}%")
+                    };
+                    controls = controls.child(crate::components::badge(
+                        SharedString::from(label),
+                        theme.fg_secondary(),
+                        &theme,
+                    ));
+                    let h = hash_s.clone();
+                    controls = controls.child(
+                        secondary_button(
+                            SharedString::from(format!("resume-dl-{i}")),
+                            "Resume",
+                            &theme,
+                        )
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            this.resume_background_download(h.clone(), cx);
+                        })),
+                    );
+                }
+                _ => {
+                    controls = controls.child(crate::components::badge(
+                        SharedString::from(format!("{dl_progress:.0}%")),
+                        theme.accent(),
+                        &theme,
+                    ));
+                    let h = hash_s.clone();
+                    controls = controls.child(
+                        secondary_button(
+                            SharedString::from(format!("stop-dl-{i}")),
+                            "Stop",
+                            &theme,
+                        )
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            this.cancel_background_download(h.clone(), cx);
+                        })),
+                    );
+                }
+            }
+            if dl_status.is_some() && !hash_s.is_empty() {
+                let h = hash_s.clone();
+                let label = if confirming {
+                    "Confirm delete"
+                } else {
+                    "Delete"
+                };
+                controls = controls.child(
+                    crate::components::danger_button(
+                        SharedString::from(format!("delete-dl-{i}")),
+                        label,
                         &theme,
                     )
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.cancel_background_download(h.clone(), cx);
+                        if confirming {
+                            *this.state.confirm_delete.write() = None;
+                            this.delete_download(h.clone(), cx);
+                        } else {
+                            *this.state.confirm_delete.write() = Some(h.clone());
+                            cx.notify();
+                        }
                     })),
-                )
-            } else {
-                row.child(
-                    secondary_button(
-                        SharedString::from(format!("start-dl-{i}")),
-                        "⬇ Download",
-                        &theme,
-                    )
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.start_background_download(i, cx);
-                    })),
-                )
-            };
+                );
+            }
+            let row = row.child(controls);
 
             root = root.child(row);
         }
@@ -2231,25 +2286,23 @@ impl MainView {
                     .text_color(theme.fg_muted())
                     .child(SharedString::from(meta_line)),
             );
-            if !complete && dl.pinned {
+            // Status-driven controls: anything actively pulling (pinned
+            // or viewer-driven) gets Stop; paused and errored rows get
+            // Resume, which re-adds dead torrents to the session.
+            if active {
                 let h = hash.clone();
                 actions = actions.child(
-                    secondary_button(
-                        SharedString::from(format!("dl-cancel-{i}")),
-                        "Cancel Download",
-                        &theme,
-                    )
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.cancel_background_download(h.clone(), cx);
-                    })),
+                    secondary_button(SharedString::from(format!("dl-stop-{i}")), "Stop", &theme)
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            this.cancel_background_download(h.clone(), cx);
+                        })),
                 );
-            }
-            if !complete && !dl.pinned {
+            } else if !complete {
                 let h = hash.clone();
                 actions = actions.child(
                     secondary_button(
                         SharedString::from(format!("dl-resume-{i}")),
-                        "⬇ Download",
+                        "Resume",
                         &theme,
                     )
                     .on_click(cx.listener(move |this, _ev, _w, cx| {

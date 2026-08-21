@@ -9,7 +9,7 @@ import {
   Badge,
   Select,
 } from "@radix-ui/themes";
-import { ArrowLeftIcon, DownloadIcon, TrashIcon, ChevronDownIcon, ChevronUpIcon, Share1Icon, CheckIcon } from "@radix-ui/react-icons";
+import { ArrowLeftIcon, Cross2Icon, DownloadIcon, DrawingPinIcon, TrashIcon, ChevronDownIcon, ChevronUpIcon, Share1Icon, CheckIcon } from "@radix-ui/react-icons";
 import { VideoPlayer } from "../components/VideoPlayer";
 import type { VideoPlayerHandle } from "../components/VideoPlayer";
 import { useStream } from "../hooks/useStream";
@@ -19,6 +19,7 @@ import { debugLog } from "../lib/debug-log";
 import { useAuth } from "../hooks/useAuth";
 import { useMediaSession } from "../hooks/useMediaSession";
 import { useServerSettings } from "../hooks/useServerSettings";
+import { NotWebBadge } from "../components/NotWebBadge";
 import { useFavourites } from "../hooks/useFavourites";
 import { TrailerModal } from "../components/TrailerModal";
 import { LOGO_URL, PAGE_BG_URL, DEFAULT_VIDEO_POSTER_URL } from "../assets";
@@ -611,6 +612,43 @@ export function Player() {
 
   const QUALITY_STORAGE_KEY = "streamx_preferred_quality";
   const serverSettings = useServerSettings();
+
+  // Pin / client-download controls in the stream header. Pinned state
+  // comes from the downloads queue; toggling updates it optimistically.
+  const [pinnedState, setPinnedState] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    if (!streamId) return;
+    (async () => {
+      try {
+        const res = await api.listDownloads();
+        const dl = res.downloads.find(
+          (d) => d.info_hash.toLowerCase() === streamId.toLowerCase()
+        );
+        if (live) setPinnedState(dl?.pinned ?? false);
+      } catch {
+        // Downloads list unavailable; leave controls in the default state.
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [streamId]);
+
+  const togglePin = useCallback(async () => {
+    if (!streamId) return;
+    try {
+      if (pinnedState) {
+        await api.unpinDownload(streamId);
+        setPinnedState(false);
+      } else {
+        await api.pinDownload(streamId);
+        setPinnedState(true);
+      }
+    } catch (err) {
+      debugLog.warn("player", `pin toggle failed: ${err}`);
+    }
+  }, [streamId, pinnedState]);
   // Conservative default: treat transcode as disabled until settings load.
   const transcodeDisabled = serverSettings?.disable_transcode ?? true;
   const [selectedQuality, setSelectedQuality] = useState<string>(() =>
@@ -1081,6 +1119,56 @@ export function Player() {
                     )}
                     {status.file_size != null && status.file_size > 0 && (
                       <Badge size="1" variant="soft" color="gray">{formatBytes(status.file_size)}</Badge>
+                    )}
+                    {(serverSettings?.disable_transcode ?? true) &&
+                      ms(meta, "source_type") &&
+                      ms(meta, "source_type") !== "web" && <NotWebBadge />}
+                  </Flex>
+                  <Flex gap="2" align="center" style={{ flexShrink: 0 }}>
+                    {status.status === "complete" ? (
+                      <Button
+                        size="1"
+                        variant="soft"
+                        title="Download the file to this device"
+                        onClick={() => {
+                          if (!streamId) return;
+                          const token = localStorage.getItem("streamx_token") || "";
+                          const rawTitle = String(ms(meta, "title") || status.title || "movie");
+                          const movieName = rawTitle.replace(/[\\/:*?"<>|]/g, "-").trim();
+                          const fname = status.file_name || "";
+                          const ext = fname.includes(".") ? fname.slice(fname.lastIndexOf(".")) : "";
+                          const a = document.createElement("a");
+                          a.href = `/api/stream/${streamId}/file?token=${encodeURIComponent(token)}`;
+                          a.download = `${movieName}${ext}`;
+                          document.body.appendChild(a);
+                          a.click();
+                          a.remove();
+                        }}
+                      >
+                        <DownloadIcon width={12} height={12} />
+                        <Box as="span" display={{ initial: "none", sm: "inline" }}>Download</Box>
+                      </Button>
+                    ) : pinnedState ? (
+                      <Button
+                        size="1"
+                        variant="soft"
+                        color="orange"
+                        onClick={togglePin}
+                        title="Unpin: stop the server-side background download"
+                      >
+                        <Cross2Icon width={12} height={12} />
+                        <Box as="span" display={{ initial: "none", sm: "inline" }}>Unpin</Box>
+                      </Button>
+                    ) : (
+                      <Button
+                        size="1"
+                        variant="soft"
+                        onClick={togglePin}
+                        title="Pin: keep downloading on the server and watch later"
+                      >
+                        <DrawingPinIcon width={12} height={12} />
+                        <Box as="span" display={{ initial: "none", sm: "inline" }}>Pin</Box>
+                      </Button>
                     )}
                   </Flex>
                 </Flex>

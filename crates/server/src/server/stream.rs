@@ -23,6 +23,7 @@ async fn handle_stream_ws(mut socket: WebSocket, state: AppState, id: String) {
     state
         .ws_connections
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.torrent_engine.note_watch(&id);
     let _ = state.torrent_engine.resume(&id).await;
 
     let metadata = state.db.get_metadata(&id).await.ok().flatten();
@@ -252,6 +253,7 @@ pub async fn playlist(
     Path(id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> std::result::Result<axum::response::Response, Error> {
+    state.torrent_engine.note_watch(&id);
     let quality = params
         .get("quality")
         .map(|s| s.as_str())
@@ -363,6 +365,7 @@ pub async fn segment(
     State(state): State<AppState>,
     Path((id, segment_name)): Path<(String, String)>,
 ) -> std::result::Result<impl IntoResponse, Error> {
+    state.torrent_engine.note_watch(&id);
     let data: Bytes = state
         .hls_pipeline
         .get_segment(&id, &segment_name)
@@ -390,6 +393,7 @@ pub async fn variant_playlist(
     State(state): State<AppState>,
     Path((id, variant)): Path<(String, String)>,
 ) -> std::result::Result<axum::response::Response, Error> {
+    state.torrent_engine.note_watch(&id);
     let content = state
         .hls_pipeline
         .get_variant_playlist(&id, &variant)
@@ -412,6 +416,7 @@ pub async fn variant_segment(
     State(state): State<AppState>,
     Path((id, variant, segment_name)): Path<(String, String, String)>,
 ) -> std::result::Result<impl IntoResponse, Error> {
+    state.torrent_engine.note_watch(&id);
     let data: Bytes = state
         .hls_pipeline
         .get_variant_segment(&id, &variant, &segment_name)
@@ -442,6 +447,7 @@ pub async fn stream_file(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> std::result::Result<axum::response::Response, Error> {
+    state.torrent_engine.note_watch(&id);
     let download = state
         .torrent_engine
         .get_download(&id)
@@ -721,7 +727,9 @@ pub async fn list_stream_files(
         .map(|d| d.status.as_str())
         .unwrap_or("unknown");
 
-    let sorted = sorted_torrent_files(&state, &id, download.as_ref()).await;
+    let sorted =
+        crate::torrent::files::sorted_torrent_files(&state.torrent_engine, &id, download.as_ref())
+            .await;
     let files: Vec<TorrentFile> = sorted
         .into_iter()
         .map(|s| TorrentFile {
@@ -738,123 +746,6 @@ pub async fn list_stream_files(
     ))
 }
 
-/// One file within a torrent, addressable by a stable alphabetical
-/// sequential index (`seq_index`). When the torrent is loaded in the
-/// engine, `native_index` is set to the per-torrent metadata index
-/// needed by `librqbit::api_stream`. When resolved via disk scan
-/// only, `native_index` is `None`.
-struct SortedFile {
-    seq_index: usize,
-    native_index: Option<usize>,
-    path: String,
-    size: u64,
-    is_video: bool,
-    is_audio: bool,
-}
-
-/// Build the canonical view of a torrent's files: alphabetical by
-/// path, sequentially indexed. This is the single source of truth
-/// for `file_index` semantics — the same listing that
-/// `list_stream_files` returns and that `resolve_file_disk_path` /
-/// `stream_file_by_index` / `stream_artwork` resolve against.
-async fn sorted_torrent_files(
-    state: &AppState,
-    info_hash: &str,
-    download: Option<&crate::db::downloads::Download>,
-) -> Vec<SortedFile> {
-    use crate::torrent::types::TorrentFile;
-
-    // Try active torrent first.
-    let _ = state.torrent_engine.ensure_active(info_hash).await;
-    let active = state
-        .torrent_engine
-        .list_torrent_files(info_hash)
-        .await
-        .unwrap_or_default();
-
-    if !active.is_empty() {
-        let mut files = active;
-        files.sort_by(|a, b| a.path.cmp(&b.path));
-        return files
-            .into_iter()
-            .enumerate()
-            .map(|(seq, f)| SortedFile {
-                seq_index: seq,
-                native_index: Some(f.index),
-                path: f.path,
-                size: f.size,
-                is_video: f.is_video,
-                is_audio: f.is_audio,
-            })
-            .collect();
-    }
-
-    // Next: the persisted manifest. Stable across restarts and across
-    // files moving between partial/ and complete/, so the seq_index the
-    // UI cached always maps to the same file even before a re-added
-    // torrent's metadata is ready.
-    if let Some(manifest) = download.and_then(|d| d.manifest()) {
-        if !manifest.is_empty() {
-            return manifest
-                .into_iter()
-                .map(|m| SortedFile {
-                    seq_index: m.seq_index,
-                    native_index: Some(m.native_index),
-                    path: m.path,
-                    size: m.size,
-                    is_video: m.is_video,
-                    is_audio: m.is_audio,
-                })
-                .collect();
-        }
-    }
-
-    // Last resort: scan disk (legacy downloads with no manifest). Union
-    // both complete/ and partial/ so a download split across the two
-    // directories still yields the full, stably-ordered file set. Only
-    // safe with a real title — an empty title would scan every download.
-    let dl = match download {
-        Some(d) if !d.title.trim().is_empty() => d,
-        _ => return Vec::new(),
-    };
-
-    let partial = state.torrent_engine.partial_dir();
-    let complete = state.torrent_engine.complete_dir();
-    let mut by_path: std::collections::BTreeMap<String, TorrentFile> =
-        std::collections::BTreeMap::new();
-    for base in [complete, partial] {
-        let dir = base.join(&dl.title);
-        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let path = entry.file_name().to_string_lossy().to_string();
-                if let Ok(meta) = entry.metadata().await {
-                    if meta.is_file() {
-                        by_path.entry(path.clone()).or_insert_with(|| TorrentFile {
-                            index: 0,
-                            path: path.clone(),
-                            size: meta.len(),
-                            is_video: TorrentFile::detect_video(&path),
-                            is_audio: TorrentFile::detect_audio(&path),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    by_path
-        .into_values()
-        .enumerate()
-        .map(|(seq, f)| SortedFile {
-            seq_index: seq,
-            native_index: None,
-            path: f.path,
-            size: f.size,
-            is_video: f.is_video,
-            is_audio: f.is_audio,
-        })
-        .collect()
-}
-
 /// Stream a specific file within a multi-file torrent by index.
 ///
 /// `file_index` here is the alphabetical sequential index produced
@@ -866,6 +757,7 @@ pub async fn stream_file_by_index(
     headers: HeaderMap,
     Path((id, file_index)): Path<(String, usize)>,
 ) -> std::result::Result<axum::response::Response, Error> {
+    state.torrent_engine.note_watch(&id);
     let download = state
         .torrent_engine
         .get_download(&id)
@@ -874,7 +766,9 @@ pub async fn stream_file_by_index(
             message: format!("Stream {id} not found"),
         })?;
 
-    let sorted = sorted_torrent_files(&state, &id, Some(&download)).await;
+    let sorted =
+        crate::torrent::files::sorted_torrent_files(&state.torrent_engine, &id, Some(&download))
+            .await;
     let entry = sorted.iter().find(|s| s.seq_index == file_index);
 
     info!(
@@ -992,7 +886,12 @@ async fn resolve_file_disk_path(
     file_index: usize,
 ) -> Option<std::path::PathBuf> {
     let download = state.torrent_engine.get_download(info_hash).await.ok()??;
-    let sorted = sorted_torrent_files(state, info_hash, Some(&download)).await;
+    let sorted = crate::torrent::files::sorted_torrent_files(
+        &state.torrent_engine,
+        info_hash,
+        Some(&download),
+    )
+    .await;
     let file = sorted.iter().find(|s| s.seq_index == file_index)?;
 
     let partial = state.torrent_engine.partial_dir();

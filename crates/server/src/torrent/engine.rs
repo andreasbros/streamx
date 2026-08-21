@@ -142,6 +142,11 @@ pub struct TorrentEngine {
     db: Database,
     partial_dir: PathBuf,
     complete_dir: PathBuf,
+    /// Last time any client pulled stream data (playlist, segment, file
+    /// bytes, WS) per info_hash. Guards destructive actions: a stream
+    /// with a recent watcher must not be deleted or paused out from
+    /// under them.
+    watch_activity: std::sync::Mutex<HashMap<String, std::time::Instant>>,
 }
 
 impl TorrentEngine {
@@ -184,6 +189,7 @@ impl TorrentEngine {
             db,
             partial_dir,
             complete_dir,
+            watch_activity: std::sync::Mutex::new(HashMap::new()),
         };
 
         engine.spawn_progress_updater();
@@ -630,6 +636,23 @@ impl TorrentEngine {
             .clone()
     }
 
+    /// Record that a client just pulled data for this stream.
+    pub fn note_watch(&self, info_hash: &str) {
+        if let Ok(mut map) = self.watch_activity.lock() {
+            map.insert(info_hash.to_lowercase(), std::time::Instant::now());
+        }
+    }
+
+    /// True when any client pulled data for this stream within `secs`.
+    pub fn watched_within(&self, info_hash: &str, secs: u64) -> bool {
+        self.watch_activity
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&info_hash.to_lowercase()).copied())
+            .map(|t| t.elapsed().as_secs() < secs)
+            .unwrap_or(false)
+    }
+
     pub fn partial_dir(&self) -> &PathBuf {
         &self.partial_dir
     }
@@ -947,7 +970,7 @@ impl TorrentEngine {
                 let moves = match moves {
                     Ok(m) if !m.is_empty() => m,
                     _ => {
-                        let _ = db.update_download_status(&info_hash, "complete").await;
+                        let _ = db.mark_download_complete(&info_hash).await;
                         break;
                     }
                 };
@@ -1006,7 +1029,7 @@ impl TorrentEngine {
                         )
                         .await;
                 }
-                let _ = db.update_download_status(&info_hash, "complete").await;
+                let _ = db.mark_download_complete(&info_hash).await;
                 break;
             }
         });

@@ -374,6 +374,14 @@ pub async fn delete_stream(
 /// torrent put on disk (manifest files, torrent folders, legacy paths)
 /// plus the downloaded poster. DB rows are the caller's concern.
 pub async fn cleanup_stream(state: &AppState, id: &str) -> std::result::Result<(), Error> {
+    // Never delete a stream out from under a connected viewer: any
+    // client that pulled data in the last 30s blocks the cleanup.
+    if state.torrent_engine.watched_within(id, 30) {
+        return Err(Error::BadRequest {
+            message: "Stream is currently being watched; stop playback first".to_string(),
+        });
+    }
+
     // Read the row first: stop_and_remove and the deletes below don't
     // change it, but the manifest is needed to locate all files.
     let dl = state.torrent_engine.get_download(id).await.ok().flatten();
@@ -466,8 +474,13 @@ pub async fn unpin_download(
     Path(id): Path<String>,
 ) -> std::result::Result<impl IntoResponse, Error> {
     state.db.set_download_pinned(&id, false).await?;
-    let _ = state.torrent_engine.pause(&id).await;
-    tracing::info!(stream_id = %id, "Download unpinned (cancelled background download)");
+    // A connected viewer keeps streaming; the disconnect handler pauses
+    // unpinned downloads once the last client goes away.
+    if state.torrent_engine.watched_within(&id, 30) {
+        tracing::info!(stream_id = %id, "Download unpinned; connected viewer keeps it active");
+    } else {
+        let _ = state.torrent_engine.pause(&id).await;
+    }
     Ok(Json(serde_json::json!({ "status": "cancelled" })))
 }
 
