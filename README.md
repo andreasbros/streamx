@@ -1,49 +1,73 @@
 # StreamX
 
-Self-hosted torrent streaming. Single static Rust binary serving a React UI. Search movies, TV, and music, paste a magnet link, and stream directly in the browser with HLS transcoding and adaptive bitrate.
+Self-hosted torrent streaming. Search movies, TV, and music, paste a magnet link, and watch while it downloads.
+
+StreamX ships as two binaries from one Rust workspace:
+
+- **`streamx-desktop`**: a native desktop app with a GPU-rendered UI, built on [GPUI](https://www.gpui.rs/) from the [Zed](https://github.com/zed-industries/zed) editor. Linux and macOS share the same renderer, so the app looks and behaves identically on both. Windows support is coming soon.
+- **`streamx`**: a single static server binary with the React web UI embedded. Runs headless on a box or NAS and serves any browser or phone.
 
 ![StreamX home page](docs/og-preview.png)
 
+## Modes
+
+| Mode | Binary | UI | Where the media engine runs |
+|---|---|---|---|
+| **Embedded** (default desktop) | `streamx-desktop` | Native GPUI | Inside the app. No separate server, no browser. Playback reads files straight from disk through mpv. The app also exposes the web UI on `:8999` for phones and other devices on the network. |
+| **Thin client** | `streamx-desktop` | Native GPUI | On a remote `streamx` server. The app is a pure client: search, browse, and stream over HTTP from the server's library. |
+| **Server** | `streamx` | React web UI | On the server. Browser playback with HLS; every browser and phone is a client. |
+
+Pick Embedded or Thin client on the desktop app's login screen (changeable later in settings). All three modes share the same API, the same SQLite library, and the same torrent and transcoding engine.
+
 ## Features
 
-- **Multi-source search**: movies (YTS, Torrentio), TV (Torrentio, eztv), music + music videos (apibay, 1337x)
-- **Browser streaming**: sequential BitTorrent download + on-the-fly HLS transcoding (fMP4/CMAF). Watch while it downloads.
-- **Adaptive bitrate**: multi-variant HLS (360p / 720p / 1080p / source). hls.js handles quality switching automatically.
-- **Codec support**: H.264 passthrough, HEVC/H.265 passthrough on capable devices, MKV/AC3/DTS transcoded to browser-safe H.264 + AAC.
-- **Surround audio preserved** through transcoding (up to 8 channels).
-- **Music player**: album browsing, per-track streaming while downloading, playlists, favourites, MediaSession integration (iOS lock screen controls), AirPlay, Web Audio EQ, shareable track links with OG previews.
-- **Shareable links**: guest tokens let you share a specific stream with a single URL, without giving away your account.
-- **Multi-user**: bcrypt + JWT auth, per-user search/watch history and favourites.
-- **GPU acceleration**: FFmpeg auto-detects VAAPI / NVENC / VideoToolbox, falls back to CPU.
+- **Multi-source search**: movies (YTS, Torrentio), TV (Torrentio, eztv), music and music videos (apibay, 1337x).
+- **Home page**: current-year releases (most downloaded), latest uploads, popular, top rated, and genre rows. Infinite scroll into any category.
+- **Watch while it downloads**: sequential BitTorrent download with on-the-fly HLS transcoding for browsers, direct file playback in the desktop app.
+- **Adaptive bitrate**: multi-variant HLS (360p / 720p / 1080p / source) with automatic quality switching.
+- **Codec support**: H.264 passthrough, HEVC/H.265 passthrough on capable devices, MKV/AC3/DTS transcoded to browser-safe H.264 + AAC, surround preserved (up to 8 channels).
+- **WEB transcode control**: admins choose whether non-WEB releases are transcoded server-side. Off by default, the browser gets the file as-is and non-WEB rows carry a crossed-out WEB badge; the desktop app plays everything natively.
+- **Downloads**: pin a movie to keep downloading server-side with no client connected and watch it later from any device, or download the file straight to your device named after the movie. Stop, resume, and delete from the movie page or the Downloads page.
+- **Multi-user safe**: a stream being watched by someone else cannot be deleted or paused out from under them.
+- **Removable storage aware**: point `download_dir` at an external drive. If the drive is missing the app refuses to start or mutate the library instead of re-downloading or orphaning files.
+- **Music player**: album browsing, per-track streaming while downloading, playlists, favourites, MediaSession (lock screen controls), AirPlay, Web Audio EQ, shareable track links with OG previews.
+- **Shareable links**: guest tokens share a single stream by URL without handing out your account.
+- **Multi-user**: bcrypt + JWT auth, per-user history and favourites, admin monitor with live disk, CPU, transcode, and download stats.
+- **GPU acceleration**: FFmpeg auto-detects VAAPI / NVENC / VideoToolbox and falls back to CPU.
 - **Optional SOCKS5 proxy** for torrent traffic.
 
 ## Architecture
 
-- **Backend** (Rust): Axum HTTP server, `librqbit` BitTorrent engine, FFmpeg for transcoding, SQLite for state. The release binary embeds the frontend.
-- **Frontend** (TypeScript): React + Radix UI, `hls.js` for HLS playback, `framer-motion` for transitions. Built with Vite.
-- **Streaming pipeline**: torrent peers → librqbit sequential download → FFmpeg (passthrough or transcode) → HLS master playlist → hls.js / Safari native.
+- **`crates/server`**: Rust backend. Axum HTTP server, `librqbit` BitTorrent engine, FFmpeg transcoding, SQLite. Embeds `web/dist` into the `streamx` binary.
+- **`crates/api`**: shared API types and the `Api` trait with two backends: HTTP (thin client, web) and in-process (embedded desktop). Every feature is written once against this trait.
+- **`crates/desktop`**: the GPUI app. In Embedded mode it boots the server components in-process and talks to them with no network hop.
+- **`web`**: React + Radix UI + `hls.js`, built with Vite.
+- **Streaming pipeline**: peers → librqbit sequential download → FFmpeg (passthrough or transcode) → HLS master playlist → hls.js / Safari native. The desktop app skips HLS and hands the file to mpv.
 
 ## Build
 
-All tooling is pinned via Nix. Enter the dev shell, then build the frontend and the release backend (the release binary bundles the UI).
+All tooling is pinned via Nix.
 
 ```bash
 nix develop
 
-# Frontend
+# Web UI (embedded into the server binary)
 cd web && pnpm install && pnpm build && cd ..
 
-# Backend (release build embeds the UI)
-cargo build --release --manifest-path crates/server/Cargo.toml
+# Server
+cargo build --release -p streamx
 
-# Run
-./target/release/streamx
-# Open http://127.0.0.1:8999
+# Desktop app (Linux, macOS)
+cargo build --release -p streamx-desktop
 ```
+
+Run `./target/release/streamx-desktop` for the app, or `./target/release/streamx` and open `http://127.0.0.1:8999` for the web UI.
+
+The desktop app plays video through `mpv`, which must be on your `PATH` (the Nix dev shell provides it). macOS desktop builds need Xcode's Metal shader compiler, see [Troubleshooting](#troubleshooting).
 
 ## Configuration
 
-Config lives at `~/.streamx/config.toml` and is created with defaults on first run.
+Config lives at `~/.streamx/config.toml` and is created with defaults on first run. The desktop app and the server read the same file.
 
 ```toml
 [server]
@@ -52,6 +76,7 @@ bind = "127.0.0.1"
 # log_level = "info"
 
 [torrent]
+# download_dir = "/Volumes/storage/streamx"   # default: ~/.streamx/downloads
 max_connections = 200
 sequential = true
 
@@ -94,6 +119,8 @@ category = "101"
 
 Extra providers can be kept out of the main config in `~/.streamx/providers.toml` (same `[[providers]]` format). That file is gitignored by default.
 
+Env overrides: `STREAMX_DATA_DIR`, `STREAMX_CONFIG`, `STREAMX_PORT`, `STREAMX_BIND`, `STREAMX_LOG_LEVEL`, `STREAMX_ADMIN_USER`, `STREAMX_ADMIN_PASSWORD`.
+
 ### Provider formats
 
 | Format | Supports | How it works |
@@ -117,29 +144,31 @@ nix develop
 cd web && pnpm dev
 
 # Terminal 2: backend
-cargo run --manifest-path crates/server/Cargo.toml -- --port 8998
+cargo run -p streamx -- --port 8998
 ```
 
 ### Checks
 
 ```bash
-cargo fmt --all --manifest-path crates/server/Cargo.toml
-cargo clippy --manifest-path crates/server/Cargo.toml -- -D warnings
-cargo check --manifest-path crates/server/Cargo.toml
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
 cd web && pnpm typecheck
 ```
 
 ### Tests
 
 ```bash
-# Rust unit + integration tests
-cargo test --manifest-path crates/server/Cargo.toml
+# Rust unit + integration tests (server, api, desktop)
+cargo test --workspace
 
-# Frontend component tests
+# Frontend unit tests
 cd web && pnpm test
 
-# End-to-end browser tests (requires a running backend on port 8999)
+# Browser end-to-end tests (requires a running backend on port 8999)
 cd web && pnpm test:e2e
+
+# Desktop UI tests (JSON test driver + screenshots, see crates/ui-harness/README.md)
+cargo build -p streamx-desktop --features ui-test && cargo build -p streamx && cargo run -p streamx-ui-harness
 ```
 
 ## CLI
@@ -152,24 +181,26 @@ streamx clean                                       # remove cache and downloads
 streamx wipe                                        # remove everything except config.toml
 ```
 
-Credentials can also be passed via `STREAMX_ADMIN_USER` and `STREAMX_ADMIN_PASSWORD` env vars.
-
 ## Project layout
 
 ```
 crates/
   server/              Rust backend (Axum, librqbit, FFmpeg, SQLite). Builds the `streamx` binary.
     src/
-      config.rs          configuration + env var expansion
-      server/            HTTP routes, auth, image proxy, static asset serving
-      torrent/           librqbit engine, provider dispatch, search formats
+      config.rs          configuration, env overrides, download_dir resolution
+      server/            HTTP routes, auth, admin monitor, static asset serving
+      torrent/           librqbit engine, provider dispatch, canonical file listing
       transcode/         FFmpeg HLS pipeline (GPU detect, probe, multi-variant)
       db/                SQLite (users, history, downloads, favourites, playlists)
+      local_api.rs       in-process Api backend used by the embedded desktop app
+  api/                 shared API types + `Api` trait (HTTP and in-process clients)
+  desktop/             GPUI desktop app (`streamx-desktop`): embedded and thin-client modes
+  ui-harness/          Playwright-style desktop UI tests and screenshot export
 web/                   React + TypeScript frontend (Vite, Radix UI, hls.js)
   src/
-    pages/             Search, Browse, Player, Music, Favourites, etc.
+    pages/             Search, Browse, Movie, Player, Music, Downloads, Admin
     components/        VideoPlayer, AudioPlayerBar, ExpandedPlayer, Layout
-    hooks/             useSearch, useStream, useAudioPlayer, useMediaSession
+    hooks/             useSearch, useStream, useAudioPlayer, useServerSettings
     api/               API client and types
 Cargo.toml             Cargo workspace (members = ["crates/*"])
 flake.nix              Nix flake (dev shell + builds)
@@ -177,45 +208,34 @@ flake.nix              Nix flake (dev shell + builds)
 
 ## Troubleshooting
 
-- **Port in use:** `ss -tlnp | grep 8999` and kill the process, or pass `--port`.
-- **Frontend not showing:** build the UI first (`cd web && pnpm install && pnpm build`), then restart the backend.
+- **Port in use:** `ss -tlnp | grep 8999` (Linux) or `lsof -i :8999` (macOS) and kill the process, or pass `--port`.
+- **Web UI looks stale after an upgrade:** the server embeds `web/dist` at compile time. Rebuild the UI (`cd web && pnpm build`), then rebuild the server binary. HTML, CSS, and JS are served with no-cache headers, and the client drops its session caches whenever the build hash changes, so a restart is all a browser needs.
+- **Downloads directory unavailable at startup:** `download_dir` points at a volume that is not mounted. Mount the drive and restart. The app deliberately refuses to start without it rather than re-download into the wrong place.
 - **Safari HLS shows 401:** the stream token is not attached to segment requests. Open the debug pane (user menu → Debug Mode) and check the last `/api/stream/.../playlist.m3u8` response.
 - **Transcoding fails on GPU:** FFmpeg automatically falls back to CPU. Pass `--log-level debug` and watch the backend logs to see which acceleration was tried.
-- **Experimental Nix feature 'nix-command' is disabled:  add '--extra-experimental-features nix-command' to enable it:** the flake file must be tracked by git (`git add flake.nix`).
+- **Experimental Nix feature 'nix-command' is disabled:** the flake file must be tracked by git (`git add flake.nix`).
   ```bash
   mkdir -p ~/.config/nix
-  cat >> ~/.config/nix/nix.conf <<'EOF'                                                                                                                                                                                                                                                                                                                                                                                                                                             
-  experimental-features = nix-command flakes                                                                                                                                                                                                                                                                                                                                                                                                                                        
+  cat >> ~/.config/nix/nix.conf <<'EOF'
+  experimental-features = nix-command flakes
   EOF
   ```
-- **macOS desktop build fails with `tool 'metal' not found`:** GPUI's macOS renderer
-  compiles `shaders.metal` into a `.metallib` at build time via Apple's `metal` shader
-  compiler. That compiler ships only with the **full Xcode.app** — Command Line Tools
-  alone is not enough, and nixpkgs cannot redistribute it.
+- **macOS desktop build fails with `tool 'metal' not found` or `missing Metal Toolchain`:** GPUI compiles its Metal shaders at build time with Apple's `metal` compiler, which ships only with the full Xcode.app (Command Line Tools is not enough, and nixpkgs cannot redistribute it).
 
-  Verify:
-  ```bash
-  xcrun --find metal
-  # → xcrun: error: unable to find utility "metal"...
-  ```
-
-  Fix (once per machine, ~10 GB download):
-  1. Install Xcode.app from the Mac App Store.
-  2. Open it once so it installs additional components and accept the licence.
-  3. Point the active developer directory at Xcode instead of CLT:
+  Fix (once per machine):
+  1. Install Xcode.app from the Mac App Store, open it once, and accept the licence.
+  2. Point the active developer directory at Xcode:
      ```bash
      sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
      sudo xcodebuild -license accept
      ```
-  4. Verify:
+  3. On Xcode 26 and later the Metal Toolchain is a separate download, and an Xcode update can drop it:
      ```bash
-     xcrun --find metal
-     # → /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/metal
+     xcodebuild -downloadComponent MetalToolchain
      ```
-  5. From a fresh shell, re-run `nix develop --command cargo check -p streamx-desktop`.
+  4. Verify with `xcrun --find metal`, then re-run `nix develop --command cargo check -p streamx-desktop`.
 
-  The server (`streamx`) and the web UI build fine without Xcode — only the
-  `streamx-desktop` GPUI crate needs it.
+  The server (`streamx`) and the web UI build fine without Xcode. Only `streamx-desktop` needs it.
 
 ## Tooling
 
@@ -223,6 +243,11 @@ flake.nix              Nix flake (dev shell + builds)
   ```bash
   cd web && npx playwright test tests/screenshot-og.spec.ts --config tests/live.config.ts
   ```
+
+## Credits
+
+- The desktop UI is built on [GPUI](https://www.gpui.rs/), the GPU-accelerated Rust UI framework from the [Zed](https://github.com/zed-industries/zed) team. Their work is what makes a native, fluid, cross-platform player UI in Rust possible.
+- [librqbit](https://github.com/ikatson/rqbit) for the BitTorrent engine, [FFmpeg](https://ffmpeg.org/) for transcoding, [mpv](https://mpv.io/) for desktop playback.
 
 ## License
 
