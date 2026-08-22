@@ -13,7 +13,7 @@ use streamx_desktop::{
     app::{fire_debounced, info_hash_from_magnet, DebounceState},
     components::{tile_layout, TILE_MAX_W, TILE_MIN_W},
     keybindings::{translate, Shortcut},
-    playback::{candidate_paths, longest_common_dir, PlayTarget},
+    playback::{candidate_paths, local_file_for, longest_common_dir, resolve_mpv_from, PlayTarget},
     router::Page,
     state::{AppState, Mode},
     text_input::TextModel,
@@ -695,4 +695,119 @@ fn set_server_url_persists_and_rebuilds_client() {
         assert_eq!(&*state2.server_url.read(), "http://example:1234");
         assert_eq!(state2.client.read().base_url(), "http://example:1234");
     });
+}
+
+// ---------------------------------------------------------------------------
+// mpv binary resolution
+// ---------------------------------------------------------------------------
+
+fn pb(s: &str) -> PathBuf {
+    PathBuf::from(s)
+}
+
+#[test]
+fn mpv_override_wins_when_present() {
+    let exists = |p: &std::path::Path| p == pb("/custom/mpv");
+    let r = resolve_mpv_from(
+        Some(&pb("/custom/mpv")),
+        &[pb("/usr/bin")],
+        Some("/nix/mpv"),
+        None,
+        exists,
+    );
+    assert_eq!(r, Ok(pb("/custom/mpv")));
+}
+
+#[test]
+fn mpv_missing_override_falls_through_to_path() {
+    let exists = |p: &std::path::Path| p == pb("/usr/bin/mpv");
+    let r = resolve_mpv_from(
+        Some(&pb("/nope/mpv")),
+        &[pb("/usr/bin")],
+        None,
+        None,
+        exists,
+    );
+    assert_eq!(r, Ok(pb("/usr/bin/mpv")));
+}
+
+#[test]
+fn mpv_path_beats_build_path() {
+    let exists = |p: &std::path::Path| p == pb("/usr/bin/mpv") || p == pb("/nix/store/x/bin/mpv");
+    let r = resolve_mpv_from(
+        None,
+        &[pb("/usr/bin")],
+        Some("/nix/store/x/bin/mpv"),
+        None,
+        exists,
+    );
+    assert_eq!(r, Ok(pb("/usr/bin/mpv")));
+}
+
+#[test]
+fn mpv_build_path_used_when_not_on_path() {
+    // The Finder / plain-terminal case: PATH lacks the Nix store.
+    let exists = |p: &std::path::Path| p == pb("/nix/store/x/bin/mpv");
+    let r = resolve_mpv_from(
+        None,
+        &[pb("/usr/bin"), pb("/bin")],
+        Some("/nix/store/x/bin/mpv"),
+        None,
+        exists,
+    );
+    assert_eq!(r, Ok(pb("/nix/store/x/bin/mpv")));
+}
+
+#[test]
+fn mpv_known_location_and_nix_profile_fallbacks() {
+    let exists = |p: &std::path::Path| p == pb("/opt/homebrew/bin/mpv");
+    let r = resolve_mpv_from(None, &[], None, None, exists);
+    assert_eq!(r, Ok(pb("/opt/homebrew/bin/mpv")));
+
+    let exists = |p: &std::path::Path| p == pb("/Users/me/.nix-profile/bin/mpv");
+    let r = resolve_mpv_from(None, &[], None, Some(&pb("/Users/me")), exists);
+    assert_eq!(r, Ok(pb("/Users/me/.nix-profile/bin/mpv")));
+}
+
+#[test]
+fn mpv_not_found_error_is_actionable() {
+    let r = resolve_mpv_from(
+        None,
+        &[pb("/usr/bin")],
+        Some("/nix/store/x/bin/mpv"),
+        None,
+        |_| false,
+    );
+    let err = r.expect_err("must fail");
+    assert!(err.contains("STREAMX_MPV"), "{err}");
+    assert!(err.contains("/usr/bin/mpv"), "{err}");
+    assert!(err.contains("/nix/store/x/bin/mpv"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// Local file vs HTTP decision across download states
+// ---------------------------------------------------------------------------
+
+#[test]
+fn complete_download_with_file_plays_locally() {
+    let c = vec![pb("/d/complete/m.mkv"), pb("/d/partial/m.mkv")];
+    let r = local_file_for(Some("complete"), &c, |p| p == pb("/d/complete/m.mkv"));
+    assert_eq!(r, Some(pb("/d/complete/m.mkv")));
+}
+
+#[test]
+fn complete_download_with_missing_file_streams_over_http() {
+    let c = vec![pb("/d/complete/m.mkv"), pb("/d/partial/m.mkv")];
+    assert_eq!(local_file_for(Some("complete"), &c, |_| false), None);
+}
+
+#[test]
+fn downloading_paused_error_never_open_local_file() {
+    // Even when a partial file exists on disk: sparse holes and the
+    // move to complete/ on finish would break a direct open.
+    let c = vec![pb("/d/complete/m.mkv"), pb("/d/partial/m.mkv")];
+    for status in ["downloading", "initializing", "paused", "error"] {
+        assert_eq!(local_file_for(Some(status), &c, |_| true), None, "{status}");
+    }
+    assert_eq!(local_file_for(None, &c, |_| true), None);
 }

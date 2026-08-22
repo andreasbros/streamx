@@ -1,0 +1,17 @@
+[package]
+name = "streamx-linkcheck"
+version = "0.1.0"
+edition = "2021"
+description = "Verifies StreamX binaries are self-contained: static on Linux, system-frameworks-only on macOS"
+license = "MIT"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "streamx-linkcheck"
+path = "src/main.rs"
+
+[dependencies]
+goblin = "0.9"
+snafu = "0.8"

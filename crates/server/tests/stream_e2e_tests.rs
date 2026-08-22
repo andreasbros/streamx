@@ -158,6 +158,73 @@ impl TestServer {
     }
 
     /// Seed a completed download in the DB by copying a test file into the server's data dir
+    /// Seed a download row in an arbitrary lifecycle state, with the file
+    /// placed under `partial/` (in-flight) or `complete/` (finished).
+    async fn seed_download_in_state(
+        &self,
+        stream_id: &str,
+        source_file: &std::path::Path,
+        status: &str,
+    ) -> String {
+        let sub = if status == "complete" {
+            "complete"
+        } else {
+            "partial"
+        };
+        let dest_dir = self.data_dir.path().join("downloads").join(sub);
+        let file_name = source_file
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let dest_path = dest_dir.join(&file_name);
+        std::os::unix::fs::symlink(source_file, &dest_path).expect("symlink test file");
+
+        let db_path = self.data_dir.path().join("db/streamx.db");
+        let db = streamx::db::Database::open(&db_path).expect("open db");
+        db.init().await.expect("init");
+        let dest = dest_path.to_string_lossy().to_string();
+        let dl = streamx::db::downloads::Download {
+            info_hash: stream_id.to_string(),
+            magnet_uri: format!("magnet:?xt=urn:btih:{stream_id}&dn=test"),
+            title: "Test Stream".to_string(),
+            file_name: file_name.clone(),
+            file_index: 0,
+            file_size: std::fs::metadata(source_file).map(|m| m.len()).unwrap_or(0),
+            download_all: false,
+            files_json: None,
+            pinned: false,
+            status: status.to_string(),
+            progress: if status == "complete" { 100.0 } else { 42.0 },
+            partial_path: (status != "complete").then(|| dest.clone()),
+            complete_path: (status == "complete").then(|| dest.clone()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        db.upsert_download(&dl).await.expect("upsert download");
+        dest
+    }
+
+    async fn download_updated_at(&self, stream_id: &str) -> String {
+        let db_path = self.data_dir.path().join("db/streamx.db");
+        let db = streamx::db::Database::open(&db_path).expect("open db");
+        db.get_download(stream_id)
+            .await
+            .expect("query")
+            .map(|d| d.updated_at)
+            .unwrap_or_default()
+    }
+
+    async fn download_status(&self, stream_id: &str) -> String {
+        let db_path = self.data_dir.path().join("db/streamx.db");
+        let db = streamx::db::Database::open(&db_path).expect("open db");
+        db.get_download(stream_id)
+            .await
+            .expect("query")
+            .map(|d| d.status)
+            .unwrap_or_else(|| "missing".to_string())
+    }
+
     async fn seed_download(&self, stream_id: &str, source_file: &std::path::Path) -> String {
         let dest_dir = self.data_dir.path().join("downloads/complete");
         let file_name = source_file
@@ -549,4 +616,124 @@ async fn demo_playlist_returns_redirect() {
         location.contains("test-streams.mux.dev"),
         "Wrong redirect: {location}"
     );
+}
+
+// ============================================================
+// Lifecycle transitions: stopped / errored / complete, then play
+// ============================================================
+
+/// Stop (unpin + pause) then press Play: the desktop streams over
+/// `/file/{index}`, which must get pieces flowing again instead of
+/// handing mpv a stream that never produces bytes.
+#[tokio::test]
+async fn stopped_download_resumes_when_played() {
+    let server = start_test_server().await;
+    let clip = h264_720p_clip();
+    if !clip.exists() {
+        eprintln!("SKIP");
+        return;
+    }
+    let stream_id = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
+    server
+        .seed_download_in_state(stream_id, &clip, "paused")
+        .await;
+    let client = server.auth_client();
+
+    let resp = client
+        .get(format!("{}/api/stream/{stream_id}/file/0", server.base_url))
+        .send()
+        .await
+        .expect("file request");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let status = server.download_status(stream_id).await;
+    assert_ne!(status, "paused", "playback must resume a stopped download");
+}
+
+#[tokio::test]
+async fn errored_download_resumes_when_played() {
+    let server = start_test_server().await;
+    let clip = h264_720p_clip();
+    if !clip.exists() {
+        eprintln!("SKIP");
+        return;
+    }
+    let stream_id = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
+    server
+        .seed_download_in_state(stream_id, &clip, "error")
+        .await;
+    let before = server.download_updated_at(stream_id).await;
+    let client = server.auth_client();
+
+    let resp = client
+        .get(format!("{}/api/stream/{stream_id}/file/0", server.base_url))
+        .send()
+        .await
+        .expect("file request");
+    assert_eq!(resp.status(), StatusCode::OK);
+    // The test magnet has no peers, so the re-add may already have failed
+    // back to "error"; the row being rewritten proves playback retried it.
+    assert_ne!(
+        server.download_updated_at(stream_id).await,
+        before,
+        "playback must retry an errored download"
+    );
+}
+
+/// A finished download is served from disk and must never be flipped
+/// back into a downloading state by playback.
+#[tokio::test]
+async fn complete_download_stays_complete_when_played() {
+    let server = start_test_server().await;
+    let clip = h264_720p_clip();
+    if !clip.exists() {
+        eprintln!("SKIP");
+        return;
+    }
+    let stream_id = "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c";
+    server
+        .seed_download_in_state(stream_id, &clip, "complete")
+        .await;
+    let client = server.auth_client();
+
+    let resp = client
+        .get(format!("{}/api/stream/{stream_id}/file/0", server.base_url))
+        .send()
+        .await
+        .expect("file request");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(server.download_status(stream_id).await, "complete");
+}
+
+/// Pause and resume endpoints round-trip the row through the states the
+/// UI shows (Stop / Resume buttons).
+#[tokio::test]
+async fn pause_and_resume_endpoints_roundtrip() {
+    let server = start_test_server().await;
+    let clip = h264_720p_clip();
+    if !clip.exists() {
+        eprintln!("SKIP");
+        return;
+    }
+    let stream_id = "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d";
+    server
+        .seed_download_in_state(stream_id, &clip, "downloading")
+        .await;
+    let client = server.auth_client();
+
+    let resp = client
+        .put(format!("{}/api/stream/{stream_id}/pause", server.base_url))
+        .send()
+        .await
+        .expect("pause");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(server.download_status(stream_id).await, "paused");
+
+    let resp = client
+        .put(format!("{}/api/stream/{stream_id}/resume", server.base_url))
+        .send()
+        .await
+        .expect("resume");
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_ne!(server.download_status(stream_id).await, "paused");
 }

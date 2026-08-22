@@ -2,9 +2,15 @@
 channel = "nightly"
 components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
 targets = [
+    # Linux: glibc for the GPUI desktop (host graphics stack must be
+    # dynamic), musl for fully static server binaries.
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    # macOS: both CPU architectures.
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
+    # Windows targets land with the Windows desktop port.
 ]
 profile = "default"

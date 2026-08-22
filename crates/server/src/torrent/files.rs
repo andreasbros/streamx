@@ -102,17 +102,26 @@ pub async fn sorted_torrent_files(
             }
         } else {
             // Flat single-file torrents put the file directly at the
-            // base dir root, named by the torrent title.
-            if let Ok(meta) = tokio::fs::metadata(&dir).await {
-                if meta.is_file() {
-                    let path = dl.title.clone();
-                    by_path.entry(path.clone()).or_insert_with(|| TorrentFile {
-                        index: 0,
-                        path: path.clone(),
-                        size: meta.len(),
-                        is_video: TorrentFile::detect_video(&path),
-                        is_audio: TorrentFile::detect_audio(&path),
-                    });
+            // base dir root: named by the row's file_name, or by the
+            // torrent title when the two coincide.
+            let mut flat_names: Vec<&str> = Vec::new();
+            if !dl.file_name.trim().is_empty() {
+                flat_names.push(dl.file_name.as_str());
+            }
+            flat_names.push(dl.title.as_str());
+            for name in flat_names {
+                if let Ok(meta) = tokio::fs::metadata(base.join(name)).await {
+                    if meta.is_file() {
+                        let path = name.to_string();
+                        by_path.entry(path.clone()).or_insert_with(|| TorrentFile {
+                            index: 0,
+                            path: path.clone(),
+                            size: meta.len(),
+                            is_video: TorrentFile::detect_video(&path),
+                            is_audio: TorrentFile::detect_audio(&path),
+                        });
+                        break;
+                    }
                 }
             }
         }

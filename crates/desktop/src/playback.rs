@@ -72,20 +72,18 @@ pub async fn resolve(
         // HTTP streaming via librqbit::api_stream fills pieces on demand
         // and survives the move transparently.
         let is_complete = matches!(status.as_deref(), Some("complete"));
+        let candidates = candidate_paths(&state.downloads_dir, &files, file);
+        if let Some(cand) = local_file_for(status.as_deref(), &candidates, |p| p.exists()) {
+            tracing::info!(
+                stream_id = %stream_id,
+                file_index,
+                chosen = %cand.display(),
+                file_path = %file.path,
+                "resolved to local file (download complete)"
+            );
+            return Ok(PlayTarget::LocalFile(cand));
+        }
         if is_complete {
-            let candidates = candidate_paths(&state.downloads_dir, &files, file);
-            for cand in &candidates {
-                if cand.exists() {
-                    tracing::info!(
-                        stream_id = %stream_id,
-                        file_index,
-                        chosen = %cand.display(),
-                        file_path = %file.path,
-                        "resolved to local file (download complete)"
-                    );
-                    return Ok(PlayTarget::LocalFile(cand.clone()));
-                }
-            }
             // File is gone. The server's ensure_active (triggered by
             // stream_files above) has already detected this and kicked
             // off a re-download; status will flip to "downloading" once
@@ -114,6 +112,21 @@ pub async fn resolve(
     );
     let token = state.token.read().clone();
     Ok(PlayTarget::Http { url, token })
+}
+
+/// Decide whether playback can open a local file directly. Only a
+/// download the server reports as `complete` qualifies: while
+/// downloading, paused, or errored the file may have holes and will be
+/// moved when it finishes, so those always stream over HTTP.
+pub fn local_file_for(
+    status: Option<&str>,
+    candidates: &[PathBuf],
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<PathBuf> {
+    if status != Some("complete") {
+        return None;
+    }
+    candidates.iter().find(|c| exists(c)).cloned()
 }
 
 /// Build the list of likely on-disk paths for a file. Order matters -
@@ -184,7 +197,8 @@ pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, Str
     // Inherit stdout+stderr so mpv's own diagnostics show up next to
     // ours (previously we swallowed them, which made silent failures
     // impossible to debug).
-    let child = Command::new("mpv")
+    let mpv = resolve_mpv_binary()?;
+    let child = Command::new(&mpv)
         .args(&args)
         .arg("--force-window=yes")
         .arg("--keep-open=always")
@@ -206,9 +220,81 @@ pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, Str
         .stderr(Stdio::inherit())
         .stdin(Stdio::null())
         .spawn()
-        .map_err(|e| format!("failed to spawn mpv (is it on PATH?): {e}"))?;
+        .map_err(|e| format!("failed to spawn mpv at {}: {e}", mpv.display()))?;
 
     Ok(MpvInstance { child, socket_path })
+}
+
+/// Build-time mpv location from the Nix dev shell, if the binary was
+/// built there.
+const MPV_BUILD_PATH: Option<&str> = option_env!("STREAMX_MPV_BUILD_PATH");
+
+/// Well-known install locations checked after PATH, so the app works
+/// when launched from Finder or a plain terminal that lacks the Nix
+/// store or Homebrew on PATH.
+const MPV_KNOWN_LOCATIONS: &[&str] = &[
+    "/opt/homebrew/bin/mpv",
+    "/usr/local/bin/mpv",
+    "/usr/bin/mpv",
+    "/run/current-system/sw/bin/mpv",
+    "/nix/var/nix/profiles/default/bin/mpv",
+    "/Applications/mpv.app/Contents/MacOS/mpv",
+];
+
+/// Locate the mpv binary: `STREAMX_MPV` override, then PATH, then the
+/// build-time path, then well-known locations.
+pub fn resolve_mpv_binary() -> Result<PathBuf, String> {
+    let path_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let override_path = std::env::var_os("STREAMX_MPV").map(PathBuf::from);
+    resolve_mpv_from(
+        override_path.as_deref(),
+        &path_dirs,
+        MPV_BUILD_PATH,
+        home.as_deref(),
+        |p| p.is_file(),
+    )
+}
+
+/// Pure resolution over injected inputs so the search order is unit
+/// testable without touching the real filesystem.
+pub fn resolve_mpv_from(
+    override_path: Option<&std::path::Path>,
+    path_dirs: &[PathBuf],
+    build_path: Option<&str>,
+    home: Option<&std::path::Path>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Result<PathBuf, String> {
+    let mut tried: Vec<PathBuf> = Vec::new();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(p) = override_path {
+        candidates.push(p.to_path_buf());
+    }
+    candidates.extend(path_dirs.iter().map(|d| d.join("mpv")));
+    if let Some(p) = build_path {
+        candidates.push(PathBuf::from(p));
+    }
+    candidates.extend(MPV_KNOWN_LOCATIONS.iter().map(PathBuf::from));
+    if let Some(h) = home {
+        candidates.push(h.join(".nix-profile/bin/mpv"));
+    }
+    for c in candidates {
+        if exists(&c) {
+            return Ok(c);
+        }
+        tried.push(c);
+    }
+    Err(format!(
+        "mpv not found. Set STREAMX_MPV to the mpv binary, install mpv, or launch from \
+         `nix develop`. Looked in: {}",
+        tried
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 fn mpv_socket_path() -> PathBuf {

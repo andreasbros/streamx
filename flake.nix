@@ -73,14 +73,120 @@
           nativeBuildInputs = commonNativeBuildInputs;
         };
 
+        # Source that also carries the prebuilt web UI: rust-embed reads
+        # web/dist at compile time. Run `cd web && pnpm build` first.
+        srcWithWeb = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            (craneLib.filterCargoSources path type)
+            || (pkgs.lib.hasSuffix "/web" path && type == "directory")
+            || (pkgs.lib.hasInfix "/web/dist" path);
+        };
+
+        # Release build of the `streamx` server for one target triple.
+        # The server has no C library dependencies (rustls, bundled
+        # SQLite; FFmpeg is a runtime process), so cross builds only need
+        # a C cross compiler for the few `cc`-built crates. musl targets
+        # are linked fully static and verified by the linkage check.
+        mkServer = { crossPkgs ? null, target ? null, static ? false }:
+          let
+            base = commonArgs // {
+              src = srcWithWeb;
+              pname = "streamx";
+              cargoExtraArgs = "-p streamx";
+              doCheck = false;
+              buildInputs = [ ];
+              # Rust's std links -liconv, and the nixpkgs Darwin toolchain
+              # resolves it to a store dylib. Retarget it to the SDK copy
+              # in /usr/lib (same ABI) so the artifact is self-contained;
+              # the stdenv fixup re-signs the binary afterwards.
+              postInstall = pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+                for bin in $out/bin/*; do
+                  for lib in $(otool -L "$bin" | awk '/\/nix\/store\/.*libiconv/ {print $1}'); do
+                    install_name_tool -change "$lib" /usr/lib/libiconv.2.dylib "$bin"
+                  done
+                done
+              '';
+            };
+            crossEnv = if target == null then { } else
+              let
+                cc = crossPkgs.stdenv.cc;
+                envTarget = builtins.replaceStrings [ "-" ] [ "_" ] target;
+                upper = pkgs.lib.toUpper envTarget;
+              in
+              {
+                CARGO_BUILD_TARGET = target;
+                depsBuildBuild = [ cc ];
+                "CARGO_TARGET_${upper}_LINKER" = "${cc}/bin/${cc.targetPrefix}cc";
+                "CC_${envTarget}" = "${cc}/bin/${cc.targetPrefix}cc";
+                HOST_CC = "${pkgs.stdenv.cc.nativePrefix}cc";
+              } // pkgs.lib.optionalAttrs static {
+                CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
+              };
+            args = base // crossEnv;
+          in
+          craneLib.buildPackage (args // { cargoArtifacts = craneLib.buildDepsOnly args; });
+
+        linkcheck = craneLib.buildPackage (commonArgs // {
+          pname = "streamx-linkcheck";
+          cargoExtraArgs = "-p streamx-linkcheck";
+          doCheck = false;
+          buildInputs = [ ];
+        });
+
+        # Assert an artifact's linkage as a flake check.
+        linkageCheck = name: drv: binary: policy:
+          pkgs.runCommand "linkcheck-${name}" { } ''
+            ${linkcheck}/bin/streamx-linkcheck ${drv}/bin/${binary} --policy ${policy}
+            touch $out
+          '';
+
       in
-      {
-        # Packages intentionally deferred. `nix build .#default` would need
-        # the frontend pre-built at web/dist/ because rust-embed resolves
-        # that path at compile time. Proper packaging lands in Phase 8.
-        # Until then, build inside the dev shell:
-        #   cd web && pnpm install && pnpm build && cd ..
-        #   cargo build --release --manifest-path crates/server/Cargo.toml
+      rec {
+        # Release outputs per target triple. All require web/dist to be
+        # built first (`cd web && pnpm build`).
+        #
+        #   nix build .#streamx                      native server
+        #   nix build .#streamx-x86_64-linux-musl    static server (Linux host)
+        #   nix build .#streamx-aarch64-linux-musl   static server (Linux host)
+        #   nix build .#streamx-x86_64-darwin        server for the other Mac arch
+        #   nix build .#streamx-desktop              Linux desktop (glibc + host graphics)
+        #
+        # The macOS desktop app is built from the dev shell: GPUI compiles
+        # its Metal shaders with Xcode's `metal`, which the Nix sandbox
+        # cannot provide. Windows outputs land with the Windows port.
+        packages = {
+          default = mkServer { };
+          streamx = mkServer { };
+          streamx-linkcheck = linkcheck;
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          streamx-desktop = craneLib.buildPackage (commonArgs // {
+            src = srcWithWeb;
+            pname = "streamx-desktop";
+            cargoExtraArgs = "-p streamx-desktop";
+            doCheck = false;
+          });
+          streamx-x86_64-linux-musl = mkServer {
+            crossPkgs = pkgs.pkgsCross.musl64;
+            target = "x86_64-unknown-linux-musl";
+            static = true;
+          };
+          streamx-aarch64-linux-musl = mkServer {
+            crossPkgs = pkgs.pkgsCross.aarch64-multiplatform-musl;
+            target = "aarch64-unknown-linux-musl";
+            static = true;
+          };
+        } // pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
+          streamx-x86_64-darwin = mkServer {
+            crossPkgs = pkgs.pkgsCross.x86_64-darwin;
+            target = "x86_64-apple-darwin";
+          };
+        } // pkgs.lib.optionalAttrs (system == "x86_64-darwin") {
+          streamx-aarch64-darwin = mkServer {
+            crossPkgs = pkgs.pkgsCross.aarch64-darwin;
+            target = "aarch64-apple-darwin";
+          };
+        };
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
@@ -111,6 +217,10 @@
           shellHook = ''
             export RUST_LOG=info
             export RUST_BACKTRACE=1
+            # Baked into streamx-desktop at compile time so the app finds
+            # mpv even when launched outside this shell (Finder, plain
+            # terminal), where the Nix store is not on PATH.
+            export STREAMX_MPV_BUILD_PATH="${pkgs.mpv-unwrapped}/bin/mpv"
             export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
             export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
             export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true
@@ -211,6 +321,17 @@
           fmt = craneLib.cargoFmt {
             src = ./.;
           };
+
+          # Shipped binaries must be self-contained per platform policy.
+          linkage-server = linkageCheck "server" packages.streamx "streamx"
+            (if pkgs.stdenv.isDarwin then "macos" else "linux-desktop");
+        } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          linkage-server-x86_64-musl =
+            linkageCheck "x86_64-musl" packages.streamx-x86_64-linux-musl "streamx" "static";
+          linkage-server-aarch64-musl =
+            linkageCheck "aarch64-musl" packages.streamx-aarch64-linux-musl "streamx" "static";
+          linkage-desktop =
+            linkageCheck "desktop" packages.streamx-desktop "streamx-desktop" "linux-desktop";
         };
       }
     );

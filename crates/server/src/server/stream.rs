@@ -766,6 +766,17 @@ pub async fn stream_file_by_index(
             message: format!("Stream {id} not found"),
         })?;
 
+    // A viewer opening the file is the signal to get pieces flowing
+    // again: paused (stopped) and errored downloads resume here, which
+    // also re-adds torrents that left the session. Complete downloads
+    // are untouched. Without this, mpv connects to a stream that never
+    // produces bytes.
+    if matches!(download.status.as_str(), "paused" | "error") {
+        if let Err(e) = state.torrent_engine.resume(&id).await {
+            tracing::warn!(stream_id = %id, "resume on playback failed: {e}");
+        }
+    }
+
     let sorted =
         crate::torrent::files::sorted_torrent_files(&state.torrent_engine, &id, Some(&download))
             .await;

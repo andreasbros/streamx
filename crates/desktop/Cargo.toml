@@ -41,4 +41,5 @@ parking_lot = "0.12"
 directories = "6"
 
 [dev-dependencies]
+streamx-linkcheck = { path = "../linkcheck" }
 tempfile = "3"

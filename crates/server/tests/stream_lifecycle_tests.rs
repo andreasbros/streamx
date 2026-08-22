@@ -208,6 +208,28 @@ async fn basic_stream_lifecycle() {
         .await
         .unwrap();
     assert_eq!(still_resp.status(), StatusCode::NOT_FOUND);
+
+    // Starting the same magnet again after a delete must work like a
+    // fresh stream (no stale engine handle or pending-add reservation).
+    let again = client
+        .post(format!("{}/api/stream", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({ "magnet_uri": MAGNET_BBB }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::OK);
+    let again_body: Value = again.json().await.unwrap();
+    assert_eq!(again_body["stream_id"], stream_id);
+    assert_eq!(again_body["status"], "initializing");
+
+    let back = client
+        .get(format!("{}/api/stream/{stream_id}", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(back.status(), StatusCode::OK);
 }
 
 // ---------------------------------------------------------------------------
