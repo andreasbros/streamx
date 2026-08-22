@@ -311,6 +311,11 @@ impl HlsManager {
             }
         };
 
+        // A fresh transcode starts its idle clock now; without this the
+        // watchdog treated "never accessed yet" as already idle and reaped
+        // it on the first tick.
+        self.last_access
+            .insert(active_key.clone(), std::time::Instant::now());
         self.active.write().await.insert(active_key, handle);
 
         Ok(())
@@ -396,6 +401,11 @@ impl HlsManager {
                 .await?
         };
 
+        // A fresh transcode starts its idle clock now; without this the
+        // watchdog treated "never accessed yet" as already idle and reaped
+        // it on the first tick.
+        self.last_access
+            .insert(active_key.clone(), std::time::Instant::now());
         self.active.write().await.insert(active_key, handle);
 
         Ok(())
@@ -468,6 +478,11 @@ impl HlsManager {
             }
         };
 
+        // A fresh transcode starts its idle clock now; without this the
+        // watchdog treated "never accessed yet" as already idle and reaped
+        // it on the first tick.
+        self.last_access
+            .insert(active_key.clone(), std::time::Instant::now());
         self.active.write().await.insert(active_key, handle);
         Ok(())
     }

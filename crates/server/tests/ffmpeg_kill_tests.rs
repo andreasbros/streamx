@@ -25,8 +25,11 @@ fn test_config() -> TranscodeConfig {
 }
 
 async fn create_mgr(name: &str) -> (HlsManager, PathBuf) {
+    create_mgr_with(name, test_config()).await
+}
+
+async fn create_mgr_with(name: &str, config: TranscodeConfig) -> (HlsManager, PathBuf) {
     let cache_dir = test_output_dir(&format!("kill_{name}"));
-    let config = test_config();
     let mgr = HlsManager::new(&config, cache_dir.clone())
         .await
         .expect("create HlsManager");
@@ -93,6 +96,29 @@ fn count_ffmpeg(path_fragment: &str) -> usize {
     }
 }
 
+/// Poll the FFmpeg process count until `pred` holds or `deadline`
+/// passes. Fixed sleeps made these tests flaky under full parallel
+/// load, where probing and spawning take longer than a few seconds.
+async fn wait_for_ffmpeg(
+    path_fragment: &str,
+    deadline: std::time::Duration,
+    pred: impl Fn(usize) -> bool,
+) -> usize {
+    let start = std::time::Instant::now();
+    loop {
+        let n = count_ffmpeg(path_fragment);
+        if pred(n) || start.elapsed() >= deadline {
+            return n;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+}
+
+const SPAWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+const KILL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+/// Watchdog: 30s idle threshold + 10s check interval, plus headroom.
+const WATCHDOG_DEADLINE: std::time::Duration = std::time::Duration::from_secs(75);
+
 #[tokio::test]
 async fn drop_handle_kills_ffmpeg() {
     let clip = long_hevc_clip();
@@ -108,14 +134,12 @@ async fn drop_handle_kills_ffmpeg() {
         .await
         .expect("start_stream");
 
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    let before = count_ffmpeg(&path_frag);
+    let before = wait_for_ffmpeg(&path_frag, SPAWN_DEADLINE, |n| n > 0).await;
     eprintln!("FFmpeg before drop: {before}");
     assert!(before > 0, "FFmpeg should be running");
 
     drop(mgr);
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    let after = count_ffmpeg(&path_frag);
+    let after = wait_for_ffmpeg(&path_frag, KILL_DEADLINE, |n| n == 0).await;
     eprintln!("FFmpeg after drop: {after}");
     assert_eq!(after, 0, "FFmpeg should be killed on drop");
 }
@@ -136,8 +160,7 @@ async fn quality_switch_kills_previous() {
         .await
         .expect("start 1080p");
 
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    let n1 = count_ffmpeg(&path_frag);
+    let n1 = wait_for_ffmpeg(&path_frag, SPAWN_DEADLINE, |n| n > 0).await;
     eprintln!("FFmpeg after 1080p start: {n1}");
     assert!(n1 > 0, "1080p FFmpeg should be running");
 
@@ -146,14 +169,13 @@ async fn quality_switch_kills_previous() {
         .await
         .expect("start 720p");
 
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    let n2 = count_ffmpeg(&path_frag);
+    let n2 = wait_for_ffmpeg(&path_frag, KILL_DEADLINE, |n| n <= 1).await;
     eprintln!("FFmpeg after switch to 720p: {n2}");
     assert!(n2 <= 1, "Old 1080p FFmpeg should be killed, got {n2}");
 
     drop(mgr);
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    assert_eq!(count_ffmpeg(&path_frag), 0, "All FFmpeg dead after drop");
+    let n3 = wait_for_ffmpeg(&path_frag, KILL_DEADLINE, |n| n == 0).await;
+    assert_eq!(n3, 0, "All FFmpeg dead after drop");
 }
 
 #[tokio::test]
@@ -163,7 +185,14 @@ async fn watchdog_kills_idle() {
         eprintln!("SKIP: clip not generated");
         return;
     }
-    let (mgr, cache) = create_mgr("watchdog").await;
+    // The 60s clip transcodes to completion in a few seconds at
+    // `ultrafast`, which would end FFmpeg before the 30s idle
+    // threshold and prove nothing. A single-threaded `veryslow` encode
+    // keeps FFmpeg busy well past the watchdog window.
+    let mut config = test_config();
+    config.preset = "veryslow".to_string();
+    config.threads = Some(1);
+    let (mgr, cache) = create_mgr_with("watchdog", config).await;
     let stream_id = "test_watchdog";
     let path_frag = cache.join(stream_id).to_string_lossy().to_string();
 
@@ -171,18 +200,30 @@ async fn watchdog_kills_idle() {
         .await
         .expect("start_stream");
 
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    let before = count_ffmpeg(&path_frag);
+    let before = wait_for_ffmpeg(&path_frag, SPAWN_DEADLINE, |n| n > 0).await;
     eprintln!("FFmpeg before idle: {before}");
     assert!(before > 0, "FFmpeg should be running");
+    let spawned_at = std::time::Instant::now();
 
-    // Wait for watchdog (30s idle + 10s check interval)
-    eprintln!("Waiting 45s for watchdog...");
-    tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+    // Still alive well inside the idle window: the encode is genuinely
+    // long-running, so a later exit can only be the watchdog.
+    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+    assert!(
+        count_ffmpeg(&path_frag) > 0,
+        "encode finished too early to exercise the watchdog"
+    );
 
-    let after = count_ffmpeg(&path_frag);
-    eprintln!("FFmpeg after idle: {after}");
+    // No playlist or segment is requested from here on, so the stream
+    // goes idle and the watchdog must reap FFmpeg on its own.
+    eprintln!("Waiting for the idle watchdog...");
+    let after = wait_for_ffmpeg(&path_frag, WATCHDOG_DEADLINE, |n| n == 0).await;
+    let reaped_after = spawned_at.elapsed();
+    eprintln!("FFmpeg after idle: {after} (reaped after {reaped_after:?})");
     assert_eq!(after, 0, "Watchdog should have killed idle FFmpeg");
+    assert!(
+        reaped_after >= std::time::Duration::from_secs(30),
+        "FFmpeg exited before the 30s idle threshold, so the watchdog was not what stopped it"
+    );
 
     drop(mgr);
 }

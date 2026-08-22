@@ -1,4 +1,4 @@
-//! `streamx-linkcheck <binary> [--policy static|linux-desktop|macos]`
+//! `streamx-linkcheck <binary> [--policy static|linux-desktop|macos|macos-dev]`
 //!
 //! Exit status 0 when the binary satisfies the policy; prints every
 //! violation otherwise. Without `--policy` the rule for the host
@@ -6,7 +6,9 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use streamx_linkcheck::{assert_policy, linux_desktop_allowlist, policy_for_current_target, Policy};
+use streamx_linkcheck::{
+    assert_policy, linux_desktop_allowlist, policy_for_current_target, Policy,
+};
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -21,8 +23,11 @@ fn main() -> ExitCode {
                         allowed_sonames: linux_desktop_allowlist(),
                     }),
                     Some("macos") => Some(Policy::MacosSystemFrameworks),
+                    Some("macos-dev") => Some(Policy::MacosDevBundle {
+                        bundle_manifest: streamx_linkcheck::macos_bundle_manifest(),
+                    }),
                     other => {
-                        eprintln!("unknown policy {other:?}; expected static|linux-desktop|macos");
+                        eprintln!("unknown policy {other:?}; expected static|linux-desktop|macos|macos-dev");
                         return ExitCode::from(2);
                     }
                 };
@@ -31,7 +36,9 @@ fn main() -> ExitCode {
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: streamx-linkcheck <binary> [--policy static|linux-desktop|macos]");
+        eprintln!(
+            "usage: streamx-linkcheck <binary> [--policy static|linux-desktop|macos|macos-dev]"
+        );
         return ExitCode::from(2);
     };
     let policy = policy.unwrap_or_else(policy_for_current_target);

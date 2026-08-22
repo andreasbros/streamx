@@ -1,4 +1,5 @@
 [package]
+build = "build.rs"
 name = "streamx-desktop"
 version.workspace = true
 edition.workspace = true
@@ -39,7 +40,11 @@ anyhow = "1"
 once_cell = "1"
 parking_lot = "0.12"
 directories = "6"
+libmpv2 = "6"
 
 [dev-dependencies]
 streamx-linkcheck = { path = "../linkcheck" }
 tempfile = "3"
+
+[build-dependencies]
+pkg-config = "0.3"

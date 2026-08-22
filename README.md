@@ -63,7 +63,32 @@ cargo build --release -p streamx-desktop
 
 Run `./target/release/streamx-desktop` for the app, or `./target/release/streamx` and open `http://127.0.0.1:8999` for the web UI.
 
-The desktop app plays video through `mpv`, which must be on your `PATH` (the Nix dev shell provides it). macOS desktop builds need Xcode's Metal shader compiler, see [Troubleshooting](#troubleshooting).
+The desktop app embeds **libmpv** for playback: video runs in-process, no mpv executable or PATH lookup. The dev shell provides libmpv via pkg-config; if libmpv cannot initialize at runtime the app falls back to an `mpv` executable when one is found. macOS desktop builds need Xcode's Metal shader compiler, see [Troubleshooting](#troubleshooting).
+
+### Self-contained release artifacts
+
+Every shipped binary must satisfy an explicit linkage policy, enforced by `crates/linkcheck` (tests in `cargo test`, a CLI for pipelines, and `nix flake check`):
+
+| Target | Policy |
+|---|---|
+| Linux, musl (`streamx` server) | Fully static: no interpreter, no shared libraries |
+| Linux, glibc (`streamx-desktop`) | Only allowlisted host libraries (libc, Vulkan, Wayland/X11, fontconfig); everything else static |
+| macOS | Apple system frameworks plus dylibs bundled inside the `.app` (`@rpath`) |
+
+```bash
+# Static servers (run on a Linux host)
+nix build .#streamx-x86_64-linux-musl
+nix build .#streamx-aarch64-linux-musl
+
+# macOS app: bundles libmpv and its FFmpeg closure into StreamX.app,
+# rewrites install names, ad-hoc signs, and verifies the strict policy
+scripts/bundle-macos.sh target/release/streamx-desktop dist/StreamX.app
+
+# Check any artifact
+cargo run -p streamx-linkcheck -- path/to/binary --policy static|linux-desktop|macos
+```
+
+FFmpeg is still an external runtime dependency of the server's HLS transcoding; embedding it is the next step.
 
 ## Configuration
 

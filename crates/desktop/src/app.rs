@@ -24,7 +24,7 @@ use crate::keybindings::{translate, Shortcut};
 use crate::pages::{loading_page, movie_page, stub_page};
 use crate::playback;
 use crate::playback::ipc::{MpvIpc, Snapshot};
-use crate::playback::{MpvInstance, PlayTarget};
+use crate::playback::{Control, PlayTarget, Player};
 use crate::router::Page;
 use crate::runtime;
 use crate::state::{AppState, BrowseData, Mode, Toast, ToastKind};
@@ -37,8 +37,8 @@ pub struct PlayerState {
     pub file_index: usize,
     pub target: Option<PlayTarget>,
     pub error: Option<String>,
-    pub mpv: Option<MpvInstance>,
-    pub ipc: Option<MpvIpc>,
+    pub mpv: Option<Player>,
+    pub ipc: Option<Control>,
     pub snapshot: Snapshot,
     /// Latest torrent status snapshot (progress, peers, speed).
     pub torrent: Option<streamx_api::types::StreamStatus>,
@@ -196,7 +196,7 @@ impl MainView {
                 {
                     let mut p = player.lock();
                     if let Some(mpv) = p.mpv.as_mut() {
-                        if let Ok(Some(_status)) = mpv.child.try_wait() {
+                        if mpv.is_finished() {
                             p.mpv = None;
                             p.ipc = None;
                         }
@@ -206,9 +206,7 @@ impl MainView {
                 // Poll mpv IPC for play-state snapshot (paused + time-pos + duration).
                 let ipc_clone = player.lock().ipc.clone();
                 if let Some(ipc) = ipc_clone {
-                    let snap =
-                        runtime::spawn(async move { crate::playback::ipc::snapshot(&ipc).await })
-                            .await;
+                    let snap = runtime::spawn(async move { ipc.snapshot().await }).await;
                     player.lock().snapshot = snap;
                     state.mark_dirty();
                 }
@@ -532,7 +530,7 @@ impl MainView {
         {
             let mut prev = self.player.lock();
             if let Some(ref mut mpv) = prev.mpv {
-                let _ = mpv.child.kill();
+                mpv.stop();
             }
             *prev = PlayerState::default();
             prev.last_request = Some(req.clone());
@@ -618,26 +616,32 @@ impl MainView {
                 }
             };
 
-            match playback::launch_mpv(&target, &theme) {
-                Ok(instance) => {
-                    let socket = instance.socket_path.clone();
+            match playback::launch(&target, &theme) {
+                Ok((instance, control)) => {
+                    let socket = match &instance {
+                        Player::Spawned(m) => Some(m.socket_path.clone()),
+                        Player::Embedded(_) => None,
+                    };
                     {
                         let mut p = player.lock();
                         p.target = Some(target);
                         p.mpv = Some(instance);
+                        p.ipc = control;
                     }
-                    // Connect IPC in the background once mpv has created the socket.
-                    let player_ref = player.clone();
-                    runtime::spawn_detached(async move {
-                        match MpvIpc::connect(&socket).await {
-                            Ok(ipc) => {
-                                player_ref.lock().ipc = Some(ipc);
+                    // Spawned fallback: connect IPC once mpv creates its socket.
+                    if let Some(socket) = socket {
+                        let player_ref = player.clone();
+                        runtime::spawn_detached(async move {
+                            match MpvIpc::connect(&socket).await {
+                                Ok(ipc) => {
+                                    player_ref.lock().ipc = Some(Control::Ipc(ipc));
+                                }
+                                Err(e) => {
+                                    tracing::warn!("mpv IPC connect failed: {e}");
+                                }
                             }
-                            Err(e) => {
-                                tracing::warn!("mpv IPC connect failed: {e}");
-                            }
-                        }
-                    });
+                        });
+                    }
                 }
                 Err(e) => {
                     player.lock().error = Some(e);

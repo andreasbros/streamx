@@ -182,6 +182,83 @@ pub struct MpvInstance {
     pub socket_path: PathBuf,
 }
 
+pub mod embedded;
+
+/// A running player: libmpv inside this process, or a spawned mpv
+/// executable when libmpv cannot start.
+pub enum Player {
+    Embedded(std::sync::Arc<embedded::EmbeddedPlayer>),
+    Spawned(MpvInstance),
+}
+
+impl Player {
+    /// True when the player window is gone.
+    pub fn is_finished(&mut self) -> bool {
+        match self {
+            Player::Embedded(p) => p.is_finished(),
+            Player::Spawned(m) => matches!(m.child.try_wait(), Ok(Some(_))),
+        }
+    }
+
+    pub fn stop(&mut self) {
+        match self {
+            Player::Embedded(p) => p.stop(),
+            Player::Spawned(m) => {
+                let _ = m.child.kill();
+            }
+        }
+    }
+}
+
+/// Transport-agnostic playback controls.
+#[derive(Clone)]
+pub enum Control {
+    Embedded(std::sync::Arc<embedded::EmbeddedPlayer>),
+    Ipc(ipc::MpvIpc),
+}
+
+impl Control {
+    pub async fn toggle_pause(&self) -> Result<(), String> {
+        match self {
+            Control::Embedded(p) => p.toggle_pause(),
+            Control::Ipc(i) => i.toggle_pause().await,
+        }
+    }
+
+    pub async fn seek(&self, seconds: f64, relative: bool) -> Result<(), String> {
+        match self {
+            Control::Embedded(p) => p.seek(seconds, relative),
+            Control::Ipc(i) => i.seek(seconds, relative).await,
+        }
+    }
+
+    pub async fn snapshot(&self) -> ipc::Snapshot {
+        match self {
+            Control::Embedded(p) => p.snapshot(),
+            Control::Ipc(i) => ipc::snapshot(i).await,
+        }
+    }
+}
+
+/// Start playback: libmpv in-process first, falling back to spawning
+/// an mpv executable (controls then arrive once its IPC socket is up).
+/// The fallback is returned with `Control::None` semantics via the
+/// second tuple element being `None`.
+pub fn launch(target: &PlayTarget, theme: &Theme) -> Result<(Player, Option<Control>), String> {
+    match embedded::EmbeddedPlayer::launch(target) {
+        Ok(p) => {
+            let p = std::sync::Arc::new(p);
+            tracing::info!("playback: libmpv embedded player started");
+            Ok((Player::Embedded(p.clone()), Some(Control::Embedded(p))))
+        }
+        Err(e) => {
+            tracing::warn!("embedded libmpv unavailable ({e}); falling back to mpv executable");
+            let instance = launch_mpv(target, theme)?;
+            Ok((Player::Spawned(instance), None))
+        }
+    }
+}
+
 /// Launch mpv on a PlayTarget. Opens a JSON IPC socket so the desktop can
 /// pause/seek/query state while mpv renders the video.
 pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, String> {

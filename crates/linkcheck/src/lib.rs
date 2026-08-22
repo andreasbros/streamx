@@ -72,6 +72,11 @@ pub enum Policy {
     /// macOS rule: dylibs only from Apple system locations or bundled
     /// via `@rpath` / `@executable_path`.
     MacosSystemFrameworks,
+    /// macOS development builds: like `MacosSystemFrameworks`, but a
+    /// dylib from the build environment is accepted when its basename
+    /// is in the bundle manifest, because release packaging ships that
+    /// library inside the .app. Anything outside the manifest fails.
+    MacosDevBundle { bundle_manifest: Vec<String> },
 }
 
 impl Policy {
@@ -80,6 +85,7 @@ impl Policy {
             Policy::FullyStatic => "fully-static",
             Policy::SystemOnly { .. } => "system-only",
             Policy::MacosSystemFrameworks => "macos-system-frameworks",
+            Policy::MacosDevBundle { .. } => "macos-dev-bundle",
         }
     }
 }
@@ -117,6 +123,21 @@ pub fn linux_desktop_allowlist() -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect()
+}
+
+/// Third-party libraries the macOS .app bundles next to the binary.
+/// A dev build may reference these from the build environment; the
+/// release artifact must reference them via `@rpath`.
+pub fn macos_bundle_manifest() -> Vec<String> {
+    ["libmpv"].iter().map(|s| s.to_string()).collect()
+}
+
+fn macos_system_or_bundled(lib: &str) -> bool {
+    lib.starts_with("/System/Library/")
+        || lib.starts_with("/usr/lib/")
+        || lib.starts_with("@rpath/")
+        || lib.starts_with("@executable_path/")
+        || lib.starts_with("@loader_path/")
 }
 
 /// Parse a binary's linkage. Fat Mach-O files report the union of
@@ -185,13 +206,24 @@ pub fn violations(linkage: &Linkage, policy: &Policy) -> Vec<String> {
         }
         Policy::MacosSystemFrameworks => {
             for lib in &linkage.libraries {
-                let ok = lib.starts_with("/System/Library/")
-                    || lib.starts_with("/usr/lib/")
-                    || lib.starts_with("@rpath/")
-                    || lib.starts_with("@executable_path/")
-                    || lib.starts_with("@loader_path/");
-                if !ok {
+                if !macos_system_or_bundled(lib) {
                     problems.push(format!("links dylib outside the system or bundle: {lib}"));
+                }
+            }
+        }
+        Policy::MacosDevBundle { bundle_manifest } => {
+            for lib in &linkage.libraries {
+                if macos_system_or_bundled(lib) {
+                    continue;
+                }
+                let base = lib.rsplit('/').next().unwrap_or(lib);
+                let in_manifest = bundle_manifest
+                    .iter()
+                    .any(|m| base == m.as_str() || base.starts_with(&format!("{m}.")));
+                if !in_manifest {
+                    problems.push(format!(
+                        "links dylib outside the system that release packaging does not bundle: {lib}"
+                    ));
                 }
             }
         }
@@ -202,7 +234,9 @@ pub fn violations(linkage: &Linkage, policy: &Policy) -> Vec<String> {
 /// The policy a binary built for the running target must satisfy.
 pub fn policy_for_current_target() -> Policy {
     if cfg!(target_os = "macos") {
-        Policy::MacosSystemFrameworks
+        Policy::MacosDevBundle {
+            bundle_manifest: macos_bundle_manifest(),
+        }
     } else if cfg!(target_env = "musl") {
         Policy::FullyStatic
     } else {
@@ -285,6 +319,25 @@ mod tests {
             ],
         );
         assert_eq!(violations(&bad, &policy).len(), 2);
+    }
+
+    #[test]
+    fn macos_dev_bundle_accepts_manifest_only() {
+        let policy = Policy::MacosDevBundle {
+            bundle_manifest: macos_bundle_manifest(),
+        };
+        let dev = lk(
+            None,
+            &[
+                "/usr/lib/libSystem.B.dylib",
+                "/nix/store/xyz-mpv-0.41.0/lib/libmpv.2.dylib",
+            ],
+        );
+        assert!(violations(&dev, &policy).is_empty());
+        let stray = lk(None, &["/nix/store/abc-ffmpeg/lib/libavcodec.61.dylib"]);
+        assert_eq!(violations(&stray, &policy).len(), 1);
+        // The strict release policy still rejects the store libmpv.
+        assert_eq!(violations(&dev, &Policy::MacosSystemFrameworks).len(), 1);
     }
 
     #[test]
