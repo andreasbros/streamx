@@ -7113,6 +7113,7 @@ dependencies = [
  "directories",
  "gpui",
  "libmpv2",
+ "objc",
  "once_cell",
  "parking_lot",
  "pkg-config",

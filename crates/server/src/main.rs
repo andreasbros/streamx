@@ -190,60 +190,13 @@ fn kill_all_streamx_ffmpeg() {
 }
 
 fn run_command(cmd: &cli::Command, config: &config::AppConfig) -> Result<()> {
-    let data_dir = &config.data_dir;
-
     match cmd {
         cli::Command::Clean => {
-            let cache_dir = data_dir.join("cache");
-            let downloads_dir = config.downloads_dir();
-
-            if cache_dir.exists() {
-                std::fs::remove_dir_all(&cache_dir).map_err(|e| error::Error::Io { source: e })?;
-                println!("Removed cache: {}", cache_dir.display());
-            }
-            if downloads_dir.exists() {
-                std::fs::remove_dir_all(&downloads_dir)
-                    .map_err(|e| error::Error::Io { source: e })?;
-                println!("Removed downloads: {}", downloads_dir.display());
-            }
+            streamx::maintenance::clean(config)?;
             println!("Clean complete. Config and database preserved.");
         }
         cli::Command::Wipe => {
-            let keep_config = data_dir.join("config.toml");
-            let config_backup = if keep_config.exists() {
-                Some(std::fs::read_to_string(&keep_config).ok())
-            } else {
-                None
-            };
-
-            let entries: Vec<_> = std::fs::read_dir(data_dir)
-                .map_err(|e| error::Error::Io { source: e })?
-                .filter_map(|e| e.ok())
-                .collect();
-
-            for entry in entries {
-                let path = entry.path();
-                if path
-                    .file_name()
-                    .map(|n| n == "config.toml")
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                if path.is_dir() {
-                    std::fs::remove_dir_all(&path).map_err(|e| error::Error::Io { source: e })?;
-                    println!("Removed: {}", path.display());
-                } else {
-                    std::fs::remove_file(&path).map_err(|e| error::Error::Io { source: e })?;
-                    println!("Removed: {}", path.display());
-                }
-            }
-
-            if let Some(Some(content)) = config_backup {
-                std::fs::write(&keep_config, content)
-                    .map_err(|e| error::Error::Io { source: e })?;
-            }
-
+            streamx::maintenance::wipe(config)?;
             println!("Wipe complete. Only config.toml preserved.");
         }
     }

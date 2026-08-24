@@ -394,6 +394,45 @@ session_duration = "7d"
 
 [ui]
 default_theme = "dark"
+
+# Default content sources. Extra or replacement providers can live in
+# providers.toml next to this file (same [[providers]] format).
+[[providers]]
+id = 1
+name = "yts"
+kind = "movies"
+url = "https://yts.bz"
+api_url = "https://yts.bz/api/v2/list_movies.json"
+
+[[providers]]
+id = 5
+name = "torrentio"
+kind = "movies"
+url = "https://torrentio.strem.fun/providers=yts,1337x,thepiratebay"
+format = "torrentio"
+
+[[providers]]
+id = 2
+name = "torrentio"
+kind = "tv"
+url = "https://torrentio.strem.fun/providers=eztv,1337x,thepiratebay"
+format = "torrentio"
+
+[[providers]]
+id = 3
+name = "tpb"
+kind = "music-videos"
+url = "https://apibay.org"
+format = "apibay"
+category = "601"
+
+[[providers]]
+id = 4
+name = "tpb"
+kind = "music"
+url = "https://apibay.org"
+format = "apibay"
+category = "101"
 "#
     .to_string()
 }

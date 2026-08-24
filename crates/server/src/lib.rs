@@ -6,6 +6,7 @@ pub mod error;
 pub mod ffmpeg_bin;
 pub mod local_api;
 pub mod logging;
+pub mod maintenance;
 pub mod runner;
 pub mod server;
 pub mod torrent;

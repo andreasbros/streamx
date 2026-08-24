@@ -19,3 +19,6 @@ test-results/
 test-results-live/
 crates/server/test-media/
 providers.toml
+
+# macOS Finder metadata
+.DS_Store

@@ -59,7 +59,10 @@ PLIST
 
 # App icon: derive the .icns from the repo logo so Dock, Finder, and
 # the app switcher all show it.
-ICON_SRC="web/public/icons/android-chrome-512x512.png"
+# Dedicated macOS icon: black glyph on transparency, near full bleed
+# (the web favicon set is white-on-tile and reads badly in the Dock).
+ICON_SRC="assets/icons/macos-icon-1024.png"
+[ -f "$ICON_SRC" ] || ICON_SRC="web/public/icons/android-chrome-512x512.png"
 if [ -f "$ICON_SRC" ]; then
   ICONSET="$(mktemp -d)/StreamX.iconset"
   mkdir -p "$ICONSET"

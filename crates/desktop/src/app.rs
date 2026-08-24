@@ -54,6 +54,15 @@ pub struct MainView {
 
     username_input: Entity<TextInput>,
     password_input: Entity<TextInput>,
+    /// Maintenance op ("clean" | "wipe") awaiting its confirming click.
+    confirm_maintenance: Option<&'static str>,
+    repeat_input: Entity<TextInput>,
+    logs_scroll: gpui::UniformListScrollHandle,
+    /// Follow the log tail. Cleared when the user scrolls up; restored
+    /// when they return to the bottom.
+    logs_follow: std::cell::Cell<bool>,
+    /// Login page shows account creation instead of sign-in.
+    login_create_mode: bool,
     url_input: Entity<TextInput>,
     search_input: Entity<TextInput>,
     admin_kill_input: Entity<TextInput>,
@@ -88,6 +97,11 @@ impl MainView {
                 .with_placeholder("password")
                 .password()
         });
+        let repeat_input = cx.new(|c| {
+            crate::text_input::TextInput::new(c)
+                .with_placeholder("repeat password")
+                .password()
+        });
         let url_input = cx.new(|c| {
             crate::text_input::TextInput::new(c)
                 .with_placeholder("http://localhost:8999")
@@ -108,12 +122,41 @@ impl MainView {
             username_focus.focus(window, cx);
         }
 
+        // Fresh database: offer account creation instead of sign-in.
+        // The in-process backend appears once the embedded server boots,
+        // so poll briefly; remote/HTTP backends always answer false.
+        if matches!(state.current_page(), Page::Login) {
+            let probe_state = state.clone();
+            cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+                for _ in 0..20 {
+                    let client = probe_state.client.read().clone();
+                    let needs = runtime::spawn(async move { client.needs_setup().await }).await;
+                    if let Ok(true) = needs {
+                        let _ = this.update(cx, |view, cx| {
+                            view.login_create_mode = true;
+                            cx.notify();
+                        });
+                        return;
+                    }
+                    cx.background_executor()
+                        .timer(Duration::from_millis(500))
+                        .await;
+                }
+            })
+            .detach();
+        }
+
         let this = Self {
             state: state.clone(),
             theme,
             focus_handle,
             username_input,
             password_input,
+            repeat_input,
+            logs_scroll: gpui::UniformListScrollHandle::new(),
+            logs_follow: std::cell::Cell::new(true),
+            login_create_mode: false,
+            confirm_maintenance: None,
             url_input,
             search_input,
             admin_kill_input,
@@ -197,8 +240,7 @@ impl MainView {
                     let mut p = player.lock();
                     if let Some(mpv) = p.mpv.as_mut() {
                         if mpv.is_finished() {
-                            p.mpv = None;
-                            p.ipc = None;
+                            crate::playback::dispose(p.mpv.take(), p.ipc.take());
                         }
                     }
                 }
@@ -323,16 +365,40 @@ impl MainView {
                     runtime::spawn_detached(async move { load_category_page(&st).await });
                 }
 
-                // Repaint the Logs page only when the ring buffer
-                // changed; log volume never drives frames elsewhere.
+                // Logs page: repaint only when the ring buffer changed,
+                // and follow the tail unless the user scrolled away.
                 if matches!(state.current_page(), Page::Logs) {
                     let len = state.logs.len();
                     let seen = state
                         .logs_seen
                         .swap(len, std::sync::atomic::Ordering::Relaxed);
-                    if seen != len {
-                        state.mark_dirty();
-                    }
+                    let _ = this.update(cx, |view, cx| {
+                        // At-bottom detection decides follow mode: a user
+                        // scrolled to the tail follows, anywhere else the
+                        // view stays put while lines keep arriving.
+                        let (at_bottom, scrollable) = {
+                            let sc = view.logs_scroll.0.borrow();
+                            match sc.last_item_size {
+                                Some(sz) if sz.contents.height > sz.item.height => {
+                                    let offset_y = -sc.base_handle.offset().y;
+                                    let gap =
+                                        sz.contents.height - (offset_y + sz.item.height);
+                                    (gap < gpui::px(28.0), true)
+                                }
+                                _ => (true, false),
+                            }
+                        };
+                        if scrollable {
+                            view.logs_follow.set(at_bottom);
+                        }
+                        if seen != len {
+                            if view.logs_follow.get() {
+                                view.logs_scroll.scroll_to_bottom();
+                            }
+                            view.state.mark_dirty();
+                            cx.notify();
+                        }
+                    });
                 }
 
                 // Keep download progress fresh on the pages that show it.
@@ -471,6 +537,58 @@ impl MainView {
         .detach();
     }
 
+    fn submit_register(&mut self, cx: &mut Context<Self>) {
+        if *self.state.login_in_flight.read() {
+            return;
+        }
+        let username = self.username_input.read(cx).value().to_string();
+        let password = self.password_input.read(cx).value().to_string();
+        let repeat = self.repeat_input.read(cx).value().to_string();
+        // Mirror the server's rules so mistakes surface before the call.
+        let error = if username.len() < 3 || username.len() > 32 {
+            Some("username must be 3-32 characters")
+        } else if password.len() < 8 || password.len() > 128 {
+            Some("password must be 8-128 characters")
+        } else if password != repeat {
+            Some("passwords do not match")
+        } else {
+            None
+        };
+        if let Some(e) = error {
+            *self.state.login_error.write() = Some(e.to_string());
+            cx.notify();
+            return;
+        }
+        *self.state.login_in_flight.write() = true;
+        *self.state.login_error.write() = None;
+
+        let state = self.state.clone();
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            let client = state.client.read().clone();
+            let res =
+                runtime::spawn(async move { client.register(&username, &password).await }).await;
+            match res {
+                Ok(resp) => {
+                    state.set_token(Some(resp.token));
+                    *state.login_error.write() = None;
+                    state.replace_page(Page::Search);
+                    let client = state.client.read().clone();
+                    if let Ok(u) = runtime::spawn(async move { client.me().await }).await {
+                        *state.user.write() = Some(u);
+                    }
+                    load_browse(&state).await;
+                }
+                Err(e) => {
+                    *state.login_error.write() = Some(format!("{e}"));
+                }
+            }
+            *state.login_in_flight.write() = false;
+            state.mark_dirty();
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
     fn start_playback(&mut self, variant_idx: usize, cx: &mut Context<Self>) {
         let movie = match self.state.selected_movie.read().clone() {
             Some(m) => m,
@@ -541,9 +659,7 @@ impl MainView {
         // don't leave orphan windows behind.
         {
             let mut prev = self.player.lock();
-            if let Some(ref mut mpv) = prev.mpv {
-                mpv.stop();
-            }
+            crate::playback::dispose(prev.mpv.take(), prev.ipc.take());
             *prev = PlayerState::default();
             prev.last_request = Some(req.clone());
         }
@@ -628,8 +744,35 @@ impl MainView {
                 }
             };
 
-            match playback::launch(&target, &theme) {
+            // Launch on a tokio worker thread: libmpv's macOS window
+            // creation dispatches onto the main queue, so launching from
+            // this foreground task can deadlock (audio-only files hit it
+            // reliably with force-window=immediate).
+            let launch_target = target.clone();
+            let launch_theme = theme;
+            let launched =
+                runtime::spawn(async move { playback::launch(&launch_target, &launch_theme) })
+                    .await;
+            match launched {
                 Ok((instance, control)) => {
+                    // mpv steals the Dock icon when its window appears;
+                    // take it back now and again once the window exists.
+                    let _ = this.update(cx, |_, _| crate::playback::reset_dock_icon());
+                    let this_icon = this.clone();
+                    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                        for _ in 0..8 {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(500))
+                                .await;
+                            if this_icon
+                                .update(cx, |_, _| crate::playback::reset_dock_icon())
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
                     let socket = match &instance {
                         Player::Spawned(m) => Some(m.socket_path.clone()),
                         Player::Embedded(_) => None,
@@ -685,7 +828,11 @@ impl MainView {
         let Some(api_base) = api_base else { return };
         let Some(detail) = detail_url else { return };
 
-        *self.player.lock() = PlayerState::default();
+        {
+            let mut prev = self.player.lock();
+            crate::playback::dispose(prev.mpv.take(), prev.ipc.take());
+            *prev = PlayerState::default();
+        }
         self.state.navigate(Page::Player);
 
         let state = self.state.clone();
@@ -795,12 +942,24 @@ impl MainView {
                 }))
         };
 
+        // Thin client ships later; releases run Embedded only.
+        let disabled_pill = div()
+            .id("mode-thin-disabled")
+            .px(px(theme.space_3()))
+            .py(px(theme.space_2()))
+            .rounded(px(theme.radius_md()))
+            .bg(theme.bg_elevated())
+            .text_color(theme.fg_muted())
+            .text_size(px(theme.fs_1()))
+            .border_1()
+            .border_color(theme.border_subtle())
+            .child(div().child("Thin client (coming soon)"));
         let mode_row = div()
             .flex()
             .gap(px(theme.space_2()))
             .mb(px(theme.space_2()))
             .child(mode_pill("Embedded (local files)", Mode::Embedded))
-            .child(mode_pill("Thin client (remote server)", Mode::ThinClient));
+            .child(disabled_pill);
 
         let url_row = if mode == Mode::ThinClient {
             div()
@@ -835,10 +994,12 @@ impl MainView {
             }),
         };
 
-        let submit_label: SharedString = if in_flight {
-            SharedString::from("Signing in… ⟳")
-        } else {
-            SharedString::from("Sign in")
+        let create = self.login_create_mode;
+        let submit_label: SharedString = match (create, in_flight) {
+            (true, true) => SharedString::from("Creating account… ⟳"),
+            (true, false) => SharedString::from("Create account"),
+            (false, true) => SharedString::from("Signing in… ⟳"),
+            (false, false) => SharedString::from("Sign in"),
         };
 
         card(&theme)
@@ -887,9 +1048,48 @@ impl MainView {
                     )
                     .child(self.password_input.clone()),
             )
+            .when(create, |el| {
+                el.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(theme.space_1()))
+                        .child(
+                            div()
+                                .text_size(px(theme.fs_1()))
+                                .text_color(theme.fg_muted())
+                                .child("Repeat password"),
+                        )
+                        .child(self.repeat_input.clone()),
+                )
+            })
             .child(
-                primary_button("login-submit", submit_label, &theme)
-                    .on_click(cx.listener(|this, _ev, _w, cx| this.submit_login(cx))),
+                primary_button("login-submit", submit_label, &theme).on_click(cx.listener(
+                    |this, _ev, _w, cx| {
+                        if this.login_create_mode {
+                            this.submit_register(cx);
+                        } else {
+                            this.submit_login(cx);
+                        }
+                    },
+                )),
+            )
+            .child(
+                div()
+                    .id("login-mode-toggle")
+                    .text_size(px(theme.fs_1()))
+                    .text_color(theme.accent_text())
+                    .cursor_pointer()
+                    .child(if create {
+                        "Have an account? Sign in"
+                    } else {
+                        "New here? Create an account"
+                    })
+                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                        this.login_create_mode = !this.login_create_mode;
+                        *this.state.login_error.write() = None;
+                        cx.notify();
+                    })),
             )
             .when_some(login_err.or(conn_err), |el, e: String| {
                 el.child(
@@ -2177,12 +2377,14 @@ impl MainView {
                 secondary_button("logs-clear", "Clear", &theme).on_click(cx.listener(
                     move |this, _ev, _w, cx| {
                         this.state.logs.clear();
+                        this.logs_follow.set(true);
                         this.state.mark_dirty();
                         cx.notify();
                     },
                 )),
             );
 
+        let widest = (0..count).max_by_key(|i| lines[*i].len());
         let list_lines = lines.clone();
         let list = gpui::uniform_list("logs-list", count, move |range, _window, _cx| {
             range
@@ -2210,7 +2412,26 @@ impl MainView {
                 })
                 .collect()
         })
+        .track_scroll(&self.logs_scroll)
+        .with_width_from_item(widest)
+        .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
         .h_full();
+
+        // Scroll position indicator (wheel/trackpad scrolls the list).
+        let thumb = {
+            let sc = self.logs_scroll.0.borrow();
+            sc.last_item_size.and_then(|sz| {
+                if sz.contents.height <= sz.item.height {
+                    return None;
+                }
+                let viewport = f32::from(sz.item.height).max(1.0);
+                let content = f32::from(sz.contents.height).max(1.0);
+                let offset_y = (-f32::from(sc.base_handle.offset().y)).max(0.0);
+                let frac_h = (viewport / content).clamp(0.05, 1.0);
+                let frac_top = (offset_y / content).clamp(0.0, 1.0 - frac_h);
+                Some((frac_top, frac_h))
+            })
+        };
 
         div()
             .w_full()
@@ -2226,12 +2447,25 @@ impl MainView {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .relative()
                     .rounded(px(theme.radius_md()))
                     .bg(theme.bg_surface())
                     .border_1()
                     .border_color(theme.border_subtle())
                     .overflow_hidden()
-                    .child(list),
+                    .child(list)
+                    .when_some(thumb, |el, (frac_top, frac_h)| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .right(px(2.0))
+                                .top(gpui::relative(frac_top))
+                                .h(gpui::relative(frac_h))
+                                .w(px(4.0))
+                                .rounded(px(2.0))
+                                .bg(theme.border_strong()),
+                        )
+                    }),
             )
     }
 
@@ -3325,6 +3559,75 @@ impl MainView {
                         .child("Live server metrics and logs stream over WebSocket. Desktop WebSocket support lands later; use the web UI for live dashboards."),
                 ),
         )
+        .child(
+            card(&theme)
+                .flex()
+                .flex_col()
+                .gap(px(theme.space_2()))
+                .child(
+                    div()
+                        .text_size(px(theme.fs_3()))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(theme.fg_primary())
+                        .child("Maintenance"),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme.fs_1()))
+                        .text_color(theme.fg_muted())
+                        .child(
+                            "Clean removes the transcode cache and every downloaded file; \
+                             your account, history, favourites, and settings stay. Wipe \
+                             removes everything except the config file: accounts, history, \
+                             favourites, database, cache, and downloads are gone. Both \
+                             restart the app.",
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(theme.space_2()))
+                        .child({
+                            let confirming = self.confirm_maintenance == Some("clean");
+                            let label = if confirming { "Confirm clean + restart" } else { "Clean" };
+                            crate::components::danger_button("admin-clean", label, &theme).on_click(
+                                cx.listener(move |this, _ev, _w, cx| {
+                                    if confirming {
+                                        relaunch_with_maintenance("clean");
+                                    } else {
+                                        this.confirm_maintenance = Some("clean");
+                                        cx.notify();
+                                    }
+                                }),
+                            )
+                        })
+                        .child({
+                            let confirming = self.confirm_maintenance == Some("wipe");
+                            let label = if confirming { "Confirm wipe + restart" } else { "Wipe" };
+                            crate::components::danger_button("admin-wipe", label, &theme).on_click(
+                                cx.listener(move |this, _ev, _w, cx| {
+                                    if confirming {
+                                        relaunch_with_maintenance("wipe");
+                                    } else {
+                                        this.confirm_maintenance = Some("wipe");
+                                        cx.notify();
+                                    }
+                                }),
+                            )
+                        })
+                        .when(self.confirm_maintenance.is_some(), |el| {
+                            el.child(
+                                secondary_button("admin-maint-cancel", "Cancel", &theme).on_click(
+                                    cx.listener(|this, _ev, _w, cx| {
+                                        this.confirm_maintenance = None;
+                                        cx.notify();
+                                    }),
+                                ),
+                            )
+                        }),
+                ),
+        )
     }
 
     fn drawer_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4079,6 +4382,21 @@ const SURROUND_DEMOS: &[SurroundDemo] = &[
 
 /// The eight home categories, shared by the home rows and the category
 /// drill-down page.
+/// Restart the app with a maintenance operation: the fresh process
+/// performs it before any server component opens the data dir.
+fn relaunch_with_maintenance(op: &str) {
+    match std::env::current_exe() {
+        Ok(exe) => match std::process::Command::new(exe)
+            .env("STREAMX_MAINTENANCE", op)
+            .spawn()
+        {
+            Ok(_) => std::process::exit(0),
+            Err(e) => tracing::error!("maintenance relaunch failed to spawn: {e}"),
+        },
+        Err(e) => tracing::error!("maintenance relaunch: current_exe failed: {e}"),
+    }
+}
+
 /// The current year as a leaked static string: browse sections and
 /// category titles want `&'static str`, and the year changes at most
 /// once per process lifetime.
@@ -4502,8 +4820,33 @@ impl Render for MainView {
             .flex_col()
             .relative()
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                // Tab cycles the login form fields.
+                if matches!(this.state.current_page(), Page::Login)
+                    && ev.keystroke.key.as_str() == "tab"
+                {
+                    let order: Vec<Entity<TextInput>> = if this.login_create_mode {
+                        vec![
+                            this.username_input.clone(),
+                            this.password_input.clone(),
+                            this.repeat_input.clone(),
+                        ]
+                    } else {
+                        vec![this.username_input.clone(), this.password_input.clone()]
+                    };
+                    let focused = order.iter().position(|i| i.read(cx).is_focused(window));
+                    let backwards = ev.keystroke.modifiers.shift;
+                    let next = match focused {
+                        Some(i) if backwards => (i + order.len() - 1) % order.len(),
+                        Some(i) => (i + 1) % order.len(),
+                        None => 0,
+                    };
+                    order[next].read(cx).focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                    return;
+                }
                 let focused_is_input = this.username_input.read(cx).is_focused(window)
                     || this.password_input.read(cx).is_focused(window)
+                    || this.repeat_input.read(cx).is_focused(window)
                     || this.url_input.read(cx).is_focused(window)
                     || this.search_input.read(cx).is_focused(window)
                     || this.admin_kill_input.read(cx).is_focused(window)

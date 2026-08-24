@@ -212,6 +212,19 @@ impl Api for LocalApi {
         .await
     }
 
+    async fn needs_setup(&self) -> ClientResult<bool> {
+        let components = self.components.clone();
+        self.run(async move {
+            components
+                .database
+                .user_count()
+                .await
+                .map(|n| n == 0)
+                .map_err(err_to_client)
+        })
+        .await
+    }
+
     async fn register(&self, username: &str, password: &str) -> ClientResult<LoginResponse> {
         let components = self.components.clone();
         let username = username.trim().to_lowercase();

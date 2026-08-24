@@ -17,15 +17,29 @@ fn main() {
             cx.quit();
             return;
         };
-        let player = match EmbeddedPlayer::launch(&PlayTarget::LocalFile(clip)) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("launch failed: {e}");
-                cx.quit();
-                return;
-            }
-        };
+        // Launch off the main thread: libmpv's macOS window creation
+        // dispatches onto the main queue, so a main-thread launch can
+        // deadlock waiting for itself.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(EmbeddedPlayer::launch(&PlayTarget::LocalFile(clip)));
+        });
         cx.spawn(async move |cx| {
+            let player = loop {
+                match rx.try_recv() {
+                    Ok(Ok(p)) => break p,
+                    Ok(Err(e)) => {
+                        eprintln!("launch failed: {e}");
+                        cx.update(|cx| cx.quit());
+                        return;
+                    }
+                    Err(_) => {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(100))
+                            .await;
+                    }
+                }
+            };
             for _ in 0..20 {
                 cx.background_executor()
                     .timer(Duration::from_millis(500))

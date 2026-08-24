@@ -18,6 +18,7 @@ permissions:
 jobs:
   linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,6 +43,7 @@ jobs:
 
   macos:
     runs-on: macos-14
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,7 +52,6 @@ jobs:
         with:
           extra-conf: |
             extra-platforms = x86_64-darwin
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
       - name: Build dmgs (Apple Silicon + Intel via Rosetta)
         run: |
           nix develop --command scripts/release.sh aarch64-apple-darwin dist/StreamX-aarch64.dmg

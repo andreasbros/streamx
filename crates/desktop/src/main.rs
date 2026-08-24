@@ -46,6 +46,40 @@ fn main() {
 
     runtime::init();
 
+    // Admin-page Clean/Wipe relaunch the app with this env var so the
+    // deletion runs before any server component holds the data dir.
+    if let Ok(op) = std::env::var("STREAMX_MAINTENANCE") {
+        let cli = streamx::cli::Cli {
+            command: None,
+            port: None,
+            bind: None,
+            data_dir: None,
+            config: None,
+            log_level: None,
+            log_dir: None,
+            open: false,
+            admin_user: None,
+            admin_password: None,
+        };
+        match streamx::config::load_config(&cli) {
+            Ok(config) => {
+                let res = match op.as_str() {
+                    "clean" => streamx::maintenance::clean(&config),
+                    "wipe" => streamx::maintenance::wipe(&config),
+                    other => {
+                        tracing::warn!(op = other, "unknown maintenance operation; skipping");
+                        Ok(())
+                    }
+                };
+                match res {
+                    Ok(()) => tracing::info!(op = %op, "maintenance complete"),
+                    Err(e) => tracing::error!(op = %op, "maintenance failed: {e}"),
+                }
+            }
+            Err(e) => tracing::error!("maintenance skipped, config failed to load: {e}"),
+        }
+    }
+
     tracing::info!("starting StreamX desktop");
     let state = AppState::with_logs(log_history.clone());
     tracing::info!(
@@ -94,6 +128,15 @@ fn main() {
             app_id: Some("streamx-desktop".to_string()),
             ..Default::default()
         };
+
+        // Closing the last window quits: without this the process
+        // lingers in the Dock as "running" with no window to reopen.
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
 
         cx.open_window(options, |window, cx| {
             cx.new(|cx| MainView::new(state.clone(), window, cx))

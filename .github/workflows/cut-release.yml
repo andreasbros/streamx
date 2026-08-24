@@ -21,6 +21,7 @@ permissions:
 jobs:
   cut:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       tag: ${{ steps.cut.outputs.tag }}
     steps:

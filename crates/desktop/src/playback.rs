@@ -210,6 +210,42 @@ impl Player {
     }
 }
 
+/// mpv's Cocoa code replaces the process's Dock icon with mpv's when
+/// its window appears. Restore the bundle's own icon; passing nil makes
+/// AppKit fall back to Info.plist's CFBundleIconFile. Main thread only.
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)] // objc 0.2 macros carry a legacy cargo-clippy cfg
+pub fn reset_dock_icon() {
+    use objc::{class, msg_send, sel, sel_impl};
+    unsafe {
+        let app: *mut objc::runtime::Object = msg_send![class!(NSApplication), sharedApplication];
+        let nil: *mut objc::runtime::Object = std::ptr::null_mut();
+        let _: () = msg_send![app, setApplicationIconImage: nil];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reset_dock_icon() {}
+
+/// Tear a player down off the main thread. `mpv_terminate_destroy`
+/// blocks until the core exits, and on macOS window teardown needs the
+/// main queue; dropping the last handle on the main thread therefore
+/// deadlocks the whole app. Every disposal must go through here.
+pub fn dispose(player: Option<Player>, control: Option<Control>) {
+    if player.is_none() && control.is_none() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("mpv-dispose".into())
+        .spawn(move || {
+            drop(control);
+            if let Some(mut p) = player {
+                p.stop();
+                drop(p);
+            }
+        });
+}
+
 /// Transport-agnostic playback controls.
 #[derive(Clone)]
 pub enum Control {

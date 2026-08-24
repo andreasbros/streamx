@@ -56,6 +56,11 @@ pub trait Api: Send + Sync {
     async fn version(&self) -> ClientResult<VersionResponse>;
     async fn login(&self, username: &str, password: &str) -> ClientResult<LoginResponse>;
     async fn register(&self, username: &str, password: &str) -> ClientResult<LoginResponse>;
+    /// True when no account exists yet and the UI should offer account
+    /// creation first. Backends without the notion return false.
+    async fn needs_setup(&self) -> ClientResult<bool> {
+        Ok(false)
+    }
     async fn me(&self) -> ClientResult<User>;
     async fn search(&self, query: &str, page: u32) -> ClientResult<SearchResponse>;
     async fn browse(&self, params: &BrowseParams) -> ClientResult<Vec<SearchResultGroup>>;
@@ -157,6 +162,7 @@ impl Client {
     delegate!(version(&self) -> ClientResult<VersionResponse>);
     delegate!(login(&self, username: &str, password: &str) -> ClientResult<LoginResponse>);
     delegate!(register(&self, username: &str, password: &str) -> ClientResult<LoginResponse>);
+    delegate!(needs_setup(&self) -> ClientResult<bool>);
     delegate!(me(&self) -> ClientResult<User>);
     delegate!(search(&self, query: &str, page: u32) -> ClientResult<SearchResponse>);
     delegate!(browse(&self, params: &BrowseParams) -> ClientResult<Vec<SearchResultGroup>>);

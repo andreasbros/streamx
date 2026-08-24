@@ -23,7 +23,7 @@ pub struct EmbeddedPlayer {
 /// Options every player window gets. Mirrors the flags the spawned
 /// mpv used, plus the bindings/OSC that libmpv leaves off by default.
 const PLAYER_OPTIONS: &[(&str, &str)] = &[
-    ("force-window", "yes"),
+    ("force-window", "immediate"),
     ("keep-open", "always"),
     ("idle", "yes"),
     ("input-default-bindings", "yes"),
