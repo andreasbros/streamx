@@ -20,6 +20,9 @@ jobs:
         run: |
           nix develop --command bash -c '
             set -euo pipefail
+            # rust-embed compiles web/dist into the server binary; a
+            # fresh checkout has no dist, so build the UI first.
+            (cd web && pnpm install --frozen-lockfile && pnpm build)
             export CARGO_TARGET_DIR=$PWD/target/nix
             cargo fmt --all -- --check
             cargo clippy --workspace --all-targets -- -D warnings
