@@ -362,6 +362,20 @@
         # cannot provide. Windows outputs land with the Windows port.
         packages = {
           default = mkServer { };
+          # Media dependencies for scripts/release.sh: libmpv (link +
+          # bundle) and the ffmpeg/ffprobe executables shipped in the
+          # macOS .app. Built per system, so an Apple Silicon host with
+          # Rosetta (`extra-platforms = x86_64-darwin`) can fetch the
+          # Intel set for cross bundling.
+          media-deps = pkgs.buildEnv {
+            name = "streamx-media-deps";
+            paths = [
+              pkgs.mpv-unwrapped
+              pkgs.mpv-unwrapped.dev
+              pkgs.ffmpeg-full
+              (pkgs.lib.getBin pkgs.ffmpeg-full)
+            ];
+          };
           streamx = mkServer { };
           streamx-linkcheck = linkcheck;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
@@ -440,6 +454,10 @@
           packages = with pkgs; [
             rustToolchain
             rust-analyzer
+
+            # Release tooling
+            git-cliff
+            gh
 
             # Cargo ecosystem
             cargo-watch
@@ -557,6 +575,39 @@
             echo "  Node:     $(node --version)"
             echo "  Platform: ${system}"
           '';
+        };
+
+        # Command entry points:
+        #   nix run .#build-all   every artifact this platform can produce
+        #   nix run .#release -- patch|minor|major [--dry-run]
+        apps = {
+          build-all = {
+            type = "app";
+            program = pkgs.lib.getExe (pkgs.writeShellApplication {
+              name = "streamx-build-all";
+              runtimeInputs = [ pkgs.git ];
+              text = ''
+                cd "$(git rev-parse --show-toplevel)"
+                if [ "$(uname -s)" = "Darwin" ]; then
+                  nix develop --command scripts/release.sh aarch64-apple-darwin dist/StreamX-aarch64.dmg
+                  nix develop --command scripts/release.sh x86_64-apple-darwin dist/StreamX-x86_64.dmg
+                else
+                  scripts/verify-release.sh
+                fi
+              '';
+            });
+          };
+          release = {
+            type = "app";
+            program = pkgs.lib.getExe (pkgs.writeShellApplication {
+              name = "streamx-release";
+              runtimeInputs = [ pkgs.git pkgs.git-cliff pkgs.gh pkgs.cargo ];
+              text = ''
+                cd "$(git rev-parse --show-toplevel)"
+                exec scripts/release-tag.sh "$@"
+              '';
+            });
+          };
         };
 
         # cargo clippy + fmt as reusable checks. Run with: nix flake check

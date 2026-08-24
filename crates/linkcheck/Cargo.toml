@@ -1,6 +1,6 @@
 [package]
 name = "streamx-linkcheck"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Verifies StreamX binaries are self-contained: static on Linux, system-frameworks-only on macOS"
 license = "MIT"

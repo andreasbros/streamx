@@ -1,0 +1,49 @@
+# Tag-triggered release: builds every platform artifact and attaches it
+# to the GitHub release created by `nix run .#release`.
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Build static servers + desktop
+        run: |
+          nix build .#streamx-x86_64-linux-musl --out-link out-x86_64
+          nix build .#streamx-aarch64-linux-musl --out-link out-aarch64
+          nix build .#streamx-desktop-dist --out-link out-desktop
+          nix flake check
+      - name: Package
+        run: |
+          mkdir -p dist
+          install -m755 out-x86_64/bin/streamx dist/streamx-x86_64-linux-musl
+          install -m755 out-aarch64/bin/streamx dist/streamx-aarch64-linux-musl
+          tar -C out-desktop -czf dist/streamx-desktop-x86_64-linux.tar.gz .
+      - name: Upload
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            extra-platforms = x86_64-darwin
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Build dmgs (Apple Silicon + Intel via Rosetta)
+        run: |
+          nix develop --command scripts/release.sh aarch64-apple-darwin dist/StreamX-aarch64.dmg
+          nix develop --command scripts/release.sh x86_64-apple-darwin dist/StreamX-x86_64.dmg
+      - name: Upload
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release upload "${GITHUB_REF_NAME}" dist/*.dmg --clobber

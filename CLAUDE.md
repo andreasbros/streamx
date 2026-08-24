@@ -46,6 +46,7 @@ gets poisoned (E0514 stale-rmeta errors).
 - Desktop UI: `cargo build -p streamx-desktop --features ui-test && cargo build -p streamx && cargo run -p streamx-ui-harness` (add `--live` for real-poster verification). Screenshots export to `$TEST_SCREENSHOTS_DIR` (repo `.env`) as timestamped JPEG runs; macOS via `scripts/ui-test-macos.sh user@macmini`.
 - E2E tests use real backend with mock streaming endpoint
 - Release artifacts: `scripts/verify-release.sh` builds all Linux outputs, runs `nix flake check` (linkage policies) and the Docker container e2e (`cargo test -p streamx --test docker_static_tests -- --ignored`)
+- macOS releases: `scripts/release.sh <triple> <out.dmg>` (aarch64/x86_64-apple-darwin); bundles libmpv + FFmpeg into StreamX.app and verifies the `macos` linkage policy
 - All tests must run inside `nix develop`
 - Performance metrics tracked in `benchmarks/e2e_perf.json` (git-tracked)
 - After running E2E tests, serve the report for review: `python3 -m http.server 8997 -d /tmp/streamx_e2e_artifacts/html-report`

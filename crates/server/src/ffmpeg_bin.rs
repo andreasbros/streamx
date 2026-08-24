@@ -46,10 +46,35 @@ pub fn install(data_dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// No-op without the feature: resolution stays on `PATH`.
+/// Without embedded bytes, prefer executables shipped next to the app
+/// (the macOS `.app` carries them in `Contents/Helpers`), then `PATH`.
 #[cfg(not(feature = "embed-ffmpeg"))]
 pub fn install(_data_dir: &std::path::Path) -> std::io::Result<()> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some((ffmpeg_path, ffprobe_path)) = bundled_pair(dir) {
+                let _ = FFMPEG.set(ffmpeg_path);
+                let _ = FFPROBE.set(ffprobe_path);
+            }
+        }
+    }
     Ok(())
+}
+
+/// `ffmpeg` + `ffprobe` shipped alongside the executable: either in the
+/// same directory or in a sibling `Helpers` directory (macOS bundle
+/// layout `Contents/MacOS` + `Contents/Helpers`). Both must be present;
+/// resolution is all-or-nothing so versions can never mix.
+fn bundled_pair(exe_dir: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
+    let candidates = [exe_dir.to_path_buf(), exe_dir.join("../Helpers")];
+    for dir in candidates {
+        let ffmpeg = dir.join("ffmpeg");
+        let ffprobe = dir.join("ffprobe");
+        if ffmpeg.is_file() && ffprobe.is_file() {
+            return Some((ffmpeg, ffprobe));
+        }
+    }
+    None
 }
 
 #[cfg(feature = "embed-ffmpeg")]
@@ -92,5 +117,38 @@ mod tests {
     fn falls_back_to_path_lookup() {
         assert_eq!(ffmpeg(), PathBuf::from("ffmpeg"));
         assert_eq!(ffprobe(), PathBuf::from("ffprobe"));
+    }
+
+    #[test]
+    fn bundled_pair_requires_both_binaries() {
+        // Fully private tree: `exe_dir/../Helpers` must resolve inside
+        // it, never into the shared temp dir where stale files from
+        // other test binaries would leak in.
+        let root = std::env::temp_dir().join(format!(
+            "sx_ffbin_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("MacOS");
+        let helpers = root.join("Helpers");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::create_dir_all(&helpers).expect("mkdir helpers");
+        assert!(bundled_pair(&dir).is_none());
+
+        std::fs::write(helpers.join("ffmpeg"), b"x").expect("write");
+        assert!(bundled_pair(&dir).is_none(), "ffprobe missing");
+
+        std::fs::write(helpers.join("ffprobe"), b"x").expect("write");
+        let (f, p) = bundled_pair(&dir).expect("both present");
+        assert!(f.ends_with("Helpers/ffmpeg"));
+        assert!(p.ends_with("Helpers/ffprobe"));
+
+        std::fs::write(dir.join("ffmpeg"), b"x").expect("write");
+        std::fs::write(dir.join("ffprobe"), b"x").expect("write");
+        let (f, _) = bundled_pair(&dir).expect("same-dir wins");
+        assert_eq!(f, dir.join("ffmpeg"));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

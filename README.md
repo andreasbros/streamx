@@ -141,9 +141,44 @@ nix build .#checks.x86_64-linux.linkage-desktop-dist
 # ldd shows only allowlisted host sonames (libc, libstdc++, Vulkan,
 # X11/Wayland, xkbcommon, ALSA); no mpv/FFmpeg/codec libraries.
 
-# macOS app: bundles libmpv and its FFmpeg closure into StreamX.app,
-# rewrites install names, ad-hoc signs, and verifies the strict policy
+# macOS releases: one command per architecture, run on a Mac.
+# Produces a drag-to-Applications disk image containing StreamX.app
+# with libmpv, its FFmpeg closure, and the ffmpeg/ffprobe executables
+# bundled (Contents/Helpers), ad-hoc signed and policy-verified.
+# Intel builds work on Apple Silicon via Rosetta-backed Nix
+# (`extra-platforms = x86_64-darwin` in nix.conf).
+scripts/release.sh aarch64-apple-darwin dist/StreamX-aarch64.dmg
+scripts/release.sh x86_64-apple-darwin  dist/StreamX-x86_64.dmg
+# .zip instead of .dmg produces a ditto zip; a bare path produces the .app.
+# Set CODESIGN_IDENTITY="Developer ID Application: ..." to sign for
+# distribution; without it users approve the first launch once via
+# System Settings > Privacy & Security > "Open Anyway".
+
+# Lower-level: bundle an already built binary into an .app
 scripts/bundle-macos.sh target/release/streamx-desktop dist/StreamX.app
+```
+
+### Releases
+
+Versioning is [SemVer](https://semver.org) with the workspace
+`Cargo.toml` as the single source of truth; `CHANGELOG.md` is generated
+from [Conventional Commit](https://www.conventionalcommits.org)
+messages by git-cliff (`cliff.toml`).
+
+```bash
+# Everything this platform can build (macOS: both dmgs; Linux: the
+# full verify-release gate)
+nix run .#build-all
+
+# Cut a release from a clean, pushed main: bumps the version, writes
+# CHANGELOG.md, commits, tags vX.Y.Z, pushes, and creates the GitHub
+# release. The tag triggers .github/workflows/release.yml, which builds
+# and attaches the Linux and macOS artifacts.
+nix run .#release -- patch          # or minor / major / X.Y.Z
+nix run .#release -- patch --dry-run   # preview the notes first
+```
+
+Step-by-step instructions: [docs/RELEASING.md](docs/RELEASING.md).
 
 # Check any artifact
 cargo run -p streamx-linkcheck -- path/to/binary --policy static|linux-desktop|linux-dist|linux-dev|macos|macos-dev
