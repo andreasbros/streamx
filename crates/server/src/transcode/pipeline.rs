@@ -465,7 +465,7 @@ impl TranscodePipeline {
         let playlist_path = output_dir.join("playlist.m3u8");
         let segment_pattern = output_dir.join("segment_%04d.ts");
 
-        let mut cmd = Command::new("ffmpeg");
+        let mut cmd = Command::new(crate::ffmpeg_bin::ffmpeg());
         cmd.arg("-y")
             .arg("-hide_banner")
             .arg("-loglevel")
@@ -724,7 +724,7 @@ impl TranscodePipeline {
         let playlist_path = output_dir.join("playlist.m3u8");
         let segment_pattern = output_dir.join("segment_%04d.ts");
 
-        let mut cmd = Command::new("ffmpeg");
+        let mut cmd = Command::new(crate::ffmpeg_bin::ffmpeg());
         cmd.arg("-y")
             .arg("-hide_banner")
             .arg("-loglevel")
@@ -820,7 +820,7 @@ impl TranscodePipeline {
     ) -> std::result::Result<Command, String> {
         // Always transcode to H.264 for MPEG-TS HLS (browsers can't play HEVC in TS)
 
-        let mut cmd = Command::new("ffmpeg");
+        let mut cmd = Command::new(crate::ffmpeg_bin::ffmpeg());
         cmd.arg("-y")
             .arg("-hide_banner")
             .arg("-loglevel")
@@ -931,7 +931,7 @@ impl TranscodePipeline {
         tier: &QualityTier,
         output_dir: &Path,
     ) -> Command {
-        let mut cmd = tokio::process::Command::new("ffmpeg");
+        let mut cmd = tokio::process::Command::new(crate::ffmpeg_bin::ffmpeg());
         cmd.arg("-y")
             .arg("-hide_banner")
             .arg("-loglevel")

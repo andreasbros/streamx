@@ -109,7 +109,7 @@ struct FfprobeFormat {
 }
 
 pub async fn probe(file_path: &str) -> Result<MediaInfo> {
-    let output = Command::new("ffprobe")
+    let output = Command::new(crate::ffmpeg_bin::ffprobe())
         .args([
             "-v",
             "quiet",

@@ -46,12 +46,26 @@ Pick Embedded or Thin client on the desktop app's login screen (changeable later
 
 ## Build
 
-All tooling is pinned via Nix.
+All tooling is pinned via Nix. Builds are one command each: Nix builds
+the web UI in the sandbox, embeds it, and compiles the Rust binaries.
+
+```bash
+nix build .#streamx           # server, native
+nix build .#streamx-desktop   # desktop app (Linux)
+```
+
+Binaries land in `./result/bin/`.
+
+### Development
+
+For iterative work, enter the dev shell and drive the toolchains
+directly. Cargo builds embed `web/dist` from the working tree, so build
+the web UI once first (and again after changing `web/`):
 
 ```bash
 nix develop
 
-# Web UI (embedded into the server binary)
+# Web UI (embedded into the server binary by cargo builds)
 cd web && pnpm install && pnpm build && cd ..
 
 # Server
@@ -67,28 +81,100 @@ The desktop app embeds **libmpv** for playback: video runs in-process, no mpv ex
 
 ### Self-contained release artifacts
 
+`scripts/verify-release.sh` runs the whole release gate in one command:
+builds every Linux artifact, enforces the linkage policies via
+`nix flake check`, runs the workspace test suite, and boots the
+artifacts in stock distro containers (skipped when no Docker daemon is
+running). The individual pieces are described below.
+
+Supported platforms:
+
+| Artifact | Platforms | Requirements on the host |
+|---|---|---|
+| `streamx` server (musl, x86_64 + aarch64) | Any Linux distribution, any libc, containers | None: fully static, FFmpeg embedded |
+| `streamx-desktop` (Linux, x86_64) | Desktop distros with glibc >= 2.39 (Ubuntu 24.04+, Fedora 40+, Debian 13+) | Base desktop system only (glibc, X11/Wayland, Vulkan, ALSA) |
+| `StreamX.app` (macOS, Apple Silicon + Intel) | macOS | None: libmpv/FFmpeg bundled in the .app |
+| Windows | planned | |
+
+The server is truly static: musl libc is compiled into the binary, there
+is no dynamic loader and no shared libraries, so it runs identically on
+every distro and in empty containers. A **GUI** binary cannot be fully
+static on Linux: video needs Vulkan, whose loader `dlopen`s the host's
+GPU driver (NVIDIA, Mesa) at runtime, and audio reaches
+PipeWire/PulseAudio through plugins `dlopen`ed by the host's ALSA.
+The desktop app therefore follows the shape every shipped Linux GUI app
+uses (Steam, OBS, AppImages): everything we own is linked statically
+(libmpv, FFmpeg, libass, libplacebo, shaderc), and only the OS interface
+layer is dynamic, restricted to an explicit allowlist of libraries every
+desktop installation already has. The glibc >= 2.39 floor comes from the
+build toolchain's symbol versioning; supporting older LTS releases means
+building against an older glibc sysroot (roadmap).
+
 Every shipped binary must satisfy an explicit linkage policy, enforced by `crates/linkcheck` (tests in `cargo test`, a CLI for pipelines, and `nix flake check`):
 
 | Target | Policy |
 |---|---|
-| Linux, musl (`streamx` server) | Fully static: no interpreter, no shared libraries |
-| Linux, glibc (`streamx-desktop`) | Only allowlisted host libraries (libc, Vulkan, Wayland/X11, fontconfig); everything else static |
+| Linux, musl (`streamx` server) | `static`: no interpreter, no shared libraries |
+| Linux, glibc (`streamx-desktop`) | `linux-dist`: standard system loader, no store RUNPATH, only allowlisted host sonames; everything else static |
 | macOS | Apple system frameworks plus dylibs bundled inside the `.app` (`@rpath`) |
 
 ```bash
-# Static servers (run on a Linux host)
+# Static servers (run on a Linux host); web UI built and embedded
+# automatically like every nix output.
 nix build .#streamx-x86_64-linux-musl
 nix build .#streamx-aarch64-linux-musl
+
+# Verify
+file result/bin/streamx
+#   ELF 64-bit LSB pie executable, x86-64 ... static-pie linked
+nix build .#checks.x86_64-linux.linkage-server-x86_64-musl
+#   ok: .../bin/streamx satisfies fully-static (0 shared libraries)
+STREAMX_LINKCHECK_BIN=$PWD/result/bin/streamx cargo test -p streamx --test static_link
+
+# Linux desktop, distributable artifact: the plain .#streamx-desktop
+# output only starts on Nix systems (its ELF interpreter lives in
+# /nix/store); the -dist variant rewrites it to the standard system
+# loader. Verified to run on stock Ubuntu 24.04.
+nix build .#streamx-desktop-dist
+nix build .#checks.x86_64-linux.linkage-desktop-dist
+#   ok: .../bin/streamx-desktop satisfies linux-dist (16 shared libraries)
+# ldd shows only allowlisted host sonames (libc, libstdc++, Vulkan,
+# X11/Wayland, xkbcommon, ALSA); no mpv/FFmpeg/codec libraries.
 
 # macOS app: bundles libmpv and its FFmpeg closure into StreamX.app,
 # rewrites install names, ad-hoc signs, and verifies the strict policy
 scripts/bundle-macos.sh target/release/streamx-desktop dist/StreamX.app
 
 # Check any artifact
-cargo run -p streamx-linkcheck -- path/to/binary --policy static|linux-desktop|macos
+cargo run -p streamx-linkcheck -- path/to/binary --policy static|linux-desktop|linux-dist|linux-dev|macos|macos-dev
 ```
 
-FFmpeg is still an external runtime dependency of the server's HLS transcoding; embedding it is the next step.
+The musl servers are built with the `embed-ffmpeg` cargo feature: static
+`ffmpeg`/`ffprobe` executables are embedded in the binary and extracted
+to `<data>/cache/bin` on first start (hash-checked), so HLS transcoding
+works on a host with nothing installed. Builds without the feature keep
+resolving both tools from `PATH`. The embedded FFmpeg carries a curated
+feature set (native decoders plus dav1d, libx264 + native aac encoding,
+plain-http IO); the static in-process libmpv shares it, so the desktop
+player streams `http://` in-process and falls back to a system `mpv`
+for `https://` remote servers.
+
+If a `nix build` fails fetching a git crate dependency (for example
+`Cannot find Git revision ... in ref 'master' of repository .../blade`),
+a global `url."git@github.com:".insteadOf = "https://github.com/"` git
+rewrite is the cause: Nix's evaluator shells out to git to vendor
+`Cargo.lock` git dependencies over anonymous HTTPS, the rewrite forces
+those fetches onto SSH, and without your SSH agent in the evaluator's
+environment the fetch fails (Nix then misreports it as a missing
+revision). Fix it by scoping the rewrite to pushes only, which keeps
+SSH pushes working while fetches stay on HTTPS:
+
+```bash
+git config --global --unset url.git@github.com:.insteadof
+git config --global url."git@github.com:".pushInsteadOf "https://github.com/"
+```
+
+One-off alternative: prefix the build with `GIT_CONFIG_GLOBAL=/dev/null`.
 
 ## Configuration
 
@@ -194,6 +280,17 @@ cd web && pnpm test:e2e
 
 # Desktop UI tests (JSON test driver + screenshots, see crates/ui-harness/README.md)
 cargo build -p streamx-desktop --features ui-test && cargo build -p streamx && cargo run -p streamx-ui-harness
+
+# Release artifacts in stock distro containers (testcontainers; needs a
+# Docker daemon, Docker Desktop or colima on macOS, and network):
+# - boots the static server in vanilla Alpine, checks the linkage
+#   policy, embedded web UI and ffmpeg, then streams a real torrent
+# - boots the same binary across Ubuntu/Debian/Rocky/Fedora images
+# - loads the desktop dist binary on stock Ubuntu 24.04 with only
+#   distro packages installed
+nix build .#streamx-x86_64-linux-musl --out-link result-x86_64-musl   # aarch64 on Apple Silicon
+nix build .#streamx-desktop-dist --out-link result-desktop-dist
+cargo test -p streamx --test docker_static_tests -- --ignored
 ```
 
 ## CLI

@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod embedded;
 pub mod error;
+pub mod ffmpeg_bin;
 pub mod local_api;
 pub mod logging;
 pub mod runner;

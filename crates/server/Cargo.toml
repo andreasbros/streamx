@@ -15,6 +15,11 @@ path = "src/main.rs"
 # ts-rs into the final binary; the derives are cfg-gated.
 ts-export = ["streamx-api/ts-export", "dep:ts-rs"]
 
+# Carry static ffmpeg/ffprobe executables inside the server binary.
+# Requires STREAMX_FFMPEG_BIN and STREAMX_FFPROBE_BIN at compile time
+# (paths to the binaries to embed); wired up by the Nix musl packages.
+embed-ffmpeg = ["dep:sha2"]
+
 [dependencies]
 streamx-api = { path = "../api", features = ["client"] }
 ts-rs = { version = "10", optional = true }
@@ -45,7 +50,9 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 http = "1"
 bytes = "1"
-librqbit = "8"
+# rust-tls instead of default-tls: the default pulls native-tls and
+# OpenSSL, which breaks the self-contained linkage policy.
+librqbit = { version = "8", default-features = false, features = ["rust-tls", "http-api-client"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
 urlencoding = "2"
 scraper = "0.22"
@@ -53,6 +60,7 @@ dashmap = "6"
 futures = "0.3"
 libc = "0.2"
 lofty = "0.21"
+sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 streamx-linkcheck = { path = "../linkcheck" }
@@ -63,3 +71,4 @@ tokio = { version = "1", features = ["full", "test-util"] }
 portpicker = "0.1"
 serial_test = "3"
 rstest = "0.24"
+testcontainers = "0.28.0"

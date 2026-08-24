@@ -73,27 +73,228 @@
           nativeBuildInputs = commonNativeBuildInputs;
         };
 
-        # Source that also carries the prebuilt web UI: rust-embed reads
-        # web/dist at compile time. Run `cd web && pnpm build` first.
-        srcWithWeb = pkgs.lib.cleanSourceWith {
+        # Web UI built hermetically from the git-tracked sources. A
+        # locally built web/dist can never reach the sandbox: the flake's
+        # source copy is git-filtered and dist/ is gitignored.
+        webDist = pkgs.stdenv.mkDerivation (finalAttrs: {
+          pname = "streamx-web";
+          version = "0.1.0";
+          src = ./web;
+          nativeBuildInputs = [ pkgs.nodejs_22 pkgs.pnpm pkgs.pnpmConfigHook ];
+          pnpmDeps = pkgs.fetchPnpmDeps {
+            inherit (finalAttrs) pname version src;
+            fetcherVersion = 2;
+            hash = "sha256-D5CgLwtqdRv8gjm2PahzyVN3VypEhCQgHoVUqFZXDHQ=";
+          };
+          buildPhase = ''
+            runHook preBuild
+            pnpm build
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            cp -r dist $out
+            runHook postInstall
+          '';
+        });
+
+        # Cargo sources plus the binary assets include_bytes!/rust-embed
+        # need: desktop icons and the web UI sources referenced by the
+        # desktop crate (filterCargoSources keeps only Cargo/Rust files).
+        srcBase = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
             (craneLib.filterCargoSources path type)
-            || (pkgs.lib.hasSuffix "/web" path && type == "directory")
-            || (pkgs.lib.hasInfix "/web/dist" path);
+            || (type == "regular"
+              && (pkgs.lib.hasInfix "/crates/desktop/assets/" path
+                || pkgs.lib.hasInfix "/web/src/assets/" path));
         };
+
+        # rust-embed reads web/dist at server compile time; graft the
+        # Nix-built dist onto the cargo source tree.
+        srcWithWeb = pkgs.runCommand "streamx-src-with-web" { } ''
+          cp -r ${srcBase} $out
+          chmod -R u+w $out
+          mkdir -p $out/web
+          cp -r ${webDist} $out/web/dist
+        '';
+
+        # pkgsStatic with fixes for packages whose static build is broken
+        # in this nixpkgs pin.
+        staticSetOf = ps: ps.pkgsStatic.extend (final: prev: {
+          # The Vulkan loader dlopens ICDs by design and cannot be built
+          # as a static library. Use the musl-dynamic build: libplacebo
+          # and mpv only need it at link time, and the final desktop
+          # binary links the host's libvulkan.so.1, which the
+          # linux-desktop linkage policy allowlists. Wayland docs are
+          # off to keep doxygen/spdlog (broken tests on musl) out of
+          # the closure.
+          vulkan-loader = ps.pkgsMusl.vulkan-loader.override {
+            wayland = ps.pkgsMusl.wayland.override { withDocumentation = false; };
+          };
+
+          # Same reasoning for ALSA: a static alsa-lib cannot dlopen the
+          # host's PipeWire/Pulse routing plugins, leaving the app
+          # silent on modern desktops. Link the host's libasound.so.2
+          # dynamically (allowlisted) instead.
+          alsa-lib = ps.pkgsMusl.alsa-lib;
+
+          # shaderc unconditionally also builds shaderc_shared, which the
+          # static musl toolchain cannot link. Drop the shared target;
+          # the static archives then stay in the "lib" output (fixup
+          # deletes empty outputs, so the upstream move of *.a into the
+          # separate "static" output would leave "lib" empty and fail
+          # the build).
+          shaderc = prev.shaderc.overrideAttrs (o: {
+            outputs = pkgs.lib.remove "static" o.outputs;
+            postInstall = "";
+            # shaderc.pc advertises the dropped shared library; point
+            # consumers (libplacebo, mpv) at the static archives
+            # instead. nixpkgs unvendors glslang/SPIRV-Tools, so
+            # "combined" is not self-contained and the link closure has
+            # to be spelled out. postFixup: the .pc lands in $dev only
+            # during the multi-output fixup.
+            postFixup = (o.postFixup or "") + ''
+              substituteInPlace "$dev/lib/pkgconfig/shaderc.pc" \
+                --replace-fail -lshaderc_shared \
+                  "-lshaderc_combined -L${final.glslang}/lib -lglslang -lMachineIndependent -lGenericCodeGen -lOSDependent -lSPIRV -L${pkgs.lib.getLib final.spirv-tools}/lib -lSPIRV-Tools-opt -lSPIRV-Tools"
+            '';
+            postPatch = (o.postPatch or "") + ''
+              sed -i \
+                -e '/add_library(shaderc_shared SHARED/,/set_target_properties(shaderc_shared PROPERTIES SOVERSION 1)/d' \
+                -e 's/TARGETS shaderc shaderc_shared/TARGETS shaderc/' \
+                -e '/target_link_libraries(shaderc_shared PRIVATE/d' \
+                libshaderc/CMakeLists.txt
+            '';
+          });
+
+          # nixpkgs' no-shared-libs.patch no longer applies to the new
+          # SPIRV-Tools; reimplement it: drop the unconditional shared
+          # library target, which cannot link on static musl.
+          spirv-tools = prev.spirv-tools.overrideAttrs (o: {
+            patches = builtins.filter
+              (p: !pkgs.lib.hasSuffix "no-shared-libs.patch" (toString p))
+              (o.patches or [ ]);
+            postPatch = (o.postPatch or "") + ''
+              sed -i \
+                -e '/add_library(''${SPIRV_TOOLS}-shared SHARED/,/^)$/d' \
+                -e 's/ ''${SPIRV_TOOLS}-shared//g' \
+                -e 's/''${SPIRV_TOOLS}-shared/''${SPIRV_TOOLS}-static/g' \
+                source/CMakeLists.txt
+            '';
+          });
+        });
+
+        # Static FFmpeg for a given package set (native pkgsStatic or a
+        # crossPkgs.pkgsStatic), with an explicit curated feature set
+        # (the wader/static-ffmpeg model): decode via the native
+        # decoders plus dav1d, encode libx264 + native aac (all the HLS
+        # pipeline uses), plain-http network IO for mpv streaming from
+        # the loopback server. Everything else is off explicitly, both
+        # the options whose static musl builds are broken in nixpkgs
+        # (pulseaudio/elfutils chains, dlopen-based loaders, packages
+        # that insist on shared libraries) and the encoders/protocols
+        # StreamX does not use, so a nixpkgs bump cannot silently
+        # re-enable a broken one. Note: no TLS, so the in-process player
+        # streams http:// only; https playback falls back to system mpv.
+        staticFfmpegFor = ps: (staticSetOf ps).ffmpeg-headless.override {
+          withGPL = true;
+          withX264 = true;
+          withDav1d = true;
+          withNetwork = true;
+          # encoders/filters the pipeline does not use
+          withAom = false; withSvtav1 = false; withTheora = false;
+          withVorbis = false; withOpus = false; withMp3lame = false;
+          withWebp = false; withOpenjpeg = false; withSpeex = false;
+          withX265 = false; withXvid = false; withVidStab = false;
+          withZimg = false; withSoxr = false;
+          # IO/protocol/hardware extras
+          withAlsa = false; withBluray = false; withSsh = false;
+          withSrt = false; withGnutls = false; withSamba = false;
+          withZvbi = false; withXml2 = false; withDrm = false;
+          withAmf = false; withGmp = false;
+          withFontconfig = false; withFreetype = false; withFribidi = false;
+          withHarfbuzz = false;
+          withOpenmpt = false; withV4l2 = false; withV4l2M2m = false;
+          withVaapi = false; withVdpau = false; withRist = false;
+          withOpencl = false; withOpenapv = false; withVulkan = false;
+          withRtmp = false; withCelt = false; withGsm = false;
+          withMfx = false; withVpl = false; withVpx = false;
+          withJxl = false; withSnappy = false; withCodec2 = false;
+          withIlbc = false; withTwolame = false; withUavs3d = false;
+          withLcms2 = false; withLc3 = false;
+        };
+
+        # Static libmpv for the Linux desktop build. Video output is
+        # Vulkan via libplacebo (libGL/x11 GL paths off: libglvnd is
+        # dlopen-based and cannot be static); audio backends that need
+        # host daemons (pulse, pipewire, jack, openal) are off, ALSA
+        # stays. DRM/KMS output needs mesa's gbm (not static-buildable).
+        staticPkgs = staticSetOf pkgs;
+        staticPlacebo = (staticPkgs.libplacebo.override {
+          libGL = null;
+          libx11 = null;
+          libdovi = null;
+        }).overrideAttrs (o: {
+          # The inputs nulled above are meson auto-features; make the
+          # disable explicit so configure does not require them.
+          mesonFlags = (o.mesonFlags or [ ]) ++ [
+            "-Dlibdovi=disabled"
+            "-Dopengl=disabled"
+            "-Dd3d11=disabled"
+          ];
+        });
+        staticMpv = (staticPkgs.mpv-unwrapped.override {
+          ffmpeg = staticFfmpegFor pkgs;
+          libplacebo = staticPlacebo;
+          libGL = null;
+          # Plain static lua for the OSC scripts: the luarocks bootstrap
+          # (luasocket) does not build statically.
+          lua = staticPkgs.lua5_2 // { withPackages = _: staticPkgs.lua5_2; };
+          drmSupport = false;
+          # vamp-plugin-sdk (via rubberband) cannot build statically;
+          # mpv's native scaletempo covers speed changes.
+          rubberbandSupport = false;
+          # libsndfile (via libbs2b) cannot build against the dynamic
+          # host ALSA; the crossfeed filter is nonessential.
+          bs2bSupport = false;
+          openalSupport = false;
+          pipewireSupport = false;
+          pulseSupport = false;
+          jackaudioSupport = false;
+          vaapiSupport = false;
+          vdpauSupport = false;
+          sdl2Support = false;
+          cacaSupport = false;
+          vapoursynthSupport = false;
+          javascriptSupport = false;
+        }).overrideAttrs (o: {
+          # Only libmpv.a is consumed (linked into streamx-desktop); the
+          # mpv player binary cannot link at all here because the static
+          # toolchain refuses the dynamic libvulkan stub.
+          mesonFlags = (o.mesonFlags or [ ]) ++ [ "-Dcplayer=false" ];
+          doInstallCheck = false;
+          # Upstream postInstall/postFixup handle player tools under
+          # $out/bin and the doc output; neither exists in a
+          # library-only build.
+          postInstall = "";
+          postFixup = "";
+          outputs = pkgs.lib.remove "doc" o.outputs;
+        });
 
         # Release build of the `streamx` server for one target triple.
         # The server has no C library dependencies (rustls, bundled
         # SQLite; FFmpeg is a runtime process), so cross builds only need
         # a C cross compiler for the few `cc`-built crates. musl targets
         # are linked fully static and verified by the linkage check.
-        mkServer = { crossPkgs ? null, target ? null, static ? false }:
+        mkServer = { crossPkgs ? null, target ? null, static ? false, embedFfmpeg ? false }:
           let
+            embeddedFfmpeg = staticFfmpegFor (if crossPkgs == null then pkgs else crossPkgs);
             base = commonArgs // {
               src = srcWithWeb;
               pname = "streamx";
-              cargoExtraArgs = "-p streamx";
+              cargoExtraArgs = "-p streamx"
+                + pkgs.lib.optionalString embedFfmpeg " --features embed-ffmpeg";
               doCheck = false;
               buildInputs = [ ];
               # Rust's std links -liconv, and the nixpkgs Darwin toolchain
@@ -123,7 +324,11 @@
               } // pkgs.lib.optionalAttrs static {
                 CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
               };
-            args = base // crossEnv;
+            embedEnv = pkgs.lib.optionalAttrs embedFfmpeg {
+              STREAMX_FFMPEG_BIN = "${pkgs.lib.getBin embeddedFfmpeg}/bin/ffmpeg";
+              STREAMX_FFPROBE_BIN = "${pkgs.lib.getBin embeddedFfmpeg}/bin/ffprobe";
+            };
+            args = base // crossEnv // embedEnv;
           in
           craneLib.buildPackage (args // { cargoArtifacts = craneLib.buildDepsOnly args; });
 
@@ -160,21 +365,64 @@
           streamx = mkServer { };
           streamx-linkcheck = linkcheck;
         } // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          # The static libmpv closure on its own, for debugging the
+          # desktop link (nix build .#static-libmpv).
+          static-libmpv = staticMpv;
           streamx-desktop = craneLib.buildPackage (commonArgs // {
             src = srcWithWeb;
             pname = "streamx-desktop";
             cargoExtraArgs = "-p streamx-desktop";
             doCheck = false;
+            # Static libmpv: build.rs probes `pkg-config --static mpv`.
+            STREAMX_MPV_STATIC = "1";
+            # Host-dynamic system stack first so X11/Wayland/Vulkan
+            # resolve to the allowlisted shared libraries, then the
+            # static media closure (mpv/FFmpeg/libass/... archives).
+            # Reusing the static packages' own buildInputs keeps the
+            # pkg-config closure complete without hand-maintaining it.
+            # openssl/shaderc are also excluded: their dynamic libraries
+            # would win over the static archives at link time and are
+            # not in the linkage allowlist (the desktop uses rustls and
+            # the static shaderc_combined).
+            buildInputs =
+              (pkgs.lib.subtractLists
+                [ pkgs.mpv-unwrapped pkgs.ffmpeg-full pkgs.openssl pkgs.shaderc ]
+                commonBuildInputs)
+              ++ [ staticMpv staticPlacebo (staticFfmpegFor pkgs) ]
+              ++ staticMpv.buildInputs
+              ++ staticPlacebo.buildInputs
+              ++ (staticFfmpegFor pkgs).buildInputs;
           });
+          # GitHub-release variant of the desktop binary. The raw nix
+          # build only starts on Nix systems: its ELF interpreter and
+          # RUNPATH point into /nix/store. Rewrite to the standard FHS
+          # loader and drop the RUNPATH so a stock distribution's
+          # system libraries resolve. Enforced by the linux-dist policy
+          # (checks.linkage-desktop-dist).
+          streamx-desktop-dist = pkgs.runCommand "streamx-desktop-dist"
+            { nativeBuildInputs = [ pkgs.patchelf ]; } ''
+            mkdir -p $out/bin
+            cp ${packages.streamx-desktop}/bin/streamx-desktop $out/bin/
+            chmod +w $out/bin/streamx-desktop
+            patchelf \
+              --set-interpreter ${if pkgs.stdenv.hostPlatform.isAarch64
+                then "/lib/ld-linux-aarch64.so.1"
+                else "/lib64/ld-linux-x86-64.so.2"} \
+              --remove-rpath \
+              $out/bin/streamx-desktop
+            chmod -w $out/bin/streamx-desktop
+          '';
           streamx-x86_64-linux-musl = mkServer {
             crossPkgs = pkgs.pkgsCross.musl64;
             target = "x86_64-unknown-linux-musl";
             static = true;
+            embedFfmpeg = true;
           };
           streamx-aarch64-linux-musl = mkServer {
             crossPkgs = pkgs.pkgsCross.aarch64-multiplatform-musl;
             target = "aarch64-unknown-linux-musl";
             static = true;
+            embedFfmpeg = true;
           };
         } // pkgs.lib.optionalAttrs (system == "aarch64-darwin") {
           streamx-x86_64-darwin = mkServer {
@@ -313,8 +561,11 @@
 
         # cargo clippy + fmt as reusable checks. Run with: nix flake check
         checks = {
+          # srcWithWeb: rust-embed derives Asset from web/dist at compile
+          # time, and clippy compiles the real crates.
           clippy = craneLib.cargoClippy (commonArgs // {
-            cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+            src = srcWithWeb;
+            cargoArtifacts = craneLib.buildDepsOnly (commonArgs // { src = srcWithWeb; });
             cargoClippyExtraArgs = "--all-targets -- --deny warnings";
           });
 
@@ -332,6 +583,8 @@
             linkageCheck "aarch64-musl" packages.streamx-aarch64-linux-musl "streamx" "static";
           linkage-desktop =
             linkageCheck "desktop" packages.streamx-desktop "streamx-desktop" "linux-desktop";
+          linkage-desktop-dist =
+            linkageCheck "desktop-dist" packages.streamx-desktop-dist "streamx-desktop" "linux-dist";
         };
       }
     );

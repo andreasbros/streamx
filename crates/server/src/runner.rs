@@ -57,6 +57,12 @@ pub async fn build_components(
 ) -> Result<ServerComponents> {
     let config = Arc::new(config);
 
+    // Embedded ffmpeg/ffprobe (embed-ffmpeg builds). PATH resolution
+    // stays in place when extraction fails or the feature is off.
+    if let Err(e) = crate::ffmpeg_bin::install(&config.data_dir) {
+        tracing::warn!(error = %e, "embedded ffmpeg extraction failed; falling back to PATH");
+    }
+
     // Database.
     let db_dir = config.data_dir.join("db");
     std::fs::create_dir_all(&db_dir).map_err(|e| error::Error::Config {

@@ -52,6 +52,8 @@ pub struct Linkage {
     pub interpreter: Option<String>,
     /// ELF `DT_NEEDED` sonames or Mach-O `LC_LOAD_DYLIB` install names.
     pub libraries: Vec<String>,
+    /// ELF `DT_RUNPATH`/`DT_RPATH` entries. Empty for Mach-O.
+    pub runpaths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,20 @@ pub enum Policy {
     /// is in the bundle manifest, because release packaging ships that
     /// library inside the .app. Anything outside the manifest fails.
     MacosDevBundle { bundle_manifest: Vec<String> },
+    /// Linux development builds: like `SystemOnly`, but a soname in the
+    /// bundle manifest is accepted because the release build links that
+    /// library statically (dev cargo builds link the dynamic one from
+    /// the build environment for fast iteration).
+    LinuxDevBundle {
+        allowed_sonames: Vec<String>,
+        bundle_manifest: Vec<String>,
+    },
+    /// Distributable Linux desktop artifact: `SystemOnly` plus the
+    /// executable must be loadable on a stock FHS distribution: the
+    /// ELF interpreter must be the standard system loader and no
+    /// RUNPATH may reference a build store. A Nix-built binary fails
+    /// this until release packaging rewrites it.
+    LinuxDist { allowed_sonames: Vec<String> },
 }
 
 impl Policy {
@@ -86,8 +102,18 @@ impl Policy {
             Policy::SystemOnly { .. } => "system-only",
             Policy::MacosSystemFrameworks => "macos-system-frameworks",
             Policy::MacosDevBundle { .. } => "macos-dev-bundle",
+            Policy::LinuxDevBundle { .. } => "linux-dev-bundle",
+            Policy::LinuxDist { .. } => "linux-dist",
         }
     }
+}
+
+/// Standard FHS dynamic loaders a distributable Linux binary may use.
+pub fn fhs_interpreters() -> Vec<String> {
+    ["/lib64/ld-linux-x86-64.so.2", "/lib/ld-linux-aarch64.so.1"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// Host libraries a Linux GPUI desktop build may load dynamically.
@@ -100,20 +126,34 @@ pub fn linux_desktop_allowlist() -> Vec<String> {
         "libpthread.so.0",
         "librt.so.1",
         "libgcc_s.so.1",
+        // C++ runtime for the statically linked C++ media libraries
+        // (libplacebo, shaderc, zimg); ships with every glibc distro,
+        // same family as libgcc_s.
+        "libstdc++.so.6",
         "ld-linux-x86-64.so.2",
         "ld-linux-aarch64.so.1",
         "libvulkan.so.1",
         "libwayland-client.so.0",
+        // wayland-client companion, provided by the same host package.
+        "libwayland-cursor.so.0",
         "libwayland-egl.so.1",
         "libxkbcommon.so.0",
+        // xkbcommon's X11 bridge, same host package as libxkbcommon.
+        "libxkbcommon-x11.so.0",
         "libX11.so.6",
         "libX11-xcb.so.1",
         "libxcb.so.1",
         "libXcursor.so.1",
+        // Core X11 extension libraries shipped alongside libX11.
+        "libXext.so.6",
+        "libXfixes.so.3",
         "libXi.so.6",
         "libXrandr.so.2",
         "libfontconfig.so.1",
         "libfreetype.so.6",
+        // Host ALSA: audio routing (PipeWire/Pulse plugins) only works
+        // through the host's libasound, never a static copy.
+        "libasound.so.2",
         "libdbus-1.so.3",
         "libva.so.2",
         "libdrm.so.2",
@@ -123,6 +163,12 @@ pub fn linux_desktop_allowlist() -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect()
+}
+
+/// Libraries a Linux dev build may load from the build environment
+/// because the release build links them statically.
+pub fn linux_bundle_manifest() -> Vec<String> {
+    ["libmpv"].iter().map(|s| s.to_string()).collect()
 }
 
 /// Third-party libraries the macOS .app bundles next to the binary.
@@ -151,6 +197,14 @@ pub fn linkage(path: &Path) -> Result<Linkage> {
             format: Format::Elf,
             interpreter: elf.interpreter.map(|s| s.to_string()),
             libraries: elf.libraries.iter().map(|s| s.to_string()).collect(),
+            runpaths: elf
+                .runpaths
+                .iter()
+                .chain(elf.rpaths.iter())
+                .flat_map(|p| p.split(':'))
+                .filter(|p| !p.is_empty())
+                .map(|s| s.to_string())
+                .collect(),
         }),
         Object::Mach(Mach::Binary(macho)) => Ok(macho_linkage(&macho)),
         Object::Mach(Mach::Fat(fat)) => {
@@ -168,6 +222,7 @@ pub fn linkage(path: &Path) -> Result<Linkage> {
                 format: Format::MachO,
                 interpreter: None,
                 libraries,
+                runpaths: Vec::new(),
             })
         }
         _ => Err(Error::Unsupported { path: display }),
@@ -181,6 +236,7 @@ fn macho_linkage(macho: &MachO) -> Linkage {
         format: Format::MachO,
         interpreter: None,
         libraries,
+        runpaths: Vec::new(),
     }
 }
 
@@ -227,6 +283,44 @@ pub fn violations(linkage: &Linkage, policy: &Policy) -> Vec<String> {
                 }
             }
         }
+        Policy::LinuxDist { allowed_sonames } => {
+            match &linkage.interpreter {
+                Some(interp) if fhs_interpreters().iter().any(|i| i == interp) => {}
+                Some(interp) => problems.push(format!(
+                    "interpreter {interp} is not a standard system loader; \
+                     the binary will not start on a stock distribution"
+                )),
+                None => {}
+            }
+            for rp in &linkage.runpaths {
+                if rp.contains("/nix/store") {
+                    problems.push(format!("RUNPATH references the build store: {rp}"));
+                }
+            }
+            for lib in &linkage.libraries {
+                let soname = lib.rsplit('/').next().unwrap_or(lib);
+                if !allowed_sonames.iter().any(|a| a == soname) {
+                    problems.push(format!("needs non-system library {lib}"));
+                }
+            }
+        }
+        Policy::LinuxDevBundle {
+            allowed_sonames,
+            bundle_manifest,
+        } => {
+            for lib in &linkage.libraries {
+                let soname = lib.rsplit('/').next().unwrap_or(lib);
+                let allowed = allowed_sonames.iter().any(|a| a == soname)
+                    || bundle_manifest
+                        .iter()
+                        .any(|m| soname == m.as_str() || soname.starts_with(&format!("{m}.")));
+                if !allowed {
+                    problems.push(format!(
+                        "needs library that the release build neither allows nor links statically: {lib}"
+                    ));
+                }
+            }
+        }
     }
     problems
 }
@@ -240,8 +334,9 @@ pub fn policy_for_current_target() -> Policy {
     } else if cfg!(target_env = "musl") {
         Policy::FullyStatic
     } else {
-        Policy::SystemOnly {
+        Policy::LinuxDevBundle {
             allowed_sonames: linux_desktop_allowlist(),
+            bundle_manifest: linux_bundle_manifest(),
         }
     }
 }
@@ -270,6 +365,7 @@ mod tests {
             format: Format::Elf,
             interpreter: interp.map(String::from),
             libraries: libs.iter().map(|s| s.to_string()).collect(),
+            runpaths: Vec::new(),
         }
     }
 
@@ -319,6 +415,40 @@ mod tests {
             ],
         );
         assert_eq!(violations(&bad, &policy).len(), 2);
+    }
+
+    #[test]
+    fn linux_dist_rejects_store_interpreter_and_runpath() {
+        let policy = Policy::LinuxDist {
+            allowed_sonames: linux_desktop_allowlist(),
+        };
+        let good = lk(Some("/lib64/ld-linux-x86-64.so.2"), &["libc.so.6"]);
+        assert!(violations(&good, &policy).is_empty());
+        let nix_interp = lk(
+            Some("/nix/store/abc-glibc-2.42/lib/ld-linux-x86-64.so.2"),
+            &["libc.so.6"],
+        );
+        assert_eq!(violations(&nix_interp, &policy).len(), 1);
+        let mut store_runpath = good.clone();
+        store_runpath.runpaths = vec!["/nix/store/abc-libx11/lib".into()];
+        assert_eq!(violations(&store_runpath, &policy).len(), 1);
+    }
+
+    #[test]
+    fn linux_dev_bundle_accepts_store_libmpv_only() {
+        let policy = Policy::LinuxDevBundle {
+            allowed_sonames: linux_desktop_allowlist(),
+            bundle_manifest: linux_bundle_manifest(),
+        };
+        let dev = lk(None, &["libc.so.6", "/nix/store/abc-mpv/lib/libmpv.so.2"]);
+        assert!(violations(&dev, &policy).is_empty());
+        let stray = lk(None, &["libavcodec.so.61"]);
+        assert_eq!(violations(&stray, &policy).len(), 1);
+        // The strict release policy still rejects the dynamic libmpv.
+        let release = Policy::SystemOnly {
+            allowed_sonames: linux_desktop_allowlist(),
+        };
+        assert_eq!(violations(&dev, &release).len(), 1);
     }
 
     #[test]

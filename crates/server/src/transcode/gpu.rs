@@ -67,7 +67,7 @@ pub fn hw_decode_flags(hw: &HwAccel) -> Vec<String> {
 }
 
 async fn query_ffmpeg_hwaccels() -> std::result::Result<Vec<String>, ()> {
-    let output = Command::new("ffmpeg")
+    let output = Command::new(crate::ffmpeg_bin::ffmpeg())
         .args(["-hide_banner", "-hwaccels"])
         .output()
         .await
