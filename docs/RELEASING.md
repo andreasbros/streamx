@@ -4,8 +4,11 @@ One page, in order. Everything runs from the repo root on the Mac.
 
 ## One-time setup
 
+`gh` and `git-cliff` ship in the dev shell; nothing to install.
+
 ```bash
-gh auth login          # GitHub CLI, needs repo + workflow scopes
+nix develop
+gh auth login          # one-time; stored in ~/.config/gh
 grep extra-platforms /etc/nix/nix.conf
 #   extra-platforms = x86_64-darwin   (required for Intel builds; needs Rosetta)
 ```
