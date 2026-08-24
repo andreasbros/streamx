@@ -323,6 +323,18 @@ impl MainView {
                     runtime::spawn_detached(async move { load_category_page(&st).await });
                 }
 
+                // Repaint the Logs page only when the ring buffer
+                // changed; log volume never drives frames elsewhere.
+                if matches!(state.current_page(), Page::Logs) {
+                    let len = state.logs.len();
+                    let seen = state
+                        .logs_seen
+                        .swap(len, std::sync::atomic::Ordering::Relaxed);
+                    if seen != len {
+                        state.mark_dirty();
+                    }
+                }
+
                 // Keep download progress fresh on the pages that show it.
                 if matches!(state.current_page(), Page::Downloads | Page::Movie)
                     && last_dl_refresh.elapsed() >= Duration::from_secs(2)
@@ -2126,6 +2138,103 @@ impl MainView {
         .detach();
     }
 
+    fn logs_page_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = self.theme;
+        // Snapshot once per frame; the ring is capped server-side, and
+        // the list below is virtualized, so a full buffer costs one
+        // bounded clone per repaint of this page only.
+        let lines = std::sync::Arc::new(self.state.logs.recent());
+        let count = lines.len();
+
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(theme.space_2()))
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(theme.fs_6()))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.fg_primary())
+                    .child("Logs"),
+            )
+            .child(
+                div()
+                    .text_size(px(theme.fs_1()))
+                    .text_color(theme.fg_muted())
+                    .child(SharedString::from(format!("{count} lines"))),
+            )
+            .child({
+                let lines = lines.clone();
+                secondary_button("logs-copy", "Copy", &theme).on_click(cx.listener(
+                    move |this, _ev, _w, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(lines.join("\n")));
+                        this.state.show_toast("Logs copied.", ToastKind::Success);
+                    },
+                ))
+            })
+            .child(
+                secondary_button("logs-clear", "Clear", &theme).on_click(cx.listener(
+                    move |this, _ev, _w, cx| {
+                        this.state.logs.clear();
+                        this.state.mark_dirty();
+                        cx.notify();
+                    },
+                )),
+            );
+
+        let list_lines = lines.clone();
+        let list = gpui::uniform_list("logs-list", count, move |range, _window, _cx| {
+            range
+                .map(|i| {
+                    let line = &list_lines[i];
+                    // Level from the formatted line drives the color;
+                    // errors and warnings must stand out when scanning.
+                    let color = if line.contains("ERROR") {
+                        theme.error()
+                    } else if line.contains("WARN") {
+                        theme.favourite()
+                    } else if line.contains("DEBUG") || line.contains("TRACE") {
+                        theme.fg_muted()
+                    } else {
+                        theme.fg_secondary()
+                    };
+                    div()
+                        .px(px(theme.space_2()))
+                        .py(px(1.0))
+                        .text_size(px(theme.fs_1()))
+                        .text_color(color)
+                        .whitespace_nowrap()
+                        .child(SharedString::from(line.clone()))
+                        .into_any_element()
+                })
+                .collect()
+        })
+        .h_full();
+
+        div()
+            .w_full()
+            .h_full()
+            .p(px(theme.space_5()))
+            .bg(theme.bg_app())
+            .flex()
+            .flex_col()
+            .gap(px(theme.space_2()))
+            .child(self.back_hint(cx))
+            .child(header)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .rounded(px(theme.radius_md()))
+                    .bg(theme.bg_surface())
+                    .border_1()
+                    .border_color(theme.border_subtle())
+                    .overflow_hidden()
+                    .child(list),
+            )
+    }
+
     fn downloads_page_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let items = self.state.downloads.read().clone();
@@ -3259,7 +3368,8 @@ impl MainView {
             .child(link("Downloads", Page::Downloads))
             .child(link("History", Page::History))
             .child(link("Surround Sound", Page::SurroundSound))
-            .child(link("Settings", Page::Settings));
+            .child(link("Settings", Page::Settings))
+            .child(link("Logs", Page::Logs));
 
         if is_admin {
             items = items.child(link("Admin", Page::Admin));
@@ -4367,6 +4477,7 @@ impl Render for MainView {
             Page::Downloads => self.downloads_page_view(cx).into_any_element(),
             Page::Favourites => self.favourites_page_view(cx).into_any_element(),
             Page::Settings => self.settings_page_view(cx).into_any_element(),
+            Page::Logs => self.logs_page_view(cx).into_any_element(),
             Page::Admin => self.admin_page_view(cx).into_any_element(),
             Page::MusicSearch => self.music_search_page_view(cx).into_any_element(),
             Page::MusicPlayer => stub_page(

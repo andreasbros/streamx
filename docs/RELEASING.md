@@ -46,15 +46,25 @@ amending before you tag.
 
 ## 4. Cut the release
 
-Requires: on `main`, clean tree, pushed to origin.
+Two equivalent ways; pick one.
+
+**From the GitHub website (no local tooling):** Actions > cut-release >
+"Run workflow". Enter a SemVer (`0.2.0`) or a bump level
+(`patch`/`minor`/`major`), optionally a commit SHA to release an older
+commit, and run. GitHub bumps the version, writes `CHANGELOG.md`,
+commits, tags, fast-forwards `main` when possible, creates the release,
+and builds every artifact. The GitHub mobile app can trigger it too.
+
+**From this machine:** requires `main` checked out, clean, and pushed.
 
 ```bash
 nix run .#release -- patch
 ```
 
 This bumps the workspace version, regenerates `CHANGELOG.md`, commits
-`chore(release): vX.Y.Z`, tags, pushes, creates the GitHub release with
-the notes, and uploads any dmgs already in `dist/`.
+`chore(release): vX.Y.Z`, tags, pushes, and creates the GitHub release
+with the notes. All binaries come from CI (next step); local `dist/`
+artifacts are for your own testing and are never published.
 
 ## 5. Watch CI attach the rest
 
@@ -83,7 +93,9 @@ Works on any distro, fully static.
 
 - CI job failed: fix, push to main, then re-run the job from the GitHub
   UI or `gh run rerun <id>`. The release and tag already exist; jobs
-  only upload artifacts.
+  only upload artifacts. In a pinch a locally built dmg can be attached
+  with `gh release upload vX.Y.Z dist/StreamX-*.dmg`, replaced by the
+  CI build once the job is green.
 - Bad release entirely: `gh release delete vX.Y.Z`,
   `git push origin :refs/tags/vX.Y.Z`, `git tag -d vX.Y.Z`, revert the
   release commit, fix, release again with the same version.

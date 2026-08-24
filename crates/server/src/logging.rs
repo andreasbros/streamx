@@ -12,6 +12,12 @@ pub struct LogHistory {
 }
 
 impl LogHistory {
+    /// Standalone empty history, for consumers that render logs without
+    /// wiring a tracing layer (tests, early startup).
+    pub fn new_shared() -> Arc<Self> {
+        Arc::new(Self::new())
+    }
+
     fn new() -> Self {
         Self {
             entries: Mutex::new(VecDeque::with_capacity(HISTORY_SIZE)),
@@ -24,6 +30,20 @@ impl LogHistory {
                 entries.pop_front();
             }
             entries.push_back(entry);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.lock().map(|e| e.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.clear();
         }
     }
 

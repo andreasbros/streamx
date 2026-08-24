@@ -25,23 +25,29 @@ use streamx_desktop::{
 };
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                // Graphics/windowing crates chatter at INFO on every
-                // resize (blade surface reconfigure etc.) — keep them at
-                // warn so app logs stay readable and resize stays cheap.
-                tracing_subscriber::EnvFilter::new(
-                    "warn,streamx_desktop=info,streamx=info,streamx_api=info",
-                )
-            }),
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let (log_tx, _keep) = tokio::sync::broadcast::channel::<String>(1000);
+    let (broadcast_layer, log_history) = streamx::logging::BroadcastLayer::new(log_tx.clone());
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        // Graphics/windowing crates chatter at INFO on every
+        // resize (blade surface reconfigure etc.) — keep them at
+        // warn so app logs stay readable and resize stays cheap.
+        tracing_subscriber::EnvFilter::new(
+            "warn,streamx_desktop=info,streamx=info,streamx_api=info",
         )
+    });
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(broadcast_layer)
         .init();
 
     runtime::init();
 
     tracing::info!("starting StreamX desktop");
-    let state = AppState::new();
+    let state = AppState::with_logs(log_history.clone());
     tracing::info!(
         mode = state.mode.read().as_str(),
         server = %state.server_url.read(),
@@ -51,7 +57,7 @@ fn main() {
     if *state.mode.read() == Mode::Embedded
         && std::env::var("STREAMX_DESKTOP_NO_EMBED").ok().as_deref() != Some("1")
     {
-        spawn_embedded(&state);
+        spawn_embedded(&state, log_tx.clone(), log_history.clone());
     }
 
     #[cfg(feature = "ui-test")]
@@ -96,7 +102,11 @@ fn main() {
     });
 }
 
-fn spawn_embedded(state: &Arc<AppState>) {
+fn spawn_embedded(
+    state: &Arc<AppState>,
+    log_tx: tokio::sync::broadcast::Sender<String>,
+    log_history: Arc<streamx::logging::LogHistory>,
+) {
     let state = state.clone();
     runtime::spawn_detached(async move {
         // Honor the same admin-seeding env vars as the server binary, so
@@ -133,7 +143,13 @@ fn spawn_embedded(state: &Arc<AppState>) {
             "embedded server: building components"
         );
 
-        let components = match streamx::runner::build_components(config, None, None).await {
+        let components = match streamx::runner::build_components(
+            config,
+            Some(log_tx),
+            Some(log_history),
+        )
+        .await
+        {
             Ok(c) => Arc::new(c),
             Err(e) => {
                 tracing::error!(error = %e, "embedded server: build_components failed");

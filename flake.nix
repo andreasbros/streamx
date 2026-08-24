@@ -425,6 +425,18 @@
               --remove-rpath \
               $out/bin/streamx-desktop
             chmod -w $out/bin/streamx-desktop
+
+            # Desktop integration: menu entry + icon (hicolor), matched
+            # to the window's app_id ("streamx") for taskbar/dock icons.
+            mkdir -p $out/share/applications \
+                     $out/share/icons/hicolor/512x512/apps \
+                     $out/share/icons/hicolor/192x192/apps
+            cp ${./assets/linux/streamx-desktop.desktop} \
+               $out/share/applications/streamx-desktop.desktop
+            cp ${./web/public/icons/android-chrome-512x512.png} \
+               $out/share/icons/hicolor/512x512/apps/streamx-desktop.png
+            cp ${./web/public/icons/android-chrome-192x192.png} \
+               $out/share/icons/hicolor/192x192/apps/streamx-desktop.png
           '';
           streamx-x86_64-linux-musl = mkServer {
             crossPkgs = pkgs.pkgsCross.musl64;

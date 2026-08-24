@@ -53,8 +53,25 @@ cat > "$OUT/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleIconFile</key><string>StreamX</string>
 </dict></plist>
 PLIST
+
+# App icon: derive the .icns from the repo logo so Dock, Finder, and
+# the app switcher all show it.
+ICON_SRC="web/public/icons/android-chrome-512x512.png"
+if [ -f "$ICON_SRC" ]; then
+  ICONSET="$(mktemp -d)/StreamX.iconset"
+  mkdir -p "$ICONSET"
+  for size in 16 32 64 128 256 512; do
+    sips -z $size $size "$ICON_SRC" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    double=$((size * 2))
+    [ $double -le 1024 ] && sips -z $double $double "$ICON_SRC" \
+      --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$ICONSET" -o "$OUT/Contents/Resources/StreamX.icns"
+  rm -rf "$(dirname "$ICONSET")"
+fi
 
 is_system() { case "$1" in /System/Library/*|/usr/lib/*|@rpath/*|@executable_path/*|@loader_path/*) return 0;; *) return 1;; esac; }
 

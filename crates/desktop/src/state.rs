@@ -185,12 +185,22 @@ pub struct AppState {
     pub downloads_dir: PathBuf,
     /// Two-step delete: info_hash awaiting a confirming second click.
     pub confirm_delete: RwLock<Option<String>>,
+    /// In-memory ring of recent log lines (shared with the embedded
+    /// server's tracing) rendered by the Logs page.
+    pub logs: Arc<streamx::logging::LogHistory>,
+    /// Log length last rendered; the tick loop repaints the Logs page
+    /// only when this differs, so logging never drives extra frames.
+    pub logs_seen: std::sync::atomic::AtomicUsize,
 }
 
 const DEFAULT_LOCAL_URL: &str = "http://localhost:8999";
 
 impl AppState {
     pub fn new() -> Arc<Self> {
+        Self::with_logs(streamx::logging::LogHistory::new_shared())
+    }
+
+    pub fn with_logs(logs: Arc<streamx::logging::LogHistory>) -> Arc<Self> {
         // STREAMX_DESKTOP_CONFIG_OVERRIDE lets tests scope config to a
         // tempdir so they don't pollute (or be polluted by) real use.
         let config_dir = match std::env::var("STREAMX_DESKTOP_CONFIG_OVERRIDE") {
@@ -300,6 +310,8 @@ impl AppState {
             data_dir,
             downloads_dir,
             confirm_delete: RwLock::new(None),
+            logs,
+            logs_seen: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 

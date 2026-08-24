@@ -1,0 +1,91 @@
+# Manually cut a release from any commit: Actions > cut-release >
+# Run workflow. Give a SemVer (1.2.3) or a bump level (patch/minor/
+# major) and optionally a commit SHA (defaults to the selected ref's
+# head). The workflow bumps the version, regenerates CHANGELOG.md,
+# commits, tags, fast-forwards main when possible, creates the GitHub
+# release, and builds all artifacts via the reusable release workflow.
+name: cut-release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "SemVer (1.2.3) or bump level (patch|minor|major)"
+        required: true
+      commit:
+        description: "Commit SHA to release (default: head of the chosen ref)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  cut:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.cut.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+          fetch-depth: 0
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: Bump, changelog, tag, release
+        id: cut
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          CURRENT="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          IFS=. read -r MAJ MIN PAT <<< "$CURRENT"
+          case "${{ inputs.version }}" in
+            major) NEXT="$((MAJ + 1)).0.0" ;;
+            minor) NEXT="$MAJ.$((MIN + 1)).0" ;;
+            patch) NEXT="$MAJ.$MIN.$((PAT + 1))" ;;
+            *) NEXT="${{ inputs.version }}" ;;
+          esac
+          TAG="v$NEXT"
+          git rev-parse "$TAG" >/dev/null 2>&1 && { echo "tag $TAG exists" >&2; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          sed -i "0,/^version = \"$CURRENT\"/s//version = \"$NEXT\"/" Cargo.toml
+          nix develop --command cargo update --workspace --quiet
+          nix run nixpkgs#git-cliff -- --tag "$TAG" -o CHANGELOG.md
+
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore(release): $TAG"
+          git tag -a "$TAG" -m "StreamX $TAG"
+          git push origin "$TAG"
+          # Bring the release commit back to main when it fast-forwards
+          # (releasing from head). Releasing an older commit leaves main
+          # untouched; the changelog lives on the tag.
+          git push origin "HEAD:refs/heads/main" 2>/dev/null \
+            || echo "main not fast-forwardable from this commit; tag carries the changelog"
+
+          NOTES="$(mktemp)"
+          nix run nixpkgs#git-cliff -- --latest --strip all > "$NOTES"
+          DL="${{ github.server_url }}/${{ github.repository }}/releases/download/$TAG"
+          cat >> "$NOTES" <<NOTES_EOF
+
+          ## Downloads
+
+          | Platform | File |
+          |---|---|
+          | macOS Apple Silicon | [StreamX-aarch64.dmg]($DL/StreamX-aarch64.dmg) |
+          | macOS Intel | [StreamX-x86_64.dmg]($DL/StreamX-x86_64.dmg) |
+          | Linux server x86_64 (static, any distro) | [streamx-x86_64-linux-musl]($DL/streamx-x86_64-linux-musl) |
+          | Linux server aarch64 (static, any distro) | [streamx-aarch64-linux-musl]($DL/streamx-aarch64-linux-musl) |
+          | Linux desktop x86_64 (glibc 2.39+) | [streamx-desktop-x86_64-linux.tar.gz]($DL/streamx-desktop-x86_64-linux.tar.gz) |
+
+          macOS first launch: System Settings > Privacy & Security > "Open Anyway".
+          NOTES_EOF
+          gh release create "$TAG" --title "StreamX $NEXT" --notes-file "$NOTES" \
+            --target "$(git rev-parse HEAD)"
+
+  build:
+    needs: cut
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.cut.outputs.tag }}

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=StreamX
+Comment=Torrent streaming player
+Exec=streamx-desktop
+Icon=streamx-desktop
+Terminal=false
+Categories=AudioVideo;Video;Player;
+StartupWMClass=streamx-desktop

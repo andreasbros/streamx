@@ -4,6 +4,13 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Reused by cut-release.yml: tags it pushes with the workflow token
+  # cannot trigger `on: push`, so it calls this workflow directly.
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,6 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v8
       - name: Build static servers + desktop
@@ -29,12 +38,14 @@ jobs:
           tar -C out-desktop -czf dist/streamx-desktop-x86_64-linux.tar.gz .
       - name: Upload
         env: { GH_TOKEN: "${{ github.token }}" }
-        run: gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+        run: gh release upload "${{ inputs.tag || github.ref_name }}" dist/* --clobber
 
   macos:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
       - uses: DeterminateSystems/nix-installer-action@v16
         with:
           extra-conf: |
@@ -46,4 +57,4 @@ jobs:
           nix develop --command scripts/release.sh x86_64-apple-darwin dist/StreamX-x86_64.dmg
       - name: Upload
         env: { GH_TOKEN: "${{ github.token }}" }
-        run: gh release upload "${GITHUB_REF_NAME}" dist/*.dmg --clobber
+        run: gh release upload "${{ inputs.tag || github.ref_name }}" dist/*.dmg --clobber

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Cut a release: bump the SemVer version, regenerate CHANGELOG.md from
 # Conventional Commits (git-cliff), commit, tag, push, and create the
-# GitHub release. Binaries are attached by the tag-triggered GitHub
-# Actions workflow (.github/workflows/release.yml); any local artifacts
-# in dist/ are uploaded too.
+# GitHub release. Every binary is built and attached by the
+# tag-triggered workflow (.github/workflows/release.yml): artifacts
+# always come from clean CI builds, never from a developer machine.
 #
 #   nix run .#release -- patch|minor|major|X.Y.Z [--dry-run]
 #
@@ -64,10 +64,25 @@ git push origin main "$TAG"
 
 # The release with notes; CI attaches the platform binaries on the tag
 # event. Local artifacts (macOS dmgs) are uploaded when present.
-git-cliff --latest --strip all > /tmp/streamx-release-notes.md
-gh release create "$TAG" --title "StreamX $NEXT" --notes-file /tmp/streamx-release-notes.md
-if ls dist/*.dmg >/dev/null 2>&1; then
-  gh release upload "$TAG" dist/*.dmg --clobber
-fi
+NOTES=/tmp/streamx-release-notes.md
+git-cliff --latest --strip all > "$NOTES"
+REPO_URL="$(gh repo view --json url --jq .url)"
+DL="$REPO_URL/releases/download/$TAG"
+cat >> "$NOTES" <<NOTES_EOF
 
-echo "released $TAG"
+## Downloads
+
+| Platform | File |
+|---|---|
+| macOS Apple Silicon | [StreamX-aarch64.dmg]($DL/StreamX-aarch64.dmg) |
+| macOS Intel | [StreamX-x86_64.dmg]($DL/StreamX-x86_64.dmg) |
+| Linux server x86_64 (static, any distro) | [streamx-x86_64-linux-musl]($DL/streamx-x86_64-linux-musl) |
+| Linux server aarch64 (static, any distro) | [streamx-aarch64-linux-musl]($DL/streamx-aarch64-linux-musl) |
+| Linux desktop x86_64 (glibc 2.39+) | [streamx-desktop-x86_64-linux.tar.gz]($DL/streamx-desktop-x86_64-linux.tar.gz) |
+
+macOS first launch: System Settings > Privacy & Security > "Open Anyway"
+(not yet notarized). Linux server: \`chmod +x\` and run.
+NOTES_EOF
+gh release create "$TAG" --title "StreamX $NEXT" --notes-file "$NOTES"
+
+echo "released $TAG; CI is building and attaching the binaries (gh run watch)"

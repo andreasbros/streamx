@@ -1,0 +1,44 @@
+# Every push and PR runs the same gate developers run locally.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: fmt + clippy + tests
+        run: |
+          nix develop --command bash -c '
+            set -euo pipefail
+            export CARGO_TARGET_DIR=$PWD/target/nix
+            cargo fmt --all -- --check
+            cargo clippy --workspace --all-targets -- -D warnings
+            cargo test --workspace
+          '
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - name: typecheck + unit tests + build
+        run: |
+          nix develop --command bash -c '
+            set -euo pipefail
+            cd web
+            pnpm install --frozen-lockfile
+            pnpm typecheck
+            pnpm test
+            pnpm build
+          '
