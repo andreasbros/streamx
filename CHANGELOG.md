@@ -4,6 +4,18 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.2.0] - 2026-08-24
+
+
+### Added
+
+- Release pipeline (23000b04)
+- First-run account creation, admin clean/wipe, embedded player fixes (close freeze, audio window, dock icon), bundled providers and app icon (c3187192)
+
+### Internal
+
+- Build web UI before rust job so rust-embed finds web/dist (5df906d8)
+
 ## [0.1.0] - 2026-08-24
 
 
