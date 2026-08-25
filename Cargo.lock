@@ -7043,7 +7043,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "streamx"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -7092,7 +7092,7 @@ dependencies = [
 
 [[package]]
 name = "streamx-api"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -7106,7 +7106,7 @@ dependencies = [
 
 [[package]]
 name = "streamx-desktop"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7131,7 +7131,7 @@ dependencies = [
 
 [[package]]
 name = "streamx-linkcheck"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "goblin",
  "snafu",
@@ -7139,7 +7139,7 @@ dependencies = [
 
 [[package]]
 name = "streamx-ui-harness"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "image",
