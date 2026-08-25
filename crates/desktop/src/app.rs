@@ -2322,6 +2322,26 @@ impl MainView {
         .detach();
     }
 
+    /// Fetch the rebuilt movie group for a download and open the
+    /// standard movie page, whatever the download state.
+    fn open_download_movie(&mut self, hash: String, cx: &mut Context<Self>) {
+        let state = self.state.clone();
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            let client = state.client.read().clone();
+            let h = hash.clone();
+            let res = runtime::spawn(async move { client.download_movie(&h).await }).await;
+            match res {
+                Ok(group) => {
+                    *state.selected_movie.write() = Some(std::sync::Arc::new(group));
+                    state.navigate(Page::Movie);
+                }
+                Err(e) => state.show_toast(format!("Open failed: {e}"), ToastKind::Error),
+            }
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
     fn delete_download(&mut self, hash: String, cx: &mut Context<Self>) {
         let state = self.state.clone();
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
@@ -2566,7 +2586,9 @@ impl MainView {
                 meta_line.push_str(&format!(" · {} peers · {}", dl.peers, fmt_speed(dl.speed)));
             }
 
+            let open_hash = hash.clone();
             let mut row = div()
+                .id(SharedString::from(format!("dl-row-{i}")))
                 .flex()
                 .flex_col()
                 .gap(px(theme.space_1()))
@@ -2575,6 +2597,11 @@ impl MainView {
                 .bg(theme.bg_surface())
                 .border_1()
                 .border_color(theme.border_subtle())
+                .cursor_pointer()
+                .hover(move |s| s.border_color(theme.border_strong()))
+                .on_click(cx.listener(move |this, _ev, _w, cx| {
+                    this.open_download_movie(open_hash.clone(), cx);
+                }))
                 .child(
                     div()
                         .flex()
@@ -2642,6 +2669,7 @@ impl MainView {
                 actions = actions.child(
                     secondary_button(SharedString::from(format!("dl-stop-{i}")), "Stop", &theme)
                         .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            cx.stop_propagation();
                             this.cancel_background_download(h.clone(), cx);
                         })),
                 );
@@ -2654,6 +2682,7 @@ impl MainView {
                         &theme,
                     )
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        cx.stop_propagation();
                         this.resume_background_download(h.clone(), cx);
                     })),
                 );
@@ -2667,6 +2696,7 @@ impl MainView {
                         &theme,
                     )
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        cx.stop_propagation();
                         this.delete_download(h.clone(), cx);
                     })),
                 );
@@ -3720,7 +3750,18 @@ impl MainView {
                                     .child("StreamX"),
                             ),
                     )
-                    .child(items),
+                    .child(items)
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(theme.fs_1()))
+                            .text_color(theme.fg_muted())
+                            .child(SharedString::from(format!(
+                                "v{} \u{b7} {}",
+                                streamx::server::static_files::VERSION,
+                                streamx::server::static_files::BUILD_HASH
+                            ))),
+                    ),
             )
             // Clicking outside closes the drawer.
             .child(

@@ -549,6 +549,64 @@ async fn downloads_queue_lists_streams() {
 }
 
 #[tokio::test]
+async fn download_movie_rebuilds_group() {
+    let server = start_test_server().await;
+    let token = get_token(&server.base_url, "dlmovieuser", "password123").await;
+    let hash = "6666666666666666666666666666666666666666";
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/stream", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "magnet_uri": format!("magnet:?xt=urn:btih:{hash}&dn=Test.Movie.2026.1080p"),
+            "title": "Test Movie",
+            "year": 2026,
+            "rating": 7.5,
+            "genres": ["Action", "Drama"],
+            "summary": "A test.",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = client
+        .get(format!("{}/api/downloads/{hash}/movie", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    let resp = client
+        .get(format!("{}/api/downloads/{hash}/movie", server.base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let group: Value = resp.json().await.unwrap();
+    assert_eq!(group["title"], "Test Movie");
+    assert_eq!(group["year"], 2026);
+    assert_eq!(group["genres"][0], "Action");
+    let variants = group["variants"].as_array().unwrap();
+    assert_eq!(variants.len(), 1);
+    let magnet = variants[0]["magnet"].as_str().unwrap();
+    assert!(magnet.contains(hash));
+
+    let resp = client
+        .get(format!(
+            "{}/api/downloads/ffffffffffffffffffffffffffffffffffffffff/movie",
+            server.base_url
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn watch_history_crud() {
     let server = start_test_server().await;
     let token = get_token(&server.base_url, "histuser", "password123").await;

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
 import {
   Flex,
@@ -20,6 +21,29 @@ import { useDebug } from "../hooks/useDebug";
 interface DrawerMenuProps {
   open: boolean;
   onClose: () => void;
+}
+
+function VersionFooter() {
+  const [version, setVersion] = useState<{ version: string; hash: string } | null>(
+    null
+  );
+  useEffect(() => {
+    fetch("/api/version")
+      .then((r) => r.json())
+      .then(setVersion)
+      .catch(() => {});
+  }, []);
+  if (!version) return null;
+  return (
+    <Text
+      size="1"
+      color="gray"
+      align="center"
+      style={{ padding: "4px 0 8px", opacity: 0.7 }}
+    >
+      v{version.version} · {version.hash}
+    </Text>
+  );
 }
 
 const menuLinkStyle: React.CSSProperties = {
@@ -264,6 +288,8 @@ export function DrawerMenu({ open, onClose }: DrawerMenuProps) {
                   Logout
                 </Text>
               </div>
+
+              <VersionFooter />
             </Flex>
           </motion.div>
         </>

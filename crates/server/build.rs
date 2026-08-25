@@ -63,10 +63,10 @@ fn main() {
         minutes,
         seconds
     );
-    let version = format!("0.1.0-{timestamp}");
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
 
-    // Short hash
-    let hash = simple_hash(&format!("{version}-{now}"));
+    // Short hash: unique per build so clients can detect new deploys.
+    let hash = simple_hash(&format!("{version}-{timestamp}-{now}"));
     let short_hash = format!("{:08x}", hash);
 
     println!("cargo:rustc-env=STREAMX_VERSION={version}");

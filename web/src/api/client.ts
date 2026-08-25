@@ -12,6 +12,7 @@ import type {
   ResolveMagnetResponse,
   SearchRequest,
   SearchResponse,
+  SearchResultGroup,
   SearchHistoryResponse,
   ServerSettings,
   Settings,
@@ -158,6 +159,10 @@ class ApiClient {
 
   async listDownloads(): Promise<DownloadsResponse> {
     return this.request<DownloadsResponse>("/api/downloads");
+  }
+
+  async downloadMovie(infoHash: string): Promise<SearchResultGroup> {
+    return this.request<SearchResultGroup>(`/api/downloads/${infoHash}/movie`);
   }
 
   async pinDownload(streamId: string): Promise<void> {

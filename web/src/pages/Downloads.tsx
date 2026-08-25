@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Badge,
   Button,
@@ -10,6 +11,7 @@ import {
 import {
   Cross2Icon,
   DownloadIcon,
+  PlayIcon,
   TrashIcon,
 } from "@radix-ui/react-icons";
 import { api } from "../api/client";
@@ -60,6 +62,7 @@ function ProgressBar({ value }: { value: number }) {
 }
 
 export function Downloads() {
+  const navigate = useNavigate();
   const { user } = useAuth();
   const isAdmin = user?.is_admin === true;
   const [items, setItems] = useState<DownloadItem[]>([]);
@@ -113,6 +116,17 @@ export function Downloads() {
     return withBusy(dl.info_hash, () => api.deleteStream(dl.info_hash));
   };
 
+  // Open the standard movie page for this download in any state; the
+  // movie page supports playback while the download is still running.
+  const handleOpen = async (dl: DownloadItem) => {
+    try {
+      const group = await api.downloadMovie(dl.info_hash);
+      navigate("/movie", { state: group });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to open movie");
+    }
+  };
+
   return (
     <Flex direction="column" gap="4">
       <Flex align="center" gap="2">
@@ -147,7 +161,12 @@ export function Downloads() {
           const active = dl.status === "downloading" || dl.status === "initializing";
           const complete = dl.status === "complete";
           return (
-            <Card key={dl.info_hash} size="2">
+            <Card
+              key={dl.info_hash}
+              size="2"
+              style={{ cursor: "pointer" }}
+              onClick={() => handleOpen(dl)}
+            >
               <Flex direction="column" gap="2">
                 <Flex align="center" gap="2" wrap="wrap">
                   <Text
@@ -195,13 +214,28 @@ export function Downloads() {
                     </>
                   )}
                   <Flex gap="2" ml="auto" align="center">
+                    <Button
+                      size="1"
+                      variant="soft"
+                      color="green"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleOpen(dl);
+                      }}
+                    >
+                      <PlayIcon width={12} height={12} />
+                      Watch
+                    </Button>
                     {!complete && dl.pinned && (
                       <Button
                         size="1"
                         variant="soft"
                         color="orange"
                         disabled={busy === dl.info_hash}
-                        onClick={() => handleCancel(dl)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleCancel(dl);
+                        }}
                       >
                         <Cross2Icon width={12} height={12} />
                         Cancel Download
@@ -212,7 +246,10 @@ export function Downloads() {
                         size="1"
                         variant="soft"
                         disabled={busy === dl.info_hash}
-                        onClick={() => handleResume(dl)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleResume(dl);
+                        }}
                       >
                         <DownloadIcon width={12} height={12} />
                         Download
@@ -224,7 +261,10 @@ export function Downloads() {
                         variant="soft"
                         color="red"
                         disabled={busy === dl.info_hash}
-                        onClick={() => handleDelete(dl)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDelete(dl);
+                        }}
                         aria-label="Delete download"
                       >
                         <TrashIcon width={14} height={14} />
