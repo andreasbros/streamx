@@ -89,6 +89,22 @@ Anyway" (the app is not yet notarized).
 Linux server: download `streamx-<arch>-linux-musl`, `chmod +x`, run.
 Works on any distro, fully static.
 
+## Build cache (one-time setup)
+
+CI substitutes unchanged Nix derivations (cross toolchains, static
+FFmpeg, crate deps) from a Cachix binary cache; without it every run
+compiles cold (~1.5h Linux, ~1h macOS). Free for open source.
+
+1. https://app.cachix.org > sign in with GitHub > create a cache named
+   `streamx` (public).
+2. Cache settings > Auth tokens > generate a write token.
+3. GitHub secret `CACHIX_AUTH_TOKEN` = that token.
+
+First run after setup is still cold (it populates the cache); later
+runs drop to roughly 15-25 minutes, dominated by the code that actually
+changed. Without the secret, CI still pulls from the public cache and
+just skips pushing.
+
 ## If something went wrong
 
 - CI job failed: fix, push to main, then re-run the job from the GitHub

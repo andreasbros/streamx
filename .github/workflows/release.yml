@@ -24,7 +24,10 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref_name }}
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - uses: cachix/cachix-action@v15
+        with:
+          name: streamx
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Build static servers + desktop
         run: |
           nix build .#streamx-x86_64-linux-musl --out-link out-x86_64
@@ -52,6 +55,10 @@ jobs:
         with:
           extra-conf: |
             extra-platforms = x86_64-darwin
+      - uses: cachix/cachix-action@v15
+        with:
+          name: streamx
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Import Developer ID certificate (when configured)
         env:
           MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}

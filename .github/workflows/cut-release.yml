@@ -30,7 +30,10 @@ jobs:
           ref: ${{ inputs.commit || github.sha }}
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
-      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - uses: cachix/cachix-action@v15
+        with:
+          name: streamx
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
       - name: Bump, changelog, tag, release
         id: cut
         env: { GH_TOKEN: "${{ github.token }}" }
