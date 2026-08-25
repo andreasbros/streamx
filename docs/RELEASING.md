@@ -101,8 +101,52 @@ Works on any distro, fully static.
   release commit, fix, release again with the same version.
 - Never rewrite a tag that users may have downloaded from.
 
-## Later (when the Apple Developer cert exists)
+## Apple signing + notarization (one-time setup)
 
-Set `CODESIGN_IDENTITY="Developer ID Application: ..."` for the macOS
-builds and add notarization (`xcrun notarytool submit` + staple) after
-bundling; the "Open Anyway" step then disappears for users.
+Removes the "Open Anyway" step for users. CI does the signing; you only
+provision credentials once. All secrets go to GitHub: repo > Settings >
+Secrets and variables > Actions > New repository secret.
+
+1. Join the Apple Developer Program ($99/year):
+   https://developer.apple.com/programs/enroll - use your Apple ID with
+   two-factor auth. Wait for the enrollment email.
+
+2. Create the "Developer ID Application" certificate (on this Mac):
+   - Keychain Access > Certificate Assistant > Request a Certificate
+     From a Certificate Authority: your email, "Saved to disk". This
+     writes a `.certSigningRequest` and puts the private key in your
+     keychain.
+   - https://developer.apple.com/account/resources/certificates >
+     "+" > Developer ID Application > upload the request > download the
+     `.cer` > double-click to install it into Keychain Access.
+
+3. Export the certificate for CI:
+   - Keychain Access > My Certificates > "Developer ID Application:
+     <name> (<TEAMID>)" > right-click > Export > `.p12` with a strong
+     password.
+   - Secrets:
+     - `MACOS_CERT_P12`: `base64 -i cert.p12 | pbcopy` and paste
+     - `MACOS_CERT_PASSWORD`: the export password
+
+4. Create an App Store Connect API key (for notarization):
+   - https://appstoreconnect.apple.com > Users and Access >
+     Integrations > App Store Connect API > Team Keys > "+", role
+     Developer. Download the `.p8` (single chance).
+   - Secrets:
+     - `APP_STORE_CONNECT_KEY`: `base64 -i AuthKey_XXXX.p8 | pbcopy`
+     - `APP_STORE_CONNECT_KEY_ID`: the Key ID shown next to the key
+     - `APP_STORE_CONNECT_ISSUER_ID`: shown at the top of the page
+
+5. Done. The release workflow detects the secrets automatically: it
+   imports the certificate into a throwaway keychain, signs with
+   hardened runtime + timestamp, notarizes both dmgs
+   (`notarytool --wait`), and staples the tickets. Without the secrets
+   it falls back to ad-hoc signing exactly as before.
+
+6. Verify on the next release: download a dmg and run
+   `spctl -a -t open --context context:primary-signature -v StreamX-aarch64.dmg`
+   (expect "accepted"), or just open the app - no Gatekeeper prompt.
+
+Local signed builds work too:
+`CODESIGN_IDENTITY="Developer ID Application: <name> (<TEAMID>)" nix run .#build-all`
+(notarization stays a CI concern).

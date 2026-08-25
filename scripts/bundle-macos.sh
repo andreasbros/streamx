@@ -136,12 +136,15 @@ for h in ffmpeg ffprobe; do
 done
 
 # Sign inside-out: every dylib and helper, then the bundle. Required on
-# Apple Silicon after rewriting load commands; with CODESIGN_IDENTITY
-# set this produces a distributable Developer ID signature.
+# Apple Silicon after rewriting load commands. With CODESIGN_IDENTITY
+# set this produces a distributable Developer ID signature; hardened
+# runtime + secure timestamp are required for notarization.
+SIGN_FLAGS=()
+[ "$IDENTITY" != "-" ] && SIGN_FLAGS=(--options runtime --timestamp)
 for obj in "$OUT"/Contents/Frameworks/* "$OUT"/Contents/Helpers/*; do
-  codesign --force --sign "$IDENTITY" "$obj" >/dev/null 2>&1
+  codesign --force "${SIGN_FLAGS[@]}" --sign "$IDENTITY" "$obj" >/dev/null 2>&1
 done
-codesign --force --sign "$IDENTITY" "$OUT" >/dev/null
+codesign --force "${SIGN_FLAGS[@]}" --sign "$IDENTITY" "$OUT" >/dev/null
 
 echo "bundled $(ls "$OUT/Contents/Frameworks" | wc -l | tr -d ' ') dylibs, $(du -sh "$OUT" | cut -f1) total"
 
