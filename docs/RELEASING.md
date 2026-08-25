@@ -139,9 +139,11 @@ Secrets and variables > Actions > New repository secret.
 
 5. Done. The release workflow detects the secrets automatically: it
    imports the certificate into a throwaway keychain, signs with
-   hardened runtime + timestamp, notarizes both dmgs
-   (`notarytool --wait`), and staples the tickets. Without the secrets
-   it falls back to ad-hoc signing exactly as before.
+   hardened runtime + timestamp, then per architecture notarizes and
+   staples the .app itself, signs the .dmg, and notarizes and staples
+   the .dmg too - so both the disk image and an app copied out of it
+   validate offline. Without the secrets it falls back to ad-hoc
+   signing exactly as before.
 
 6. Verify on the next release: download a dmg and run
    `spctl -a -t open --context context:primary-signature -v StreamX-aarch64.dmg`

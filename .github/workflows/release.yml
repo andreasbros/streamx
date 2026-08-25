@@ -73,25 +73,26 @@ jobs:
           IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN"             | awk -F'"' '/Developer ID Application/ {print $2; exit}')
           echo "CODESIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
           echo "signing as: $IDENTITY"
-      - name: Build dmgs (Apple Silicon + Intel via Rosetta)
-        run: |
-          nix develop --command scripts/release.sh aarch64-apple-darwin dist/StreamX-aarch64.dmg
-          nix develop --command scripts/release.sh x86_64-apple-darwin dist/StreamX-x86_64.dmg
-      - name: Notarize and staple (when configured)
+      - name: Prepare notarization credentials (when configured)
         env:
           APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
         run: |
-          if [ -z "$APP_STORE_CONNECT_KEY" ] || [ -z "$CODESIGN_IDENTITY" ]; then
-            echo "notarization not configured; skipping"
+          if [ -z "$APP_STORE_CONNECT_KEY" ]; then
+            echo "notarization not configured; artifacts will not be notarized"
             exit 0
           fi
-          echo "$APP_STORE_CONNECT_KEY" | base64 -d > $RUNNER_TEMP/asc.p8
-          for dmg in dist/*.dmg; do
-            xcrun notarytool submit "$dmg"               --key $RUNNER_TEMP/asc.p8               --key-id "$APP_STORE_CONNECT_KEY_ID"               --issuer "$APP_STORE_CONNECT_ISSUER_ID"               --wait
-            xcrun stapler staple "$dmg"
-          done
+          echo "$APP_STORE_CONNECT_KEY" | base64 -d > "$RUNNER_TEMP/asc.p8"
+          {
+            echo "NOTARY_KEY_FILE=$RUNNER_TEMP/asc.p8"
+            echo "NOTARY_KEY_ID=$APP_STORE_CONNECT_KEY_ID"
+            echo "NOTARY_ISSUER_ID=$APP_STORE_CONNECT_ISSUER_ID"
+          } >> "$GITHUB_ENV"
+      - name: Build, sign, notarize dmgs (Apple Silicon + Intel via Rosetta)
+        run: |
+          nix develop --command scripts/release.sh aarch64-apple-darwin dist/StreamX-aarch64.dmg
+          nix develop --command scripts/release.sh x86_64-apple-darwin dist/StreamX-x86_64.dmg
       - name: Upload
         env: { GH_TOKEN: "${{ github.token }}" }
         run: gh release upload "${{ inputs.tag || github.ref_name }}" dist/*.dmg --clobber
