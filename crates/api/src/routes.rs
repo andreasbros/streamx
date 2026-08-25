@@ -20,12 +20,6 @@ pub const SEARCH: &str = "/api/search";
 pub const BROWSE: &str = "/api/search/browse";
 pub const CREATE_STREAM: &str = "/api/stream";
 
-/// `GET /api/downloads/{info_hash}/movie` -> `SearchResultGroup` rebuilt
-/// from the stored download + metadata, for opening the movie page.
-pub fn download_movie(info_hash: &str) -> String {
-    format!("/api/downloads/{info_hash}/movie")
-}
-
 /// `GET /api/stream/{id}/files` -> `{ files: [TorrentFile], status }`
 pub fn stream_files(id: &str) -> String {
     format!("/api/stream/{id}/files")

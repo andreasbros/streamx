@@ -116,15 +116,10 @@ export function Downloads() {
     return withBusy(dl.info_hash, () => api.deleteStream(dl.info_hash));
   };
 
-  // Open the standard movie page for this download in any state; the
-  // movie page supports playback while the download is still running.
-  const handleOpen = async (dl: DownloadItem) => {
-    try {
-      const group = await api.downloadMovie(dl.info_hash);
-      navigate("/movie", { state: group });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to open movie");
-    }
+  // Open the player page directly, exactly like the History page does.
+  // Playback works in any download state (streams while downloading).
+  const handleOpen = (dl: DownloadItem) => {
+    navigate(`/player/${dl.info_hash}`);
   };
 
   return (

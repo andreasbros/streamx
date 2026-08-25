@@ -287,6 +287,7 @@ ts! {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DownloadItem {
     pub info_hash: String,
+    pub magnet_uri: String,
     pub title: String,
     pub file_name: String,
     pub file_size: u64,

@@ -92,11 +92,6 @@ pub trait Api: Send + Sync {
     async fn unpin_download(&self, stream_id: &str) -> ClientResult<()>;
     /// Download queue: every known download with progress + live stats.
     async fn list_downloads(&self) -> ClientResult<Vec<crate::types::DownloadItem>>;
-    /// Movie-page group rebuilt from a stored download + metadata.
-    async fn download_movie(
-        &self,
-        info_hash: &str,
-    ) -> ClientResult<crate::types::SearchResultGroup>;
     /// Best-matching YouTube trailer id for a free-text query.
     async fn trailer_search(&self, query: &str) -> ClientResult<String>;
     /// Delete a download entirely: files and DB records (admin only).
@@ -191,7 +186,6 @@ impl Client {
     delegate!(pin_download(&self, stream_id: &str) -> ClientResult<()>);
     delegate!(unpin_download(&self, stream_id: &str) -> ClientResult<()>);
     delegate!(list_downloads(&self) -> ClientResult<Vec<crate::types::DownloadItem>>);
-    delegate!(download_movie(&self, info_hash: &str) -> ClientResult<SearchResultGroup>);
     delegate!(trailer_search(&self, query: &str) -> ClientResult<String>);
     delegate!(delete_stream(&self, stream_id: &str) -> ClientResult<()>);
     delegate!(restart_torrent(&self) -> ClientResult<()>);
@@ -570,14 +564,6 @@ impl Api for HttpClient {
         )
         .await?;
         Ok(env.downloads)
-    }
-
-    async fn download_movie(
-        &self,
-        info_hash: &str,
-    ) -> ClientResult<crate::types::SearchResultGroup> {
-        let url = self.url(&crate::routes::download_movie(info_hash));
-        Self::decode(self.authed(self.http.get(url)).send().await?).await
     }
 
     async fn trailer_search(&self, query: &str) -> ClientResult<String> {

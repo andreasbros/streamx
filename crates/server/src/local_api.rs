@@ -711,6 +711,7 @@ impl Api for LocalApi {
                 };
                 items.push(streamx_api::types::DownloadItem {
                     info_hash: dl.info_hash,
+                    magnet_uri: dl.magnet_uri,
                     title,
                     file_name: dl.file_name,
                     file_size: dl.file_size,
@@ -725,23 +726,6 @@ impl Api for LocalApi {
                 });
             }
             Ok(items)
-        })
-        .await
-    }
-
-    async fn download_movie(&self, info_hash: &str) -> ClientResult<SearchResultGroup> {
-        let components = self.components.clone();
-        let hash = info_hash.to_string();
-        let _ = self.user_id().await?;
-        self.run(async move {
-            let dl = components
-                .database
-                .get_download(&hash)
-                .await
-                .map_err(err_to_client)?
-                .ok_or_else(|| ClientError::Backend(format!("Download {hash} not found")))?;
-            let meta = components.database.get_metadata(&hash).await.ok().flatten();
-            Ok(crate::server::api::download_movie_group(&dl, meta))
         })
         .await
     }

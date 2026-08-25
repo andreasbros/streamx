@@ -2512,24 +2512,27 @@ impl MainView {
         .detach();
     }
 
-    /// Fetch the rebuilt movie group for a download and open the
-    /// standard movie page, whatever the download state.
-    fn open_download_movie(&mut self, hash: String, cx: &mut Context<Self>) {
-        let state = self.state.clone();
-        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            let client = state.client.read().clone();
-            let h = hash.clone();
-            let res = runtime::spawn(async move { client.download_movie(&h).await }).await;
-            match res {
-                Ok(group) => {
-                    *state.selected_movie.write() = Some(std::sync::Arc::new(group));
-                    state.navigate(Page::Movie);
-                }
-                Err(e) => state.show_toast(format!("Open failed: {e}"), ToastKind::Error),
-            }
-            let _ = this.update(cx, |_, cx| cx.notify());
-        })
-        .detach();
+    /// Open the player page for a download, whatever its state —
+    /// the same path History playback uses. `create_stream` returns the
+    /// existing download untouched, then the standard poll/resolve/mpv
+    /// flow takes over (streams while still downloading).
+    fn play_download(&mut self, dl: &streamx_api::types::DownloadItem, cx: &mut Context<Self>) {
+        let magnet = if dl.magnet_uri.is_empty() {
+            format!("magnet:?xt=urn:btih:{}", dl.info_hash)
+        } else {
+            dl.magnet_uri.clone()
+        };
+        let title = if dl.title.is_empty() {
+            dl.file_name.clone()
+        } else {
+            dl.title.clone()
+        };
+        let req = streamx_api::types::CreateStreamRequest {
+            magnet_uri: magnet,
+            title: Some(title).filter(|t| !t.is_empty()),
+            ..Default::default()
+        };
+        self.play_request(req, cx);
     }
 
     fn delete_download(&mut self, hash: String, cx: &mut Context<Self>) {
@@ -2832,7 +2835,7 @@ impl MainView {
                 meta_line.push_str(&format!(" · {} peers · {}", dl.peers, fmt_speed(dl.speed)));
             }
 
-            let open_hash = hash.clone();
+            let open_dl = dl.clone();
             let mut row = div()
                 .id(SharedString::from(format!("dl-row-{i}")))
                 .flex()
@@ -2846,7 +2849,7 @@ impl MainView {
                 .cursor_pointer()
                 .hover(move |s| s.border_color(theme.border_strong()))
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
-                    this.open_download_movie(open_hash.clone(), cx);
+                    this.play_download(&open_dl, cx);
                 }))
                 .child(
                     div()

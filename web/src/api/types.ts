@@ -124,6 +124,7 @@ export interface ServerSettings {
 
 export interface DownloadItem {
   info_hash: string;
+  magnet_uri: string;
   title: string;
   file_name: string;
   file_size: number;
