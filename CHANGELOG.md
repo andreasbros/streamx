@@ -4,8 +4,19 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.2.5] - 2026-08-25
+
+
+### Other
+
+- Merge branch 'main' of github.com:andreasbros/streamx (7ce9150f)
+
 ## [0.2.4] - 2026-08-25
 
+
+### Added
+
+- Open movie page from downloads; correct app version shown in web and desktop menus (29daa729)
 
 ### Other
 
