@@ -4,6 +4,13 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.2.4] - 2026-08-25
+
+
+### Other
+
+- Merge branch 'main' of github.com:andreasbros/streamx (b826284b)
+
 ## [0.2.3] - 2026-08-25
 
 
@@ -15,6 +22,7 @@ All notable changes to StreamX. The format follows
 
 - Replace deprecated magic-nix-cache with cachix (de0ea694)
 - Increase build timeout (0c725494)
+- Optimise build and release pipeline (1b2719b1)
 
 ### Other
 
