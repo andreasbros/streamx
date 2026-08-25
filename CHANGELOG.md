@@ -4,8 +4,19 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.2.2] - 2026-08-25
+
+
+### Other
+
+- Merge branch 'main' of github.com:andreasbros/streamx (797edc9c)
+
 ## [0.2.1] - 2026-08-25
 
+
+### Internal
+
+- Forward secrets to the called release workflow (309b3c16)
 
 ### Other
 
