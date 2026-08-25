@@ -4,6 +4,13 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.2.1] - 2026-08-25
+
+
+### Other
+
+- Merge branch 'main' of github.com:andreasbros/streamx (ddaa8147)
+
 ## [0.2.0] - 2026-08-24
 
 
@@ -15,6 +22,7 @@ All notable changes to StreamX. The format follows
 ### Internal
 
 - Build web UI before rust job so rust-embed finds web/dist (5df906d8)
+- Apple signatory (239376e6)
 
 ## [0.1.0] - 2026-08-24
 
