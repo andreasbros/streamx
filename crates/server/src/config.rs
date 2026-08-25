@@ -402,7 +402,7 @@ id = 1
 name = "yts"
 kind = "movies"
 url = "https://yts.bz"
-api_url = "https://yts.bz/api/v2/list_movies.json"
+api_url = "https://movies-api.accel.li/api/v2/list_movies.json"
 
 [[providers]]
 id = 5
