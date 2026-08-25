@@ -58,6 +58,10 @@ pub struct MainView {
     confirm_maintenance: Option<&'static str>,
     repeat_input: Entity<TextInput>,
     logs_scroll: gpui::UniformListScrollHandle,
+    /// Pre-maximize window frame for the classic (non-tiling) macOS
+    /// maximize toggle: (x, y, w, h) in screen points.
+    #[cfg(target_os = "macos")]
+    saved_window_frame: Option<(f64, f64, f64, f64)>,
     /// Shared page scroll container. Offsets are saved per page so
     /// going back (e.g. Movie -> Search) restores the exact position.
     page_scroll: gpui::ScrollHandle,
@@ -159,6 +163,8 @@ impl MainView {
             password_input,
             repeat_input,
             logs_scroll: gpui::UniformListScrollHandle::new(),
+            #[cfg(target_os = "macos")]
+            saved_window_frame: None,
             page_scroll: gpui::ScrollHandle::new(),
             page_scroll_saved: std::collections::HashMap::new(),
             last_scroll_page: None,
@@ -652,6 +658,60 @@ impl MainView {
         let req = self.player.lock().last_request.clone();
         if let Some(req) = req {
             self.play_request(req, cx);
+        }
+    }
+
+    /// Classic maximize: size the window to the screen's visible frame
+    /// with a plain `setFrame:`, avoiding AppKit's `zoom:` which macOS
+    /// 26 maps to the tiling "fill" state (edge drags then move the
+    /// window instead of resizing). Double-invoking restores the saved
+    /// frame.
+    #[cfg(target_os = "macos")]
+    #[allow(unexpected_cfgs)] // objc 0.2 macros carry a legacy cargo-clippy cfg
+    fn toggle_maximize_classic(&mut self) {
+        use objc::{class, msg_send, sel, sel_impl};
+
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Rect {
+            x: f64,
+            y: f64,
+            w: f64,
+            h: f64,
+        }
+        unsafe impl objc::Encode for Rect {
+            fn encode() -> objc::Encoding {
+                unsafe { objc::Encoding::from_str("{CGRect={CGPoint=dd}{CGSize=dd}}") }
+            }
+        }
+
+        unsafe {
+            let app: *mut objc::runtime::Object =
+                msg_send![class!(NSApplication), sharedApplication];
+            let win: *mut objc::runtime::Object = msg_send![app, mainWindow];
+            if win.is_null() {
+                return;
+            }
+            let screen: *mut objc::runtime::Object = msg_send![win, screen];
+            if screen.is_null() {
+                return;
+            }
+            let vis: Rect = msg_send![screen, visibleFrame];
+            let cur: Rect = msg_send![win, frame];
+            let near = |a: f64, b: f64| (a - b).abs() < 2.0;
+            let is_max = near(cur.x, vis.x)
+                && near(cur.y, vis.y)
+                && near(cur.w, vis.w)
+                && near(cur.h, vis.h);
+            if is_max {
+                if let Some((x, y, w, h)) = self.saved_window_frame.take() {
+                    let r = Rect { x, y, w, h };
+                    let _: () = msg_send![win, setFrame: r display: true animate: false];
+                }
+            } else {
+                self.saved_window_frame = Some((cur.x, cur.y, cur.w, cur.h));
+                let _: () = msg_send![win, setFrame: vis display: true animate: false];
+            }
         }
     }
 
@@ -4109,9 +4169,23 @@ impl MainView {
             .on_mouse_down(MouseButton::Left, |_ev, window, _cx| {
                 window.start_window_move();
             })
-            .on_click(cx.listener(|_this, ev: &gpui::ClickEvent, window, _cx| {
+            .on_click(cx.listener(|this, ev: &gpui::ClickEvent, window, _cx| {
                 if ev.click_count() == 2 {
-                    window.zoom_window();
+                    // macOS 26 turns `zoom:` into the tiling "fill"
+                    // state, where dragging a window edge un-tiles and
+                    // moves the window instead of resizing it. Classic
+                    // maximize (plain setFrame) keeps the window in the
+                    // normal state so edge resizing keeps working.
+                    #[cfg(target_os = "macos")]
+                    {
+                        let _ = window;
+                        this.toggle_maximize_classic();
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let _ = this;
+                        window.zoom_window();
+                    }
                 }
             }));
 

@@ -348,7 +348,6 @@ pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, Str
         // horizontal / vertical / diagonal drags all work.
         .arg("--border=yes")
         .arg("--keepaspect-window=no")
-        .arg("--window-dragging=no")
         .args(ytdl_args(target))
         .arg("--cache=yes")
         .arg("--cache-secs=300")

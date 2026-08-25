@@ -31,10 +31,6 @@ const PLAYER_OPTIONS: &[(&str, &str)] = &[
     ("osc", "yes"),
     ("border", "yes"),
     ("keepaspect-window", "no"),
-    // Content drags must not move the window: with dragging enabled,
-    // grabbing the bottom edge (resize cursor showing) moves the whole
-    // window instead of resizing. The titlebar still moves it.
-    ("window-dragging", "no"),
     // The yt-dlp hook only runs after a direct open fails, so normal
     // streams and files pay no probing cost; web URLs (trailers) get
     // resolved at the highest available quality.
