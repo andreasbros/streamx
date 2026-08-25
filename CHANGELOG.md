@@ -4,8 +4,28 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.2.3] - 2026-08-25
+
+
+### Fixed
+
+- Latest yts movie posters (a0c9af48)
+
+### Internal
+
+- Replace deprecated magic-nix-cache with cachix (de0ea694)
+- Increase build timeout (0c725494)
+
+### Other
+
+- Merge branch 'main' of github.com:andreasbros/streamx (e32a2466)
+
 ## [0.2.2] - 2026-08-25
 
+
+### Internal
+
+- Staple app before dmg, sign and staple the dmg (c17e35ac)
 
 ### Other
 
