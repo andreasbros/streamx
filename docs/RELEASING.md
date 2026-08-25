@@ -70,9 +70,9 @@ artifacts are for your own testing and are never published.
 
 The tag triggers `.github/workflows/release.yml`:
 
-- Linux job: `streamx-x86_64-linux-musl`, `streamx-aarch64-linux-musl`,
-  `streamx-desktop-x86_64-linux.tar.gz`, plus `nix flake check`
-- macOS job: both dmgs (rebuilt on the runner)
+- Three parallel Linux jobs (x86_64 server, aarch64 server on a native
+  ARM runner, desktop tarball), each gated by its linkage check
+- macOS job: both dmgs, signed and notarized
 
 ```bash
 gh run watch                 # or: gh run list --workflow release

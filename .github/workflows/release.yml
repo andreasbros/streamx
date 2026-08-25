@@ -16,7 +16,10 @@ permissions:
   contents: write
 
 jobs:
-  linux:
+  # Linux artifacts build in parallel: wall-clock is the slowest single
+  # artifact, not the sum. Each job runs only its own linkage check;
+  # clippy/fmt/tests are CI's job on every push, not the release's.
+  linux-server-x86_64:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
@@ -28,21 +31,64 @@ jobs:
         with:
           name: streamx
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-      - name: Build static servers + desktop
+      - name: Build + linkage check
         run: |
-          nix build .#streamx-x86_64-linux-musl --out-link out-x86_64
-          nix build .#streamx-aarch64-linux-musl --out-link out-aarch64
-          nix build .#streamx-desktop-dist --out-link out-desktop
-          nix flake check
-      - name: Package
-        run: |
-          mkdir -p dist
-          install -m755 out-x86_64/bin/streamx dist/streamx-x86_64-linux-musl
-          install -m755 out-aarch64/bin/streamx dist/streamx-aarch64-linux-musl
-          tar -C out-desktop -czf dist/streamx-desktop-x86_64-linux.tar.gz .
+          nix build .#streamx-x86_64-linux-musl --out-link out
+          nix build .#checks.x86_64-linux.linkage-server-x86_64-musl
       - name: Upload
         env: { GH_TOKEN: "${{ github.token }}" }
-        run: gh release upload "${{ inputs.tag || github.ref_name }}" dist/* --clobber
+        run: |
+          mkdir -p dist
+          install -m755 out/bin/streamx dist/streamx-x86_64-linux-musl
+          gh release upload "${{ inputs.tag || github.ref_name }}" dist/* --clobber
+
+  # Native ARM runner (free for public repos): no cross toolchain to
+  # build and far better upstream cache coverage than cross-compiling.
+  linux-server-aarch64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: cachix/cachix-action@v15
+        with:
+          name: streamx
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build + linkage check
+        run: |
+          nix build .#streamx-aarch64-linux-musl --out-link out
+          nix build .#checks.aarch64-linux.linkage-server-aarch64-musl
+      - name: Upload
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          mkdir -p dist
+          install -m755 out/bin/streamx dist/streamx-aarch64-linux-musl
+          gh release upload "${{ inputs.tag || github.ref_name }}" dist/* --clobber
+
+  linux-desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: cachix/cachix-action@v15
+        with:
+          name: streamx
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: Build + linkage check
+        run: |
+          nix build .#streamx-desktop-dist --out-link out
+          nix build .#checks.x86_64-linux.linkage-desktop-dist
+      - name: Upload
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          mkdir -p dist
+          tar -C out -czf dist/streamx-desktop-x86_64-linux.tar.gz .
+          gh release upload "${{ inputs.tag || github.ref_name }}" dist/* --clobber
 
   macos:
     runs-on: macos-14
