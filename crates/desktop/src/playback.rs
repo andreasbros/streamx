@@ -17,7 +17,15 @@ use streamx_api::types::TorrentFile;
 #[derive(Debug, Clone)]
 pub enum PlayTarget {
     LocalFile(PathBuf),
-    Http { url: String, token: Option<String> },
+    Http {
+        url: String,
+        token: Option<String>,
+    },
+    /// A web page URL (e.g. a YouTube trailer) that mpv resolves via
+    /// its yt-dlp hook.
+    Web {
+        url: String,
+    },
 }
 
 impl PlayTarget {
@@ -25,6 +33,7 @@ impl PlayTarget {
         match self {
             PlayTarget::LocalFile(p) => p.display().to_string(),
             PlayTarget::Http { url, .. } => url.clone(),
+            PlayTarget::Web { url } => url.clone(),
         }
     }
 
@@ -40,6 +49,7 @@ impl PlayTarget {
                 }
                 args
             }
+            PlayTarget::Web { url } => vec![url.clone()],
         }
     }
 }
@@ -295,6 +305,24 @@ pub fn launch(target: &PlayTarget, theme: &Theme) -> Result<(Player, Option<Cont
     }
 }
 
+/// ytdl flags for a spawned mpv: web targets get the yt-dlp hook at the
+/// highest quality; everything else keeps it off (no probing overhead).
+fn ytdl_args(target: &PlayTarget) -> Vec<String> {
+    match target {
+        PlayTarget::Web { .. } => {
+            let mut args = vec![
+                "--ytdl=yes".to_string(),
+                format!("--ytdl-format={YTDL_FORMAT}"),
+            ];
+            if let Some(y) = resolve_ytdlp() {
+                args.push(format!("--script-opts=ytdl_hook-ytdl_path={}", y.display()));
+            }
+            args
+        }
+        _ => vec!["--ytdl=no".to_string()],
+    }
+}
+
 /// Launch mpv on a PlayTarget. Opens a JSON IPC socket so the desktop can
 /// pause/seek/query state while mpv renders the video.
 pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, String> {
@@ -320,7 +348,7 @@ pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, Str
         // horizontal / vertical / diagonal drags all work.
         .arg("--border=yes")
         .arg("--keepaspect-window=no")
-        .arg("--ytdl=no")
+        .args(ytdl_args(target))
         .arg("--cache=yes")
         .arg("--cache-secs=300")
         .arg("--demuxer-max-bytes=2G")
@@ -336,6 +364,53 @@ pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, Str
         .map_err(|e| format!("failed to spawn mpv at {}: {e}", mpv.display()))?;
 
     Ok(MpvInstance { child, socket_path })
+}
+
+/// Highest-quality yt-dlp selection: best video muxed with best audio,
+/// falling back to the best single stream.
+pub const YTDL_FORMAT: &str = "bestvideo+bestaudio/best";
+
+/// Well-known yt-dlp locations checked after PATH. mpv's ytdl hook needs
+/// the binary; when found we pass its path so playback works even when
+/// the app was launched from Finder with a minimal PATH.
+const YTDLP_KNOWN_LOCATIONS: &[&str] = &[
+    "/opt/homebrew/bin/yt-dlp",
+    "/usr/local/bin/yt-dlp",
+    "/usr/bin/yt-dlp",
+    "/run/current-system/sw/bin/yt-dlp",
+    "/nix/var/nix/profiles/default/bin/yt-dlp",
+];
+
+/// Build-time yt-dlp location from the Nix dev shell, if built there.
+const YTDLP_BUILD_PATH: Option<&str> = option_env!("STREAMX_YTDLP_BUILD_PATH");
+
+/// Locate yt-dlp: PATH first, then the build-time path, then well-known
+/// install locations.
+pub fn resolve_ytdlp() -> Option<PathBuf> {
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let cand = dir.join("yt-dlp");
+            if cand.is_file() {
+                return Some(cand);
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let cand = PathBuf::from(home).join(".local/bin/yt-dlp");
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    if let Some(built) = YTDLP_BUILD_PATH {
+        let cand = PathBuf::from(built);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    YTDLP_KNOWN_LOCATIONS
+        .iter()
+        .map(PathBuf::from)
+        .find(|p| p.is_file())
 }
 
 /// Build-time mpv location from the Nix dev shell, if the binary was

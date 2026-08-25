@@ -10,7 +10,7 @@ description = "StreamX HTTP API contract + typed client shared between server, w
 ts-export = ["dep:ts-rs"]
 # Enables the reqwest-based client. Server crate uses only `types`, so it
 # leaves this off. Desktop enables it.
-client = ["dep:reqwest", "dep:tokio", "dep:thiserror", "dep:async-trait", "dep:parking_lot"]
+client = ["dep:reqwest", "dep:tokio", "dep:thiserror", "dep:async-trait", "dep:parking_lot", "dep:urlencoding"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -22,3 +22,4 @@ tokio = { version = "1", features = ["rt"], optional = true }
 thiserror = { version = "2", optional = true }
 async-trait = { version = "0.1", optional = true }
 parking_lot = { version = "0.12", optional = true }
+urlencoding = { version = "2", optional = true }

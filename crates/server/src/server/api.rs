@@ -790,9 +790,18 @@ pub async fn trailer_search(
     let query = params.get("q").ok_or_else(|| Error::BadRequest {
         message: "Missing query parameter 'q'".to_string(),
     })?;
+    let id = resolve_trailer_id(&state, query).await?;
+    Ok(Json(serde_json::json!({ "youtube_id": id })))
+}
 
+/// Find the best-matching YouTube trailer id for a free-text query.
+/// Shared by the HTTP endpoint and the desktop's in-process API.
+pub async fn resolve_trailer_id(
+    state: &AppState,
+    query: &str,
+) -> std::result::Result<String, Error> {
     if let Some(cached) = TRAILER_SEARCH_CACHE.get(query) {
-        return Ok(Json(serde_json::json!({ "youtube_id": cached.value() })));
+        return Ok(cached.value().clone());
     }
 
     let search_url = format!(
@@ -866,8 +875,8 @@ pub async fn trailer_search(
     match best_id {
         Some(id) => {
             tracing::info!(query, youtube_id = id, "Trailer search matched");
-            TRAILER_SEARCH_CACHE.insert(query.clone(), id.to_string());
-            Ok(Json(serde_json::json!({ "youtube_id": id })))
+            TRAILER_SEARCH_CACHE.insert(query.to_string(), id.to_string());
+            Ok(id.to_string())
         }
         None => Err(Error::NotFound {
             message: "No video found".to_string(),

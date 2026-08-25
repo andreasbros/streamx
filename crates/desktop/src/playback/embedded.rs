@@ -31,7 +31,10 @@ const PLAYER_OPTIONS: &[(&str, &str)] = &[
     ("osc", "yes"),
     ("border", "yes"),
     ("keepaspect-window", "no"),
-    ("ytdl", "no"),
+    // The yt-dlp hook only runs after a direct open fails, so normal
+    // streams and files pay no probing cost; web URLs (trailers) get
+    // resolved at the highest available quality.
+    ("ytdl", "yes"),
     ("cache", "yes"),
     ("cache-secs", "300"),
     ("demuxer-max-bytes", "2G"),
@@ -57,6 +60,13 @@ impl EmbeddedPlayer {
         let mpv = Mpv::with_initializer(|init| {
             for (k, v) in PLAYER_OPTIONS {
                 init.set_option(k, *v)?;
+            }
+            init.set_option("ytdl-format", crate::playback::YTDL_FORMAT)?;
+            if let Some(y) = crate::playback::resolve_ytdlp() {
+                init.set_option(
+                    "script-opts",
+                    format!("ytdl_hook-ytdl_path={}", y.display()).as_str(),
+                )?;
             }
             if let Some(h) = &header {
                 init.set_option("http-header-fields", h.as_str())?;
@@ -96,6 +106,28 @@ impl EmbeddedPlayer {
             .map_err(|e| format!("failed to start mpv event thread: {e}"))?;
 
         Ok(Self { mpv, finished })
+    }
+
+    /// Replace whatever is playing with a new target, reusing the same
+    /// mpv window. Fails once the user has closed the window (core dead);
+    /// callers then fall back to a fresh launch.
+    pub fn play_target(&self, target: &PlayTarget) -> Result<(), String> {
+        if self.is_finished() {
+            return Err("player window closed".to_string());
+        }
+        let header = match target {
+            PlayTarget::Http { token: Some(t), .. } => format!("Authorization: Bearer {t}"),
+            _ => String::new(),
+        };
+        self.mpv
+            .set_property("http-header-fields", header.as_str())
+            .map_err(|e| format!("mpv header update failed: {e}"))?;
+        let url = target.display();
+        self.mpv
+            .command("loadfile", &[url.as_str(), "replace"])
+            .map_err(|e| format!("mpv loadfile failed: {e}"))?;
+        let _ = self.mpv.set_property("pause", false);
+        Ok(())
     }
 
     /// Whether mpv has a configured video output (a window exists).

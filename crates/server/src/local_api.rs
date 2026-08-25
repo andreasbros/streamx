@@ -746,6 +746,19 @@ impl Api for LocalApi {
         .await
     }
 
+    async fn trailer_search(&self, query: &str) -> ClientResult<String> {
+        let components = self.components.clone();
+        let q = query.to_string();
+        let _ = self.user_id().await?;
+        self.run(async move {
+            let state = crate::server::AppState::from_components(&components);
+            crate::server::api::resolve_trailer_id(&state, &q)
+                .await
+                .map_err(err_to_client)
+        })
+        .await
+    }
+
     async fn delete_stream(&self, stream_id: &str) -> ClientResult<()> {
         let components = self.components.clone();
         let sid = stream_id.to_string();

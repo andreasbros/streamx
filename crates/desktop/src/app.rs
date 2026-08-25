@@ -58,6 +58,11 @@ pub struct MainView {
     confirm_maintenance: Option<&'static str>,
     repeat_input: Entity<TextInput>,
     logs_scroll: gpui::UniformListScrollHandle,
+    /// Shared page scroll container. Offsets are saved per page so
+    /// going back (e.g. Movie -> Search) restores the exact position.
+    page_scroll: gpui::ScrollHandle,
+    page_scroll_saved: std::collections::HashMap<Page, gpui::Point<gpui::Pixels>>,
+    last_scroll_page: Option<Page>,
     /// Follow the log tail. Cleared when the user scrolls up; restored
     /// when they return to the bottom.
     logs_follow: std::cell::Cell<bool>,
@@ -154,6 +159,9 @@ impl MainView {
             password_input,
             repeat_input,
             logs_scroll: gpui::UniformListScrollHandle::new(),
+            page_scroll: gpui::ScrollHandle::new(),
+            page_scroll_saved: std::collections::HashMap::new(),
+            last_scroll_page: None,
             logs_follow: std::cell::Cell::new(true),
             login_create_mode: false,
             confirm_maintenance: None,
@@ -647,6 +655,122 @@ impl MainView {
         }
     }
 
+    /// Pull out the current player when it is an embedded one whose
+    /// window is still open, so the next playback can `loadfile` into
+    /// the same mpv window. Everything else is disposed.
+    fn take_reusable_player(
+        &mut self,
+    ) -> Option<std::sync::Arc<playback::embedded::EmbeddedPlayer>> {
+        let mut prev = self.player.lock();
+        match (prev.mpv.take(), prev.ipc.take()) {
+            (Some(Player::Embedded(p)), _) if !p.is_finished() => Some(p),
+            (mpv, ipc) => {
+                crate::playback::dispose(mpv, ipc);
+                None
+            }
+        }
+    }
+
+    /// Play a movie's YouTube trailer in mpv. Uses the direct trailer id
+    /// when the catalog has one; otherwise resolves via the server-side
+    /// YouTube search (same fallback as the web app).
+    fn play_trailer_for(
+        &mut self,
+        group: &streamx_api::types::SearchResultGroup,
+        cx: &mut Context<Self>,
+    ) {
+        let title = group.title.clone();
+        let year = group.year;
+        let code = group.trailer_code.clone().filter(|t| !t.is_empty());
+
+        let reuse = self.take_reusable_player();
+        {
+            let mut prev = self.player.lock();
+            *prev = PlayerState::default();
+            if let Some(p) = &reuse {
+                prev.mpv = Some(Player::Embedded(p.clone()));
+                prev.ipc = Some(Control::Embedded(p.clone()));
+            }
+        }
+
+        let state = self.state.clone();
+        let player = self.player.clone();
+        let theme = self.theme;
+        cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
+            let id = match code {
+                Some(c) => Ok(c),
+                None => {
+                    let client = state.client.read().clone();
+                    let q = match year {
+                        Some(y) => format!("{title} {y} official trailer"),
+                        None => format!("{title} official trailer"),
+                    };
+                    runtime::spawn(async move { client.trailer_search(&q).await })
+                        .await
+                        .map_err(|e| format!("trailer search failed: {e}"))
+                }
+            };
+            let id = match id {
+                Ok(id) => id,
+                Err(e) => {
+                    state.show_toast(e, ToastKind::Error);
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                    return;
+                }
+            };
+            let target = playback::PlayTarget::Web {
+                url: format!("https://www.youtube.com/watch?v={id}"),
+            };
+
+            let launch_target = target.clone();
+            let launch_theme = theme;
+            let launched = if let Some(p) = reuse {
+                let t = launch_target.clone();
+                match runtime::spawn(async move { p.play_target(&t).map(|_| p) }).await {
+                    Ok(p) => Ok((Player::Embedded(p.clone()), Some(Control::Embedded(p)))),
+                    Err(e) => {
+                        tracing::warn!("player reuse failed ({e}); launching fresh");
+                        runtime::spawn(
+                            async move { playback::launch(&launch_target, &launch_theme) },
+                        )
+                        .await
+                    }
+                }
+            } else {
+                runtime::spawn(async move { playback::launch(&launch_target, &launch_theme) }).await
+            };
+            match launched {
+                Ok((instance, control)) => {
+                    let _ = this.update(cx, |_, _| crate::playback::reset_dock_icon());
+                    let this_icon = this.clone();
+                    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
+                        for _ in 0..8 {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(500))
+                                .await;
+                            if this_icon
+                                .update(cx, |_, _| crate::playback::reset_dock_icon())
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+                    let mut p = player.lock();
+                    p.target = Some(target);
+                    p.mpv = Some(instance);
+                    p.ipc = control;
+                }
+                Err(e) => {
+                    state.show_toast(format!("Trailer playback failed: {e}"), ToastKind::Error);
+                }
+            }
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
     /// Generic path: build a CreateStreamRequest, navigate to Player, then
     /// poll stream_files + resolve + launch mpv. Used by movie variants,
     /// music/music-video tracks, and surround-sound demos.
@@ -655,13 +779,18 @@ impl MainView {
         req: streamx_api::types::CreateStreamRequest,
         cx: &mut Context<Self>,
     ) {
-        // Kill any mpv child left over from a previous attempt so we
-        // don't leave orphan windows behind.
+        // Reuse a live embedded player so the new video replaces the
+        // same mpv window; anything else (spawned mpv, closed window)
+        // is disposed so we don't leave orphans behind.
+        let reuse = self.take_reusable_player();
         {
             let mut prev = self.player.lock();
-            crate::playback::dispose(prev.mpv.take(), prev.ipc.take());
             *prev = PlayerState::default();
             prev.last_request = Some(req.clone());
+            if let Some(p) = &reuse {
+                prev.mpv = Some(Player::Embedded(p.clone()));
+                prev.ipc = Some(Control::Embedded(p.clone()));
+            }
         }
         // Navigate only if we aren't already on the Player page (so
         // Retry from the Player page doesn't push another Player entry
@@ -750,9 +879,21 @@ impl MainView {
             // reliably with force-window=immediate).
             let launch_target = target.clone();
             let launch_theme = theme;
-            let launched =
-                runtime::spawn(async move { playback::launch(&launch_target, &launch_theme) })
-                    .await;
+            let launched = if let Some(p) = reuse.clone() {
+                let t = launch_target.clone();
+                match runtime::spawn(async move { p.play_target(&t).map(|_| p) }).await {
+                    Ok(p) => Ok((Player::Embedded(p.clone()), Some(Control::Embedded(p)))),
+                    Err(e) => {
+                        tracing::warn!("player reuse failed ({e}); launching fresh");
+                        runtime::spawn(
+                            async move { playback::launch(&launch_target, &launch_theme) },
+                        )
+                        .await
+                    }
+                }
+            } else {
+                runtime::spawn(async move { playback::launch(&launch_target, &launch_theme) }).await
+            };
             match launched {
                 Ok((instance, control)) => {
                     // mpv steals the Dock icon when its window appears;
@@ -1133,7 +1274,7 @@ impl MainView {
                 div()
                     .flex_1()
                     .max_w(px(480.0 * theme.scale()))
-                    .child(self.search_input.clone()),
+                    .child(self.input_with_clear(self.search_input.clone(), "clear-search", cx)),
             )
             .child(
                 div()
@@ -1835,25 +1976,74 @@ impl MainView {
             );
         }
 
+        let has_direct_trailer = m
+            .trailer_code
+            .as_deref()
+            .map(|t| !t.is_empty())
+            .unwrap_or(false);
+
         let mut hero = div().flex().items_start().gap(px(theme.space_4()));
         if let Some(url) = poster_url {
             let src = crate::components::poster_image_source(&url);
+            let m_trailer = m.clone();
             hero = hero.child(
                 div()
+                    .relative()
                     .w(px(hero_w))
                     .h(px(hero_h))
-                    .rounded(px(theme.radius_md()))
-                    .overflow_hidden()
-                    .bg(theme.bg_panel())
-                    .border_1()
-                    .border_color(theme.border_subtle())
                     .flex_shrink_0()
                     .child(
-                        img(src)
+                        div()
                             .w(px(hero_w))
                             .h(px(hero_h))
-                            .object_fit(ObjectFit::Cover),
-                    ),
+                            .rounded(px(theme.radius_md()))
+                            .overflow_hidden()
+                            .bg(theme.bg_panel())
+                            .border_1()
+                            .border_color(theme.border_subtle())
+                            .child(
+                                img(src)
+                                    .w(px(hero_w))
+                                    .h(px(hero_h))
+                                    .object_fit(ObjectFit::Cover),
+                            ),
+                    )
+                    .child(crate::components::trailer_overlay(
+                        "movie-poster-trailer",
+                        has_direct_trailer,
+                        36.0,
+                        Box::new(cx.listener(move |this, _ev, _w, cx| {
+                            this.play_trailer_for(m_trailer.as_ref(), cx);
+                        })),
+                    )),
+            );
+        }
+        {
+            // Same red/grey affordance as the web app's Watch Trailer button.
+            let m_trailer = m.clone();
+            let color = if has_direct_trailer {
+                theme.error()
+            } else {
+                theme.fg_muted()
+            };
+            meta_col = meta_col.child(
+                div().flex().child(
+                    div()
+                        .id("movie-watch-trailer")
+                        .px(px(theme.space_3()))
+                        .py(px(theme.space_2()))
+                        .rounded(px(theme.radius_md()))
+                        .border_1()
+                        .border_color(color)
+                        .text_color(color)
+                        .text_size(px(theme.fs_2()))
+                        .cursor_pointer()
+                        .hover(|s| s.opacity(0.8))
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            this.play_trailer_for(m_trailer.as_ref(), cx);
+                        }))
+                        .child("▶ Watch Trailer"),
+                ),
             );
         }
         hero = hero.child(meta_col);
@@ -2489,6 +2679,62 @@ impl MainView {
             )
     }
 
+    /// Wrap a search input with a small x clear button pinned inside
+    /// its right edge, shown only while the field has text. Clearing
+    /// restores the page's browse view (movies instantly; other domains
+    /// via the debounced empty-query fire).
+    fn input_with_clear(
+        &self,
+        input: Entity<TextInput>,
+        id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let theme = self.theme;
+        let has_text = !input.read(cx).value().is_empty();
+        let mut wrap = div().relative().w_full().child(input.clone());
+        if has_text {
+            let clear_input = input;
+            wrap = wrap.child(
+                div()
+                    .absolute()
+                    .right(px(6.0))
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .id(SharedString::from(id))
+                            .w(px(20.0 * theme.scale()))
+                            .h(px(20.0 * theme.scale()))
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(theme.fs_1()))
+                            .text_color(theme.fg_muted())
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_elevated()).text_color(theme.fg_primary()))
+                            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| {
+                                cx.stop_propagation();
+                            })
+                            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                                cx.stop_propagation();
+                                clear_input.update(cx, |i, _| i.set_value(""));
+                                if id == "clear-search" {
+                                    *this.state.query.write() = String::new();
+                                    *this.state.search_results.write() = Vec::new();
+                                    this.state.mark_dirty();
+                                }
+                                cx.notify();
+                            }))
+                            .child("\u{2715}"),
+                    ),
+            );
+        }
+        wrap
+    }
+
     fn downloads_page_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.theme;
         let items = self.state.downloads.read().clone();
@@ -3036,7 +3282,15 @@ impl MainView {
             .justify_between()
             .gap(px(theme.space_3()))
             .mb(px(theme.space_4()))
-            .child(div().flex_1().max_w(px(480.0)).child(input))
+            .child(div().flex_1().max_w(px(480.0)).child(self.input_with_clear(
+                input,
+                if api_base == "music" {
+                    "clear-music"
+                } else {
+                    "clear-music-videos"
+                },
+                cx,
+            )))
             .child(
                 div()
                     .text_size(px(theme.fs_1()))
@@ -3184,7 +3438,11 @@ impl MainView {
             .justify_between()
             .gap(px(theme.space_3()))
             .mb(px(theme.space_4()))
-            .child(div().flex_1().max_w(px(480.0)).child(self.tv_input.clone()))
+            .child(div().flex_1().max_w(px(480.0)).child(self.input_with_clear(
+                self.tv_input.clone(),
+                "clear-tv",
+                cx,
+            )))
             .child(
                 div()
                     .text_size(px(theme.fs_1()))
@@ -4286,6 +4544,10 @@ pub fn fire_debounced<F: FnOnce(String)>(
 }
 
 async fn run_music_search(state: Arc<AppState>, query: String) {
+    let generation = state
+        .music_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
     if query.trim().is_empty() {
         *state.music_query.write() = String::new();
         load_music(&state).await;
@@ -4295,7 +4557,15 @@ async fn run_music_search(state: Arc<AppState>, query: String) {
     state.mark_dirty();
     *state.music_query.write() = query.clone();
     let client = state.client.read().clone();
-    match client.search_music(&query).await {
+    let result = client.search_music(&query).await;
+    if state
+        .music_generation
+        .load(std::sync::atomic::Ordering::SeqCst)
+        != generation
+    {
+        return;
+    }
+    match result {
         Ok(resp) => *state.music_results.write() = resp.results,
         Err(e) => state.show_toast(format!("Music search failed: {e}"), ToastKind::Error),
     }
@@ -4304,6 +4574,10 @@ async fn run_music_search(state: Arc<AppState>, query: String) {
 }
 
 async fn run_music_video_search(state: Arc<AppState>, query: String) {
+    let generation = state
+        .music_video_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
     if query.trim().is_empty() {
         *state.music_video_query.write() = String::new();
         load_music_videos(&state).await;
@@ -4313,7 +4587,15 @@ async fn run_music_video_search(state: Arc<AppState>, query: String) {
     state.mark_dirty();
     *state.music_video_query.write() = query.clone();
     let client = state.client.read().clone();
-    match client.search_music_videos(&query).await {
+    let result = client.search_music_videos(&query).await;
+    if state
+        .music_video_generation
+        .load(std::sync::atomic::Ordering::SeqCst)
+        != generation
+    {
+        return;
+    }
+    match result {
         Ok(resp) => *state.music_video_results.write() = resp.results,
         Err(e) => state.show_toast(format!("Music video search failed: {e}"), ToastKind::Error),
     }
@@ -4322,6 +4604,10 @@ async fn run_music_video_search(state: Arc<AppState>, query: String) {
 }
 
 async fn run_tv_search(state: Arc<AppState>, query: String) {
+    let generation = state
+        .tv_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
     if query.trim().is_empty() {
         *state.tv_query.write() = String::new();
         load_tv(&state).await;
@@ -4331,7 +4617,15 @@ async fn run_tv_search(state: Arc<AppState>, query: String) {
     state.mark_dirty();
     *state.tv_query.write() = query.clone();
     let client = state.client.read().clone();
-    match client.search_tv(&query).await {
+    let result = client.search_tv(&query).await;
+    if state
+        .tv_generation
+        .load(std::sync::atomic::Ordering::SeqCst)
+        != generation
+    {
+        return;
+    }
+    match result {
         Ok(resp) => *state.tv_results.write() = resp.results,
         Err(e) => state.show_toast(format!("TV search failed: {e}"), ToastKind::Error),
     }
@@ -4610,17 +4904,28 @@ fn home_section_block(
     } else {
         for (i, g) in groups.iter().enumerate() {
             let g_click = g.clone();
+            let g_trailer = g.clone();
             let weak = weak.clone();
+            let weak_trailer = weak.clone();
             strip = strip.child(
-                movie_tile(g.as_ref(), &theme, format!("row-{title}-{i}"), layout).on_click(
-                    move |_ev, _window, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            *this.state.selected_movie.write() = Some(g_click.clone());
-                            this.state.navigate(Page::Movie);
-                            cx.notify();
+                movie_tile(
+                    g.as_ref(),
+                    &theme,
+                    format!("row-{title}-{i}"),
+                    layout,
+                    Some(Box::new(move |_ev, _w, cx| {
+                        let _ = weak_trailer.update(cx, |this, cx| {
+                            this.play_trailer_for(g_trailer.as_ref(), cx);
                         });
-                    },
-                ),
+                    })),
+                )
+                .on_click(move |_ev, _window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        *this.state.selected_movie.write() = Some(g_click.clone());
+                        this.state.navigate(Page::Movie);
+                        cx.notify();
+                    });
+                }),
             );
         }
     }
@@ -4687,17 +4992,28 @@ fn virtual_tile_grid(
                 for (i, item) in items.iter().enumerate().take(end).skip(start) {
                     let g = item.clone();
                     let g_click = g.clone();
+                    let g_trailer = g.clone();
                     let weak = weak.clone();
+                    let weak_trailer = weak.clone();
                     row_div = row_div.child(
-                        movie_tile(g.as_ref(), &theme, format!("{id}-{i}"), layout).on_click(
-                            move |_ev, _window, cx| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    *this.state.selected_movie.write() = Some(g_click.clone());
-                                    this.state.navigate(Page::Movie);
-                                    cx.notify();
+                        movie_tile(
+                            g.as_ref(),
+                            &theme,
+                            format!("{id}-{i}"),
+                            layout,
+                            Some(Box::new(move |_ev, _w, cx| {
+                                let _ = weak_trailer.update(cx, |this, cx| {
+                                    this.play_trailer_for(g_trailer.as_ref(), cx);
                                 });
-                            },
-                        ),
+                            })),
+                        )
+                        .on_click(move |_ev, _window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                *this.state.selected_movie.write() = Some(g_click.clone());
+                                this.state.navigate(Page::Movie);
+                                cx.notify();
+                            });
+                        }),
                     );
                 }
                 row_div
@@ -4743,6 +5059,8 @@ async fn load_favourites(state: &Arc<AppState>) {
 }
 
 pub async fn run_search(state: Arc<AppState>, query: String) {
+    use std::sync::atomic::Ordering;
+    let generation = state.search_generation.fetch_add(1, Ordering::SeqCst) + 1;
     // Empty query means "clear search" — restore the browse view.
     if query.trim().is_empty() {
         *state.query.write() = String::new();
@@ -4757,6 +5075,11 @@ pub async fn run_search(state: Arc<AppState>, query: String) {
 
     let client = state.client.read().clone();
     let result = client.search(&query, 1).await;
+    // A newer search superseded this one while the request was in
+    // flight; drop the stale response instead of replacing results.
+    if state.search_generation.load(Ordering::SeqCst) != generation {
+        return;
+    }
     match result {
         Ok(resp) => {
             *state.search_results.write() =
@@ -4815,6 +5138,22 @@ impl Render for MainView {
         }
         let theme = self.theme;
         let page = self.state.current_page();
+        // On page transitions, stash the outgoing page's scroll offset
+        // (read before this frame's layout clamps it) and restore the
+        // incoming page's saved offset; layout re-clamps to content.
+        if self.last_scroll_page != Some(page) {
+            if let Some(prev) = self.last_scroll_page {
+                self.page_scroll_saved
+                    .insert(prev, self.page_scroll.offset());
+            }
+            let restored = self
+                .page_scroll_saved
+                .get(&page)
+                .copied()
+                .unwrap_or_default();
+            self.page_scroll.set_offset(restored);
+            self.last_scroll_page = Some(page);
+        }
         let drawer_open = *self.state.drawer_open.read();
         let toast = self.state.toast.read().clone();
 
@@ -4917,6 +5256,7 @@ impl Render for MainView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.page_scroll)
                     .child(content),
             );
 

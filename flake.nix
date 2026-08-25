@@ -499,6 +499,9 @@
             # mpv even when launched outside this shell (Finder, plain
             # terminal), where the Nix store is not on PATH.
             export STREAMX_MPV_BUILD_PATH="${pkgs.mpv-unwrapped}/bin/mpv"
+            # Same trick for yt-dlp: mpv's ytdl hook needs it to resolve
+            # YouTube trailer URLs.
+            export STREAMX_YTDLP_BUILD_PATH="${pkgs.yt-dlp}/bin/yt-dlp"
             export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig:$PKG_CONFIG_PATH"
             export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
             export PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS=true

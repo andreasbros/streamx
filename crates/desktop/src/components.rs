@@ -4,8 +4,52 @@
 use crate::theme::Theme;
 use gpui::{
     div, img, px, FontWeight, ImageSource, InteractiveElement, ObjectFit, ParentElement, Resource,
-    SharedString, Styled, StyledImage,
+    SharedString, StatefulInteractiveElement, Styled, StyledImage,
 };
+
+/// Click handler for the trailer overlay on a poster tile.
+pub type TrailerHandler =
+    Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static>;
+
+/// Circular play-trailer overlay pinned to a poster's bottom-right
+/// corner. Red when a direct trailer id exists, grey when playback will
+/// fall back to a YouTube search. Mirrors the web app's poster overlay.
+pub fn trailer_overlay(
+    id: impl Into<SharedString>,
+    has_direct: bool,
+    diameter: f32,
+    on_click: TrailerHandler,
+) -> impl gpui::IntoElement {
+    let bg = if has_direct {
+        gpui::rgba(0xdc2626d9)
+    } else {
+        gpui::rgba(0x787878b3)
+    };
+    div()
+        .id(id.into())
+        .absolute()
+        .bottom(px(6.0))
+        .right(px(6.0))
+        .w(px(diameter))
+        .h(px(diameter))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(bg)
+        .text_color(gpui::white())
+        .text_size(px(diameter * 0.42))
+        .cursor_pointer()
+        .hover(|s| s.opacity(0.85))
+        .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| {
+            cx.stop_propagation();
+        })
+        .on_click(move |ev, w, cx| {
+            cx.stop_propagation();
+            on_click(ev, w, cx);
+        })
+        .child("▶")
+}
 
 /// Movie poster tile dimensions. Sized for readability on desktop
 /// viewports (~1080p+). Keeps the classic 2:3 movie-poster aspect ratio.
@@ -174,9 +218,15 @@ pub fn movie_tile(
     theme: &Theme,
     id: impl Into<SharedString>,
     layout: TileLayout,
+    on_trailer: Option<TrailerHandler>,
 ) -> gpui::Stateful<gpui::Div> {
     let title: SharedString = group.title.clone().into();
     let id = id.into();
+    let has_direct_trailer = group
+        .trailer_code
+        .as_deref()
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
     let year = group.year.map(|y| y.to_string()).unwrap_or_default();
     let rating = group
         .rating
@@ -232,6 +282,20 @@ pub fn movie_tile(
             .child(div().child("▶")),
     };
 
+    let mut poster_wrap = div()
+        .relative()
+        .w(px(poster_w))
+        .h(px(poster_h))
+        .child(poster_placeholder);
+    if let Some(cb) = on_trailer {
+        poster_wrap = poster_wrap.child(trailer_overlay(
+            SharedString::from(format!("{id}-trailer")),
+            has_direct_trailer,
+            (26.0 * fs).max(22.0),
+            cb,
+        ));
+    }
+
     let meta_row = div()
         .flex()
         .gap(px(theme.space_2()))
@@ -261,7 +325,7 @@ pub fn movie_tile(
         .gap(px(theme.space_1()))
         .flex_shrink_0()
         .cursor_pointer()
-        .child(poster_placeholder)
+        .child(poster_wrap)
         .child(
             div()
                 .max_h(px(40.0 * fs))
@@ -310,6 +374,7 @@ pub fn browse_section(
                 theme,
                 format!("bs-{title}-{i}"),
                 tile_layout(1060.0),
+                None,
             ));
         }
     }

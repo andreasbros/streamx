@@ -106,6 +106,14 @@ pub struct AppState {
     pub query: RwLock<String>,
     pub search_results: RwLock<Vec<Arc<SearchResultGroup>>>,
     pub search_in_flight: RwLock<bool>,
+    /// Monotonic ids for in-flight searches, one per search domain.
+    /// A response is applied only when its id is still the newest, so
+    /// a slow response for an older query can never replace results of
+    /// a newer one (out-of-order provider responses).
+    pub search_generation: std::sync::atomic::AtomicU64,
+    pub music_generation: std::sync::atomic::AtomicU64,
+    pub music_video_generation: std::sync::atomic::AtomicU64,
+    pub tv_generation: std::sync::atomic::AtomicU64,
     pub browse: RwLock<BrowseData>,
     pub browse_loading: RwLock<bool>,
 
@@ -269,6 +277,10 @@ impl AppState {
             query: RwLock::new(String::new()),
             search_results: RwLock::new(Vec::new()),
             search_in_flight: RwLock::new(false),
+            search_generation: std::sync::atomic::AtomicU64::new(0),
+            music_generation: std::sync::atomic::AtomicU64::new(0),
+            music_video_generation: std::sync::atomic::AtomicU64::new(0),
+            tv_generation: std::sync::atomic::AtomicU64::new(0),
             browse: RwLock::new(BrowseData::default()),
             browse_loading: RwLock::new(false),
             selected_movie: RwLock::new(None),

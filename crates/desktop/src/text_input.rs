@@ -430,8 +430,13 @@ impl Render for TextInput {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _ev, window, cx| {
+                cx.listener(|this, ev: &gpui::MouseDownEvent, window, cx| {
                     this.focus_handle.focus(window, cx);
+                    // Double-click selects the whole value, mirroring
+                    // standard text field behavior.
+                    if ev.click_count >= 2 {
+                        this.model.select_all();
+                    }
                     cx.notify();
                 }),
             )

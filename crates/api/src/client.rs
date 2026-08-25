@@ -97,6 +97,8 @@ pub trait Api: Send + Sync {
         &self,
         info_hash: &str,
     ) -> ClientResult<crate::types::SearchResultGroup>;
+    /// Best-matching YouTube trailer id for a free-text query.
+    async fn trailer_search(&self, query: &str) -> ClientResult<String>;
     /// Delete a download entirely: files and DB records (admin only).
     async fn delete_stream(&self, stream_id: &str) -> ClientResult<()>;
     /// Restart the torrent client: fresh session + DHT bootstrap (admin only).
@@ -190,6 +192,7 @@ impl Client {
     delegate!(unpin_download(&self, stream_id: &str) -> ClientResult<()>);
     delegate!(list_downloads(&self) -> ClientResult<Vec<crate::types::DownloadItem>>);
     delegate!(download_movie(&self, info_hash: &str) -> ClientResult<SearchResultGroup>);
+    delegate!(trailer_search(&self, query: &str) -> ClientResult<String>);
     delegate!(delete_stream(&self, stream_id: &str) -> ClientResult<()>);
     delegate!(restart_torrent(&self) -> ClientResult<()>);
 }
@@ -575,6 +578,19 @@ impl Api for HttpClient {
     ) -> ClientResult<crate::types::SearchResultGroup> {
         let url = self.url(&crate::routes::download_movie(info_hash));
         Self::decode(self.authed(self.http.get(url)).send().await?).await
+    }
+
+    async fn trailer_search(&self, query: &str) -> ClientResult<String> {
+        #[derive(serde::Deserialize)]
+        struct Envelope {
+            youtube_id: String,
+        }
+        let url = self.url(&format!(
+            "/api/trailer/search?q={}",
+            urlencoding::encode(query)
+        ));
+        let env: Envelope = Self::decode(self.authed(self.http.get(url)).send().await?).await?;
+        Ok(env.youtube_id)
     }
 
     async fn delete_stream(&self, stream_id: &str) -> ClientResult<()> {
