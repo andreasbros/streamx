@@ -88,5 +88,9 @@ jobs:
   build:
     needs: cut
     uses: ./.github/workflows/release.yml
+    # Called workflows do not see repository secrets unless the caller
+    # forwards them; without this, signing and notarization silently
+    # fall back to ad-hoc.
+    secrets: inherit
     with:
       tag: ${{ needs.cut.outputs.tag }}
