@@ -81,15 +81,26 @@ async fn main() -> Result<()> {
         let _ = open_url(&url);
     }
 
-    // Graceful shutdown: catch SIGTERM/SIGINT, kill FFmpeg children
+    // Graceful shutdown: catch SIGTERM/SIGINT (Ctrl-C on Windows),
+    // kill FFmpeg children
     let shutdown = async {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler");
-        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-            .expect("failed to install SIGINT handler");
-        tokio::select! {
-            _ = sigterm.recv() => info!("Received SIGTERM"),
-            _ = sigint.recv() => info!("Received SIGINT"),
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
+            let mut sigint =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                    .expect("failed to install SIGINT handler");
+            tokio::select! {
+                _ = sigterm.recv() => info!("Received SIGTERM"),
+                _ = sigint.recv() => info!("Received SIGINT"),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("Received Ctrl-C");
         }
         info!("Shutting down, killing FFmpeg children...");
         kill_all_streamx_ffmpeg();
@@ -128,6 +139,15 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// Both sweeps are Linux procfs scans; on other hosts orphaned FFmpeg
+// children are already covered by TranscodeHandle's Drop.
+#[cfg(not(unix))]
+fn kill_orphaned_ffmpeg() {}
+
+#[cfg(not(unix))]
+fn kill_all_streamx_ffmpeg() {}
+
+#[cfg(unix)]
 fn kill_orphaned_ffmpeg() {
     let our_pid = std::process::id().to_string();
     if let Ok(entries) = std::fs::read_dir("/proc") {
@@ -163,6 +183,7 @@ fn kill_orphaned_ffmpeg() {
     }
 }
 
+#[cfg(unix)]
 fn kill_all_streamx_ffmpeg() {
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for entry in entries.flatten() {

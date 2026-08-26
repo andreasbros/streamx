@@ -178,7 +178,7 @@ impl TestServer {
             .to_string_lossy()
             .to_string();
         let dest_path = dest_dir.join(&file_name);
-        std::os::unix::fs::symlink(source_file, &dest_path).expect("symlink test file");
+        link_or_copy(source_file, &dest_path);
 
         let db_path = self.data_dir.path().join("db/streamx.db");
         let db = streamx::db::Database::open(&db_path).expect("open db");
@@ -235,7 +235,7 @@ impl TestServer {
         let dest_path = dest_dir.join(&file_name);
 
         // Symlink instead of copy (faster)
-        std::os::unix::fs::symlink(source_file, &dest_path).expect("symlink test file");
+        link_or_copy(source_file, &dest_path);
 
         let db_path = self.data_dir.path().join("db/streamx.db");
         let db = streamx::db::Database::open(&db_path).expect("open db");
@@ -736,4 +736,14 @@ async fn pause_and_resume_endpoints_roundtrip() {
         .expect("resume");
     assert_eq!(resp.status(), StatusCode::OK);
     assert_ne!(server.download_status(stream_id).await, "paused");
+}
+
+/// Symlink on unix (fast), copy on Windows (symlinks need privileges).
+fn link_or_copy(src: &std::path::Path, dst: &std::path::Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(src, dst).expect("symlink");
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(src, dst).expect("copy");
+    }
 }

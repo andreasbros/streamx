@@ -425,7 +425,7 @@ async fn e2e_hls_playlist_from_seeded_file() {
     // Seed a download
     let stream_id = "e2e_test_h264_0000000000000000000000000000";
     let dest = server.data_dir.path().join("downloads/complete/test.mp4");
-    std::os::unix::fs::symlink(&clip, &dest).expect("symlink");
+    link_or_copy(&clip, &dest);
 
     let db_path = server.data_dir.path().join("db/streamx.db");
     let db = streamx::db::Database::open(&db_path).expect("db");
@@ -533,4 +533,14 @@ async fn e2e_report() {
         "Results: {} passed, {} failed",
         result.passed, result.failed
     );
+}
+
+/// Symlink on unix (fast), copy on Windows (symlinks need privileges).
+fn link_or_copy(src: &std::path::Path, dst: &std::path::Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(src, dst).expect("symlink");
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(src, dst).expect("copy");
+    }
 }
