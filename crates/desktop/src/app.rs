@@ -731,9 +731,9 @@ impl MainView {
         }
     }
 
-    /// Play a movie's YouTube trailer in mpv. Uses the direct trailer id
-    /// when the catalog has one; otherwise resolves via the server-side
-    /// YouTube search (same fallback as the web app).
+    /// Open a movie's YouTube trailer in the default web browser. Uses
+    /// the direct trailer id when the catalog has one; otherwise resolves
+    /// via the server-side YouTube search (same fallback as the web app).
     fn play_trailer_for(
         &mut self,
         group: &streamx_api::types::SearchResultGroup,
@@ -741,92 +741,32 @@ impl MainView {
     ) {
         let title = group.title.clone();
         let year = group.year;
-        let code = group.trailer_code.clone().filter(|t| !t.is_empty());
-
-        let reuse = self.take_reusable_player();
-        {
-            let mut prev = self.player.lock();
-            *prev = PlayerState::default();
-            if let Some(p) = &reuse {
-                prev.mpv = Some(Player::Embedded(p.clone()));
-                prev.ipc = Some(Control::Embedded(p.clone()));
-            }
+        if let Some(id) = group.trailer_code.clone().filter(|t| !t.is_empty()) {
+            open_trailer(&id, &title, cx);
+            return;
         }
-
         let state = self.state.clone();
-        let player = self.player.clone();
-        let theme = self.theme;
+        state.show_toast("Finding trailer\u{2026}", ToastKind::Info);
         cx.spawn(async move |this, cx: &mut gpui::AsyncApp| {
-            let id = match code {
-                Some(c) => Ok(c),
-                None => {
-                    let client = state.client.read().clone();
-                    let q = match year {
-                        Some(y) => format!("{title} {y} official trailer"),
-                        None => format!("{title} official trailer"),
-                    };
-                    runtime::spawn(async move { client.trailer_search(&q).await })
-                        .await
-                        .map_err(|e| format!("trailer search failed: {e}"))
-                }
+            let client = state.client.read().clone();
+            let q = match year {
+                Some(y) => format!("{title} {y} official trailer"),
+                None => format!("{title} official trailer"),
             };
-            let id = match id {
-                Ok(id) => id,
+            let found = runtime::spawn(async move { client.trailer_search(&q).await }).await;
+            match found {
+                Ok(id) => {
+                    let _ = this.update(cx, |_, cx| {
+                        open_trailer(&id, &title, cx);
+                        cx.notify();
+                    });
+                }
                 Err(e) => {
-                    state.show_toast(e, ToastKind::Error);
+                    tracing::warn!(error = %e, "trailer search failed");
+                    state.show_toast(format!("Trailer search failed: {e}"), ToastKind::Error);
                     let _ = this.update(cx, |_, cx| cx.notify());
-                    return;
-                }
-            };
-            let target = playback::PlayTarget::Web {
-                url: format!("https://www.youtube.com/watch?v={id}"),
-            };
-
-            let launch_target = target.clone();
-            let launch_theme = theme;
-            let launched = if let Some(p) = reuse {
-                let t = launch_target.clone();
-                match runtime::spawn(async move { p.play_target(&t).map(|_| p) }).await {
-                    Ok(p) => Ok((Player::Embedded(p.clone()), Some(Control::Embedded(p)))),
-                    Err(e) => {
-                        tracing::warn!("player reuse failed ({e}); launching fresh");
-                        runtime::spawn(
-                            async move { playback::launch(&launch_target, &launch_theme) },
-                        )
-                        .await
-                    }
-                }
-            } else {
-                runtime::spawn(async move { playback::launch(&launch_target, &launch_theme) }).await
-            };
-            match launched {
-                Ok((instance, control)) => {
-                    let _ = this.update(cx, |_, _| crate::playback::reset_dock_icon());
-                    let this_icon = this.clone();
-                    cx.spawn(async move |cx: &mut gpui::AsyncApp| {
-                        for _ in 0..8 {
-                            cx.background_executor()
-                                .timer(Duration::from_millis(500))
-                                .await;
-                            if this_icon
-                                .update(cx, |_, _| crate::playback::reset_dock_icon())
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    })
-                    .detach();
-                    let mut p = player.lock();
-                    p.target = Some(target);
-                    p.mpv = Some(instance);
-                    p.ipc = control;
-                }
-                Err(e) => {
-                    state.show_toast(format!("Trailer playback failed: {e}"), ToastKind::Error);
                 }
             }
-            let _ = this.update(cx, |_, cx| cx.notify());
         })
         .detach();
     }
@@ -5173,6 +5113,16 @@ pub async fn run_search(state: Arc<AppState>, query: String) {
 }
 
 /// Extract the btih info hash from a magnet URI, lowercased.
+/// Show a trailer: native popup window with only the embedded video
+/// player (macOS WKWebView), falling back to the default browser on
+/// other platforms or if the popup fails.
+fn open_trailer(youtube_id: &str, title: &str, cx: &mut gpui::App) {
+    tracing::info!(youtube_id, "trailer: opening popup");
+    if !crate::trailer_popup::open(youtube_id, title) {
+        cx.open_url(&format!("https://www.youtube.com/watch?v={youtube_id}"));
+    }
+}
+
 pub fn info_hash_from_magnet(magnet: &str) -> Option<String> {
     let idx = magnet.find("xt=urn:btih:")?;
     let rest = &magnet[idx + "xt=urn:btih:".len()..];

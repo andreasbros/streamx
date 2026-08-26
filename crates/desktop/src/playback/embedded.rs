@@ -31,10 +31,7 @@ const PLAYER_OPTIONS: &[(&str, &str)] = &[
     ("osc", "yes"),
     ("border", "yes"),
     ("keepaspect-window", "no"),
-    // The yt-dlp hook only runs after a direct open fails, so normal
-    // streams and files pay no probing cost; web URLs (trailers) get
-    // resolved at the highest available quality.
-    ("ytdl", "yes"),
+    ("ytdl", "no"),
     ("cache", "yes"),
     ("cache-secs", "300"),
     ("demuxer-max-bytes", "2G"),
@@ -57,16 +54,16 @@ impl EmbeddedPlayer {
             PlayTarget::Http { token: Some(t), .. } => Some(format!("Authorization: Bearer {t}")),
             _ => None,
         };
+        // libmpv refuses to initialize (MPV_ERROR_INVALID_PARAMETER)
+        // when LC_NUMERIC is not "C". A dependency can flip the process
+        // locale at runtime, so pin it back right before creating the
+        // core. Rust itself never reads the C locale.
+        unsafe {
+            libc::setlocale(libc::LC_NUMERIC, c"C".as_ptr());
+        }
         let mpv = Mpv::with_initializer(|init| {
             for (k, v) in PLAYER_OPTIONS {
                 init.set_option(k, *v)?;
-            }
-            init.set_option("ytdl-format", crate::playback::YTDL_FORMAT)?;
-            if let Some(y) = crate::playback::resolve_ytdlp() {
-                init.set_option(
-                    "script-opts",
-                    format!("ytdl_hook-ytdl_path={}", y.display()).as_str(),
-                )?;
             }
             if let Some(h) = &header {
                 init.set_option("http-header-fields", h.as_str())?;

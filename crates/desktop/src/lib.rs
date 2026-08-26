@@ -18,3 +18,4 @@ pub mod state;
 pub mod test_driver;
 pub mod text_input;
 pub mod theme;
+pub mod trailer_popup;

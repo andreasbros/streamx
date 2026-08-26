@@ -8,6 +8,10 @@
 //!   (FFmpeg, libass, ...), for fully self-contained Linux binaries.
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        // Trailer popup window (WKWebView).
+        println!("cargo:rustc-link-lib=framework=WebKit");
+    }
     println!("cargo:rerun-if-env-changed=STREAMX_MPV_STATIC");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=STREAMX_MPV_LIB_DIR");
