@@ -206,10 +206,14 @@ jobs:
       - name: Fetch libmpv (pinned, checksum-verified)
         shell: pwsh
         run: |
-          $u = "https://downloads.sourceforge.net/mpv-player-windows/libmpv/${{ matrix.mpv_dev }}"
-          curl.exe -sfL -o mpv-dev.7z $u
-          $h = (Get-FileHash mpv-dev.7z -Algorithm SHA256).Hash.ToLower()
-          if ($h -ne "${{ matrix.mpv_sha256 }}") { throw "libmpv checksum mismatch: $h" }
+          $u = "https://master.dl.sourceforge.net/project/mpv-player-windows/libmpv/${{ matrix.mpv_dev }}?viasf=1"
+          $ok = $false
+          for ($i = 0; $i -lt 3 -and -not $ok; $i++) {
+            curl.exe -sfL -o mpv-dev.7z $u
+            $h = (Get-FileHash mpv-dev.7z -Algorithm SHA256).Hash.ToLower()
+            if ($h -eq "${{ matrix.mpv_sha256 }}") { $ok = $true } else { Start-Sleep 5 }
+          }
+          if (-not $ok) { throw "libmpv checksum mismatch after retries: $h" }
           7z x mpv-dev.7z -ompv-dev | Out-Null
       - name: Generate MSVC import library for libmpv
         shell: pwsh
