@@ -83,6 +83,7 @@ fn long_hevc_clip() -> PathBuf {
     path
 }
 
+#[cfg(unix)]
 fn count_ffmpeg(path_fragment: &str) -> usize {
     let output = std::process::Command::new("pgrep")
         .args(["-f", &format!("ffmpeg.*{path_fragment}")])
@@ -92,6 +93,25 @@ fn count_ffmpeg(path_fragment: &str) -> usize {
             let s = String::from_utf8_lossy(&o.stdout);
             s.lines().filter(|l| !l.is_empty()).count()
         }
+        Err(_) => 0,
+    }
+}
+
+/// No pgrep on Windows; match command lines via CIM. The fragment goes
+/// through an env var so path backslashes never meet shell quoting.
+#[cfg(windows)]
+fn count_ffmpeg(path_fragment: &str) -> usize {
+    let script = "@(Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\" | \
+                  Where-Object { $_.CommandLine -like ('*' + $env:SX_FRAG + '*') }).Count";
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .env("SX_FRAG", path_fragment)
+        .output();
+    match output {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0),
         Err(_) => 0,
     }
 }
