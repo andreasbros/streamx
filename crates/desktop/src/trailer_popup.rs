@@ -278,8 +278,12 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[test]
     fn browser_override_is_first_candidate() {
-        let list = super::browser::candidates(|k| {
-            (k == "STREAMX_TRAILER_BROWSER").then(|| "/opt/custom/browser".to_string())
+        // Windows builds every built-in candidate from an environment
+        // variable, so the lookup answers those too.
+        let list = super::browser::candidates(|k| match k {
+            "STREAMX_TRAILER_BROWSER" => Some("/opt/custom/browser".to_string()),
+            "ProgramFiles(x86)" | "ProgramFiles" | "LocalAppData" => Some("C:/pf".to_string()),
+            _ => None,
         });
         assert_eq!(list[0], std::path::PathBuf::from("/opt/custom/browser"));
         assert!(list.len() > 1, "built-in candidates follow the override");
