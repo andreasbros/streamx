@@ -187,6 +187,10 @@ pub fn windows_system_dlls() -> Vec<String> {
     [
         "kernel32.dll",
         "ntdll.dll",
+        // OS crypto primitives and COM base: core Windows components
+        // (Rust std uses bcryptprimitives for its RNG).
+        "bcryptprimitives.dll",
+        "combase.dll",
         "user32.dll",
         "shell32.dll",
         "shlwapi.dll",
@@ -235,6 +239,15 @@ pub fn windows_system_dlls() -> Vec<String> {
 /// Libraries the Windows release zip ships next to the executable.
 pub fn windows_bundle_manifest() -> Vec<String> {
     ["libmpv-2.dll", "mpv-2.dll"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// The dynamic MSVC runtime that dev builds link. Release builds use
+/// the static CRT (`+crt-static`), so `windows-dist` rejects these.
+pub fn windows_dev_crt_dlls() -> Vec<String> {
+    ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"]
         .iter()
         .map(|s| s.to_string())
         .collect()
@@ -438,10 +451,13 @@ pub fn policy_for_current_target() -> Policy {
             bundle_manifest: macos_bundle_manifest(),
         }
     } else if cfg!(target_os = "windows") {
-        // Dev and release builds link the same way on Windows: the mpv
-        // import library resolves to a DLL shipped next to the exe.
+        // Dev builds additionally link the dynamic MSVC CRT; release
+        // builds are checked with the strict windows-dist policy (CLI),
+        // where the CRT is static.
+        let mut allowed = windows_system_dlls();
+        allowed.extend(windows_dev_crt_dlls());
         Policy::WindowsDist {
-            allowed_dlls: windows_system_dlls(),
+            allowed_dlls: allowed,
             bundle_manifest: windows_bundle_manifest(),
         }
     } else if cfg!(target_env = "musl") {
