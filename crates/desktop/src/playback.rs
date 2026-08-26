@@ -486,13 +486,20 @@ pub fn resolve_mpv_from(
 }
 
 fn mpv_socket_path() -> PathBuf {
-    let tmp = std::env::temp_dir();
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    tmp.join(format!("streamx-mpv-{pid}-{nanos}.sock"))
+    #[cfg(unix)]
+    {
+        std::env::temp_dir().join(format!("streamx-mpv-{pid}-{nanos}.sock"))
+    }
+    #[cfg(not(unix))]
+    {
+        // mpv on Windows serves JSON IPC over a named pipe.
+        PathBuf::from(format!(r"\\.\pipe\streamx-mpv-{pid}-{nanos}"))
+    }
 }
 
 pub mod ipc {
@@ -506,8 +513,23 @@ pub mod ipc {
 
     use serde::{Deserialize, Serialize};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
     use tokio::sync::Mutex;
+
+    // Same JSON protocol on every OS; only the transport differs:
+    // Unix domain socket vs Windows named pipe.
+    #[cfg(unix)]
+    type IpcStream = tokio::net::UnixStream;
+    #[cfg(windows)]
+    type IpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
+
+    #[cfg(unix)]
+    async fn ipc_connect(path: &Path) -> std::io::Result<IpcStream> {
+        tokio::net::UnixStream::connect(path).await
+    }
+    #[cfg(windows)]
+    async fn ipc_connect(path: &Path) -> std::io::Result<IpcStream> {
+        tokio::net::windows::named_pipe::ClientOptions::new().open(path)
+    }
 
     #[derive(Debug, Serialize)]
     struct Request {
@@ -532,8 +554,8 @@ pub mod ipc {
     }
 
     struct Inner {
-        reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-        writer: tokio::net::unix::OwnedWriteHalf,
+        reader: BufReader<tokio::io::ReadHalf<IpcStream>>,
+        writer: tokio::io::WriteHalf<IpcStream>,
         next_id: u64,
     }
 
@@ -542,9 +564,9 @@ pub mod ipc {
         /// boots and creates the socket.
         pub async fn connect(path: &Path) -> Result<Self, String> {
             for _ in 0..40 {
-                match UnixStream::connect(path).await {
+                match ipc_connect(path).await {
                     Ok(stream) => {
-                        let (r, w) = stream.into_split();
+                        let (r, w) = tokio::io::split(stream);
                         return Ok(Self {
                             inner: Arc::new(Mutex::new(Inner {
                                 reader: BufReader::new(r),
