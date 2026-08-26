@@ -191,6 +191,11 @@ pub fn windows_system_dlls() -> Vec<String> {
         // (Rust std uses bcryptprimitives for its RNG).
         "bcryptprimitives.dll",
         "combase.dll",
+        // ICU ships in System32 since Windows 10 1703 (our floor);
+        // gpui's text/locale stack links it.
+        "icu.dll",
+        "icuuc.dll",
+        "icuin.dll",
         "user32.dll",
         "shell32.dll",
         "shlwapi.dll",
