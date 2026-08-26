@@ -239,6 +239,33 @@ fn collect_disk_stats(data_dir: &std::path::Path, downloads_dir: &std::path::Pat
     }
 }
 
+#[cfg(windows)]
+fn disk_space(path: &std::path::Path) -> (u64, u64) {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_to_caller = 0u64;
+    let mut total = 0u64;
+    let mut total_free = 0u64;
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_to_caller,
+            &mut total,
+            &mut total_free,
+        )
+    };
+    if ok != 0 {
+        (total, free_to_caller)
+    } else {
+        (0, 0)
+    }
+}
+
+#[cfg(unix)]
 fn disk_space(path: &std::path::Path) -> (u64, u64) {
     let c_path = match std::ffi::CString::new(path.to_string_lossy().as_bytes()) {
         Ok(p) => p,
@@ -296,6 +323,13 @@ fn collect_process_stats(prev: Option<(u64, u64)>) -> (u64, f32, (u64, u64)) {
     (rss, cpu, (total_now, wall_now))
 }
 
+#[cfg(windows)]
+fn read_rss_bytes() -> u64 {
+    // Linux procfs metric; the admin monitor shows 0 on Windows.
+    0
+}
+
+#[cfg(unix)]
 fn read_rss_bytes() -> u64 {
     let stat = match std::fs::read_to_string("/proc/self/stat") {
         Ok(s) => s,
@@ -322,6 +356,12 @@ fn read_cpu_ticks() -> (u64, u64) {
     (utime, stime)
 }
 
+#[cfg(windows)]
+fn wall_clock_ticks() -> u64 {
+    0
+}
+
+#[cfg(unix)]
 fn wall_clock_ticks() -> u64 {
     let uptime = std::fs::read_to_string("/proc/uptime").unwrap_or_default();
     let secs: f64 = uptime
@@ -450,7 +490,7 @@ pub async fn restart_server(
 
     #[cfg(not(unix))]
     {
-        Err(Error::BadRequest {
+        Err::<Json<serde_json::Value>, Error>(Error::BadRequest {
             message: "Server restart is only supported on Unix hosts".to_string(),
         })
     }
@@ -476,7 +516,11 @@ pub async fn kill_transcode(
     }
 
     // Kill any FFmpeg processes writing to this stream's cache
+    // (Linux procfs scan; on other hosts the pipeline cleanup below
+    // still stops tracked transcodes).
+    #[allow(unused_mut)]
     let mut killed = 0u32;
+    #[cfg(unix)]
     if let Ok(entries) = std::fs::read_dir("/proc") {
         for entry in entries.flatten() {
             let name = entry.file_name();

@@ -4,7 +4,7 @@ Self-hosted torrent streaming. Search movies, TV, and music, paste a magnet link
 
 StreamX ships as two binaries from one Rust workspace:
 
-- **`streamx-desktop`**: a native desktop app with a GPU-rendered UI, built on [GPUI](https://www.gpui.rs/) from the [Zed](https://github.com/zed-industries/zed) editor. Linux and macOS share the same renderer, so the app looks and behaves identically on both. Windows support is coming soon.
+- **`streamx-desktop`**: a native desktop app with a GPU-rendered UI, built on [GPUI](https://www.gpui.rs/) from the [Zed](https://github.com/zed-industries/zed) editor. Linux, macOS, and Windows share the same renderer, so the app looks and behaves identically everywhere.
 - **`streamx`**: a single static server binary with the React web UI embedded. Runs headless on a box or NAS and serves any browser or phone.
 
 ![StreamX home page](docs/og-preview.png)
@@ -156,9 +156,14 @@ nix build .#checks.x86_64-linux.linkage-desktop-dist
 scripts/release.sh aarch64-apple-darwin dist/StreamX-aarch64.dmg
 scripts/release.sh x86_64-apple-darwin  dist/StreamX-x86_64.dmg
 # .zip instead of .dmg produces a ditto zip; a bare path produces the .app.
-# Set CODESIGN_IDENTITY="Developer ID Application: ..." to sign for
-# distribution; without it users approve the first launch once via
-# System Settings > Privacy & Security > "Open Anyway".
+# Release builds are Developer ID signed and notarized in CI; set
+# CODESIGN_IDENTITY="Developer ID Application: ..." to sign local
+# builds the same way (ad-hoc signed otherwise).
+
+# Windows releases (x86_64 + arm64) are built by CI only (Nix has no
+# Windows support): .github/workflows/release.yml `windows-desktop`
+# produces streamx-desktop-<arch>-windows.zip with the exe (static
+# MSVC CRT), libmpv-2.dll, ffmpeg.exe, and ffprobe.exe.
 
 # Lower-level: bundle an already built binary into an .app
 scripts/bundle-macos.sh target/release/streamx-desktop dist/StreamX.app
@@ -179,7 +184,7 @@ nix run .#build-all
 # Cut a release from a clean, pushed main: bumps the version, writes
 # CHANGELOG.md, commits, tags vX.Y.Z, pushes, and creates the GitHub
 # release. The tag triggers .github/workflows/release.yml, which builds
-# and attaches the Linux and macOS artifacts.
+# and attaches the Linux, macOS, and Windows artifacts.
 nix run .#release -- patch          # or minor / major / X.Y.Z
 nix run .#release -- patch --dry-run   # preview the notes first
 ```

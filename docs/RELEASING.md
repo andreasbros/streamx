@@ -73,21 +73,29 @@ The tag triggers `.github/workflows/release.yml`:
 - Three parallel Linux jobs (x86_64 server, aarch64 server on a native
   ARM runner, desktop tarball), each gated by its linkage check
 - macOS job: both dmgs, signed and notarized
+- Windows jobs: x86_64 and arm64 zips on native runners (static MSVC
+  CRT; libmpv-2.dll and ffmpeg bundled, pinned by sha256), each gated
+  by the windows-dist linkage check
 
 ```bash
 gh run watch                 # or: gh run list --workflow release
-gh release view vX.Y.Z      # confirm all 5 artifacts are attached
+gh release view vX.Y.Z      # confirm all 7 artifacts are attached
 ```
 
 ## 6. Tell users how to install (release notes template)
 
 macOS: download the dmg for your chip (Apple Silicon = aarch64,
-Intel = x86_64), drag StreamX.app to Applications. First launch:
-approve once under System Settings > Privacy & Security > "Open
-Anyway" (the app is not yet notarized).
+Intel = x86_64), drag StreamX.app to Applications, launch.
+
+Windows: download `streamx-desktop-<arch>-windows.zip` (arm64 for
+Windows on ARM, x86_64 otherwise), unzip, run `streamx-desktop.exe`.
+Everything the app needs is in the folder.
 
 Linux server: download `streamx-<arch>-linux-musl`, `chmod +x`, run.
 Works on any distro, fully static.
+
+Linux desktop: download `streamx-desktop-x86_64-linux.tar.gz`, unpack,
+run `bin/streamx-desktop` (glibc 2.39+ desktop distros).
 
 ## Build cache (one-time setup)
 

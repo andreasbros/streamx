@@ -242,6 +242,6 @@ pub fn has_vaapi() -> bool {
 
 pub mod dirs {
     pub fn home_dir() -> Option<std::path::PathBuf> {
-        std::env::var("HOME").ok().map(std::path::PathBuf::from)
+        std::env::home_dir()
     }
 }
