@@ -207,10 +207,11 @@ async fn watchdog_kills_idle() {
     }
     // The 60s clip transcodes to completion in a few seconds at
     // `ultrafast`, which would end FFmpeg before the 30s idle
-    // threshold and prove nothing. A single-threaded `veryslow` encode
-    // keeps FFmpeg busy well past the watchdog window.
+    // threshold and prove nothing. A single-threaded `placebo` encode
+    // keeps FFmpeg busy well past the watchdog window even on fast CI
+    // hardware (`veryslow` finished in 29s on a Windows runner).
     let mut config = test_config();
-    config.preset = "veryslow".to_string();
+    config.preset = "placebo".to_string();
     config.threads = Some(1);
     let (mgr, cache) = create_mgr_with("watchdog", config).await;
     let stream_id = "test_watchdog";
