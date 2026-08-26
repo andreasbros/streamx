@@ -27,6 +27,7 @@ ui-test = ["gpui/test-support"]
 chrono = "0.4"
 gpui.workspace = true
 
+libc = "0.2"
 streamx-api = { path = "../api", features = ["client"] }
 streamx = { path = "../server" }
 

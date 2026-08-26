@@ -7113,6 +7113,7 @@ dependencies = [
  "chrono",
  "directories",
  "gpui",
+ "libc",
  "libmpv2",
  "objc",
  "once_cell",

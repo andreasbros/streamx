@@ -200,11 +200,15 @@ const LOGO_SVG: &[u8] = include_bytes!("../../../web/src/assets/icons/logo.svg")
 /// a cache miss is an ordinary (invisible) image instead of an asset
 /// error that gpui logs at ERROR level on every miss.
 const PENDING_PNG: &[u8] = include_bytes!("../assets/pending.png");
+const VIDEO_SVG: &[u8] = include_bytes!("../assets/video.svg");
 
 impl AssetSource for PosterAssetSource {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         if path == "logo.svg" {
             return Ok(Some(Cow::Borrowed(LOGO_SVG)));
+        }
+        if path == "video.svg" {
+            return Ok(Some(Cow::Borrowed(VIDEO_SVG)));
         }
         let result = if path.starts_with("/proxy/") {
             self.load_proxy(path)
