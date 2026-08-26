@@ -1,4 +1,4 @@
-//! `streamx-linkcheck <binary> [--policy static|linux-desktop|linux-dist|linux-dev|macos|macos-dev]`
+//! `streamx-linkcheck <binary> [--policy static|linux-desktop|linux-dist|linux-dev|windows-dist|macos|macos-dev]`
 //!
 //! Exit status 0 when the binary satisfies the policy; prints every
 //! violation otherwise. Without `--policy` the rule for the host
@@ -29,12 +29,16 @@ fn main() -> ExitCode {
                         allowed_sonames: linux_desktop_allowlist(),
                         bundle_manifest: streamx_linkcheck::linux_bundle_manifest(),
                     }),
+                    Some("windows-dist") => Some(Policy::WindowsDist {
+                        allowed_dlls: streamx_linkcheck::windows_system_dlls(),
+                        bundle_manifest: streamx_linkcheck::windows_bundle_manifest(),
+                    }),
                     Some("macos") => Some(Policy::MacosSystemFrameworks),
                     Some("macos-dev") => Some(Policy::MacosDevBundle {
                         bundle_manifest: streamx_linkcheck::macos_bundle_manifest(),
                     }),
                     other => {
-                        eprintln!("unknown policy {other:?}; expected static|linux-desktop|linux-dist|linux-dev|macos|macos-dev");
+                        eprintln!("unknown policy {other:?}; expected static|linux-desktop|linux-dist|linux-dev|windows-dist|macos|macos-dev");
                         return ExitCode::from(2);
                     }
                 };
@@ -44,7 +48,7 @@ fn main() -> ExitCode {
     }
     let Some(path) = path else {
         eprintln!(
-            "usage: streamx-linkcheck <binary> [--policy static|linux-desktop|linux-dist|linux-dev|macos|macos-dev]"
+            "usage: streamx-linkcheck <binary> [--policy static|linux-desktop|linux-dist|linux-dev|windows-dist|macos|macos-dev]"
         );
         return ExitCode::from(2);
     };

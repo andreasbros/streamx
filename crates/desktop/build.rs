@@ -10,6 +10,22 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=STREAMX_MPV_STATIC");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
+    println!("cargo:rerun-if-env-changed=STREAMX_MPV_LIB_DIR");
+
+    // Windows: no pkg-config. STREAMX_MPV_LIB_DIR points at a directory
+    // holding the import library (mpv.lib, generated from the libmpv
+    // dev package's .def); libmpv-2.dll ships next to the executable.
+    if std::env::var("CARGO_CFG_WINDOWS").is_ok() {
+        match std::env::var("STREAMX_MPV_LIB_DIR") {
+            Ok(dir) => println!("cargo:rustc-link-search=native={dir}"),
+            Err(_) => println!(
+                "cargo:warning=STREAMX_MPV_LIB_DIR not set; linking libmpv will fail \
+                 (see .github/workflows/release.yml windows-desktop)"
+            ),
+        }
+        return;
+    }
+
     let statik = std::env::var("STREAMX_MPV_STATIC")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);

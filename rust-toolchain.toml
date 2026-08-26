@@ -11,6 +11,11 @@ targets = [
     # macOS: both CPU architectures.
     "x86_64-apple-darwin",
     "aarch64-apple-darwin",
-    # Windows targets land with the Windows desktop port.
+    # Windows desktop, both architectures. MSVC is the target Zed
+    # supports for gpui; the targets here also enable
+    # `cargo check --target <triple>` from any host (linking needs a
+    # Windows runner).
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
 ]
 profile = "default"

@@ -94,7 +94,7 @@ Supported platforms:
 | `streamx` server (musl, x86_64 + aarch64) | Any Linux distribution, any libc, containers | None: fully static, FFmpeg embedded |
 | `streamx-desktop` (Linux, x86_64) | Desktop distros with glibc >= 2.39 (Ubuntu 24.04+, Fedora 40+, Debian 13+) | Base desktop system only (glibc, X11/Wayland, Vulkan, ALSA) |
 | `StreamX.app` (macOS, Apple Silicon + Intel) | macOS | None: libmpv/FFmpeg bundled in the .app |
-| Windows | planned | |
+| `streamx-desktop` (Windows, x86_64 + arm64) | Windows 10+ | None: static MSVC CRT; libmpv-2.dll and ffmpeg.exe ship in the zip |
 
 The server is truly static: musl libc is compiled into the binary, there
 is no dynamic loader and no shared libraries, so it runs identically on
@@ -117,6 +117,12 @@ Every shipped binary must satisfy an explicit linkage policy, enforced by `crate
 | Linux, musl (`streamx` server) | `static`: no interpreter, no shared libraries |
 | Linux, glibc (`streamx-desktop`) | `linux-dist`: standard system loader, no store RUNPATH, only allowlisted host sonames; everything else static |
 | macOS | Apple system frameworks plus dylibs bundled inside the `.app` (`@rpath`) |
+| Windows | `windows-dist`: only Windows system DLLs and the bundled libmpv-2.dll; static MSVC CRT (no redistributable) |
+
+Windows is the one platform not built through Nix (Nix has no Windows
+support): the release workflow uses rustup on native x86_64 and arm64
+runners, with libmpv and FFmpeg fetched from their upstream builds,
+pinned by sha256 (`.github/workflows/release.yml`, `windows-desktop`).
 
 ```bash
 # Static servers (run on a Linux host); web UI built and embedded

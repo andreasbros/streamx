@@ -149,3 +149,105 @@ jobs:
       - name: Upload
         env: { GH_TOKEN: "${{ github.token }}" }
         run: gh release upload "${{ inputs.tag || github.ref_name }}" dist/*.dmg --clobber
+
+  # Windows desktop, both architectures on native runners. No Nix on
+  # Windows: rustup reads rust-toolchain.toml, and the two runtime
+  # dependencies that cannot be statically linked into the exe ship in
+  # the zip next to it (libmpv-2.dll; ffmpeg.exe/ffprobe.exe for
+  # transcoding), pinned by sha256. The MSVC CRT is linked statically,
+  # so no redistributable is required either.
+  windows-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            msvc_arch: x64
+            lib_machine: X64
+            mpv_dev: mpv-dev-x86_64-20260809-git-dd5d17d328.7z
+            mpv_sha256: c6aebf40bb722efe79090bfeb61e68625f0837770347e5a8b610aef78900cf12
+            ffmpeg_zip: ffmpeg-N-126277-ga8c7afa7d7-win64-gpl.zip
+            ffmpeg_sha256: 61f27cf0ea41eba2ccc8bbfd404d24925697725acca62f7af5f427f7ebb3e634
+          - arch: aarch64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            msvc_arch: arm64
+            lib_machine: ARM64
+            mpv_dev: mpv-dev-aarch64-20260809-git-dd5d17d328.7z
+            mpv_sha256: 0a56c6099ce988c2f79c07e93ae89213c2f27b87e166c002a2e1c2332336dcf2
+            ffmpeg_zip: ffmpeg-N-126277-ga8c7afa7d7-winarm64-gpl.zip
+            ffmpeg_sha256: 94b74956faf3ec56a3b6974a6d6acd35873266690b1b7514cad1a2cc42a52c8e
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      FFMPEG_RELEASE: autobuild-2026-08-26-13-06
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Build web UI
+        run: |
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Fetch libmpv (pinned, checksum-verified)
+        shell: pwsh
+        run: |
+          $u = "https://downloads.sourceforge.net/mpv-player-windows/libmpv/${{ matrix.mpv_dev }}"
+          curl.exe -sfL -o mpv-dev.7z $u
+          $h = (Get-FileHash mpv-dev.7z -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne "${{ matrix.mpv_sha256 }}") { throw "libmpv checksum mismatch: $h" }
+          7z x mpv-dev.7z -ompv-dev | Out-Null
+      - name: Generate MSVC import library for libmpv
+        shell: pwsh
+        run: |
+          $exports = dumpbin /exports mpv-dev/libmpv-2.dll
+          $names = $exports | ForEach-Object {
+            if ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)') { $Matches[1] }
+          }
+          @("LIBRARY libmpv-2.dll", "EXPORTS") + $names | Set-Content mpv-dev/mpv.def -Encoding ascii
+          lib /def:mpv-dev/mpv.def /machine:${{ matrix.lib_machine }} /out:mpv-dev/mpv.lib
+      - name: Fetch ffmpeg (pinned, checksum-verified)
+        shell: pwsh
+        run: |
+          $u = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$env:FFMPEG_RELEASE/${{ matrix.ffmpeg_zip }}"
+          curl.exe -sfL -o ffmpeg.zip $u
+          $h = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne "${{ matrix.ffmpeg_sha256 }}") { throw "ffmpeg checksum mismatch: $h" }
+          7z x ffmpeg.zip -offmpeg-extract | Out-Null
+      - name: Build (static CRT) + linkage check
+        shell: pwsh
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          $env:STREAMX_MPV_LIB_DIR = "$PWD/mpv-dev"
+          cargo build --release -p streamx-desktop --target ${{ matrix.target }}
+          cargo run --release -p streamx-linkcheck --target ${{ matrix.target }} -- `
+            target/${{ matrix.target }}/release/streamx-desktop.exe --policy windows-dist
+      - name: Assemble zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist/StreamX | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/streamx-desktop.exe dist/StreamX/
+          Copy-Item mpv-dev/libmpv-2.dll dist/StreamX/
+          $ffbin = Get-ChildItem ffmpeg-extract -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $ffbin.FullName dist/StreamX/
+          Copy-Item (Join-Path $ffbin.Directory ffprobe.exe) dist/StreamX/
+          Compress-Archive -Path dist/StreamX -DestinationPath "dist/streamx-desktop-${{ matrix.arch }}-windows.zip"
+      - name: Upload
+        env: { GH_TOKEN: "${{ github.token }}" }
+        shell: pwsh
+        run: gh release upload "${{ inputs.tag || github.ref_name }}" (Get-Item dist/*.zip) --clobber
