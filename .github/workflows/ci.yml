@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Deterministic manual trigger: GitHub occasionally drops the
+  # pull_request event for a push, leaving a PR head with no run.
+  # `gh workflow run ci --ref <branch>` forces one.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
