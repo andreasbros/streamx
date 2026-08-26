@@ -217,6 +217,11 @@ async fn watchdog_kills_idle() {
     let stream_id = "test_watchdog";
     let path_frag = cache.join(stream_id).to_string_lossy().to_string();
 
+    // Stamp before start_stream: the manager records last-access inside
+    // it, and the idle window is measured from that record. Stamping
+    // after process detection undercounts on Windows, where each
+    // count_ffmpeg poll shells out to PowerShell and lags by seconds.
+    let spawned_at = std::time::Instant::now();
     mgr.start_stream(stream_id, clip.to_str().unwrap(), "720p")
         .await
         .expect("start_stream");
@@ -224,7 +229,6 @@ async fn watchdog_kills_idle() {
     let before = wait_for_ffmpeg(&path_frag, SPAWN_DEADLINE, |n| n > 0).await;
     eprintln!("FFmpeg before idle: {before}");
     assert!(before > 0, "FFmpeg should be running");
-    let spawned_at = std::time::Instant::now();
 
     // Still alive well inside the idle window: the encode is genuinely
     // long-running, so a later exit can only be the watchdog.
