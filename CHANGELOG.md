@@ -4,8 +4,24 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.2.6] - 2026-08-26
+
+
+### Fixed
+
+- Downloads opens player page like history; mpv edge resize; drop rebuilt movie page (703d8935)
+- Classic maximize on macos so edge resize survives; downloads opens player page like history (0681682e)
+
+### Other
+
+- Merge branch 'main' of github.com:andreasbros/streamx (3b91a743)
+
 ## [0.2.5] - 2026-08-25
 
+
+### Added
+
+- Search UX polish - clear button, double-click select, drop stale search responses (d62c3710)
 
 ### Other
 
