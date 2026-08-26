@@ -632,6 +632,8 @@ mod tests {
         let l = linkage(&exe).expect("parse own binary");
         let expected = if cfg!(target_os = "macos") {
             Format::MachO
+        } else if cfg!(target_os = "windows") {
+            Format::Pe
         } else {
             Format::Elf
         };
