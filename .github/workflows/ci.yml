@@ -148,3 +148,15 @@ jobs:
           $ffbin = (Get-ChildItem ffmpeg-extract -Recurse -Filter ffmpeg.exe | Select-Object -First 1).Directory
           $env:PATH = "$PWD/mpv-dev;$ffbin;$env:PATH"
           cargo test --workspace
+      - name: in-process mpv playback (real window on the runner desktop)
+        shell: pwsh
+        run: |
+          $env:STREAMX_MPV_LIB_DIR = "$PWD/mpv-dev"
+          $ffbin = (Get-ChildItem ffmpeg-extract -Recurse -Filter ffmpeg.exe | Select-Object -First 1).Directory
+          $env:PATH = "$PWD/mpv-dev;$ffbin;$env:PATH"
+          ffmpeg -y -hide_banner -loglevel error `
+            -f lavfi -i testsrc=duration=20:size=640x360:rate=25 `
+            -f lavfi -i sine=frequency=440:duration=20 `
+            -c:v libx264 -c:a aac clip.mp4
+          $env:STREAMX_TEST_CLIP = "$PWD/clip.mp4"
+          cargo test -p streamx-desktop --test embedded_mpv -- --ignored --nocapture
