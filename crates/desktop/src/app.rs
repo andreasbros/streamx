@@ -742,7 +742,8 @@ impl MainView {
         let title = group.title.clone();
         let year = group.year;
         if let Some(id) = group.trailer_code.clone().filter(|t| !t.is_empty()) {
-            open_trailer(&id, &title, cx);
+            let base = self.state.server_url.read().clone();
+            open_trailer(&id, &title, &base, cx);
             return;
         }
         let state = self.state.clone();
@@ -756,8 +757,9 @@ impl MainView {
             let found = runtime::spawn(async move { client.trailer_search(&q).await }).await;
             match found {
                 Ok(id) => {
+                    let base = state.server_url.read().clone();
                     let _ = this.update(cx, |_, cx| {
-                        open_trailer(&id, &title, cx);
+                        open_trailer(&id, &title, &base, cx);
                         cx.notify();
                     });
                 }
@@ -5116,9 +5118,9 @@ pub async fn run_search(state: Arc<AppState>, query: String) {
 /// Show a trailer: native popup window with only the embedded video
 /// player (macOS WKWebView), falling back to the default browser on
 /// other platforms or if the popup fails.
-fn open_trailer(youtube_id: &str, title: &str, cx: &mut gpui::App) {
+fn open_trailer(youtube_id: &str, title: &str, server_base: &str, cx: &mut gpui::App) {
     tracing::info!(youtube_id, "trailer: opening popup");
-    if !crate::trailer_popup::open(youtube_id, title) {
+    if !crate::trailer_popup::open(youtube_id, title, server_base) {
         cx.open_url(&format!("https://www.youtube.com/watch?v={youtube_id}"));
     }
 }

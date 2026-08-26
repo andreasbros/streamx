@@ -190,7 +190,9 @@ pub fn build_router_with_state(state: AppState) -> Router {
             delete(api::remove_playlist_track),
         );
 
-    let trailer_routes = Router::new().route("/search", get(api::trailer_search));
+    let trailer_routes = Router::new()
+        .route("/search", get(api::trailer_search))
+        .route("/page/{id}", get(api::trailer_page));
 
     let poster_routes = Router::new().route("/{filename}", get(api::serve_poster));
 

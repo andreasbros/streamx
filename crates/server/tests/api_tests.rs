@@ -1024,3 +1024,41 @@ async fn favourite_music_pins_full_download() {
         "favourited music must become a pinned full-album download"
     );
 }
+
+#[tokio::test]
+async fn trailer_page_serves_embed_wrapper_and_validates_id() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let ok = client
+        .get(format!("{}/api/trailer/page/dQw4w9WgXcQ", server.base_url))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(ok.status(), StatusCode::OK);
+    let ct = ok
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(ct.starts_with("text/html"), "content type: {ct}");
+    let body = ok.text().await.expect("body");
+    assert!(body.contains("youtube.com/embed/dQw4w9WgXcQ"));
+    assert!(!body.contains("<script"), "wrapper stays script-free");
+
+    // Ids are restricted to the YouTube alphabet; anything else is a
+    // client error, never reflected into the page.
+    for bad in ["ab", "abc<script>def", "a%22onload"] {
+        let resp = client
+            .get(format!("{}/api/trailer/page/{bad}", server.base_url))
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "id {bad:?} must be rejected"
+        );
+    }
+}

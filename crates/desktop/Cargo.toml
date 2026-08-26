@@ -27,7 +27,6 @@ ui-test = ["gpui/test-support"]
 chrono = "0.4"
 gpui.workspace = true
 
-libc = "0.2"
 streamx-api = { path = "../api", features = ["client"] }
 streamx = { path = "../server" }
 
@@ -46,6 +45,12 @@ libmpv2 = "6"
 [dev-dependencies]
 streamx-linkcheck = { path = "../linkcheck" }
 tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+# libmpv requires LC_NUMERIC="C" at init; pinned via setlocale. The
+# Windows CRT locale is per-runtime and defaults to "C", so the fix
+# does not apply there.
+libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"

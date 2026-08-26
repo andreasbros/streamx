@@ -670,6 +670,35 @@ pub async fn demo_playlist() -> impl IntoResponse {
 static TRAILER_SEARCH_CACHE: std::sync::LazyLock<dashmap::DashMap<String, String>> =
     std::sync::LazyLock::new(dashmap::DashMap::new);
 
+/// Minimal wrapper page for the desktop trailer popup: a full-window
+/// YouTube embed served from this server, so the iframe has a real
+/// embedding origin (a bare top-level embed URL is rejected by YouTube
+/// with error 153). Unauthenticated: it contains only the public embed.
+pub async fn trailer_page(Path(id): Path<String>) -> std::result::Result<impl IntoResponse, Error> {
+    let valid = (5..=20).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !valid {
+        return Err(Error::BadRequest {
+            message: "invalid video id".to_string(),
+        });
+    }
+    let html = format!(
+        "<!doctype html><html><head><title>Trailer</title>\
+         <meta name=\"viewport\" content=\"width=device-width\">\
+         <style>html,body{{margin:0;height:100%;background:#000;overflow:hidden}}\
+         iframe{{width:100%;height:100%;border:0}}</style></head><body>\
+         <iframe src=\"https://www.youtube.com/embed/{id}?autoplay=1&rel=0&playsinline=1\" \
+         allow=\"autoplay; fullscreen; encrypted-media\" allowfullscreen></iframe>\
+         </body></html>"
+    );
+    Ok((
+        [(http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    ))
+}
+
 pub async fn trailer_search(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,

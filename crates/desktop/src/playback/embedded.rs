@@ -57,7 +57,10 @@ impl EmbeddedPlayer {
         // libmpv refuses to initialize (MPV_ERROR_INVALID_PARAMETER)
         // when LC_NUMERIC is not "C". A dependency can flip the process
         // locale at runtime, so pin it back right before creating the
-        // core. Rust itself never reads the C locale.
+        // core. Rust itself never reads the C locale. Windows is not
+        // affected: each CRT instance starts in the "C" locale and the
+        // statically linked CRT is isolated from libmpv's own.
+        #[cfg(unix)]
         unsafe {
             libc::setlocale(libc::LC_NUMERIC, c"C".as_ptr());
         }
