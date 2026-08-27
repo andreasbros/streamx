@@ -198,6 +198,14 @@ jobs:
           node-version: 22
       - name: Install Rust toolchain (from rust-toolchain.toml)
         run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache pinned libmpv + ffmpeg downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            mpv-dev.7z
+            ffmpeg.zip
+          key: windl-${{ matrix.mpv_dev }}-${{ matrix.ffmpeg_zip }}
       - name: Build web UI
         run: |
           cd web
@@ -209,7 +217,7 @@ jobs:
           $u = "https://master.dl.sourceforge.net/project/mpv-player-windows/libmpv/${{ matrix.mpv_dev }}?viasf=1"
           $ok = $false
           for ($i = 0; $i -lt 3 -and -not $ok; $i++) {
-            curl.exe -sfL -o mpv-dev.7z $u
+            if (-not (Test-Path mpv-dev.7z) -or $i -gt 0) { curl.exe -sfL -o mpv-dev.7z $u }
             $h = (Get-FileHash mpv-dev.7z -Algorithm SHA256).Hash.ToLower()
             if ($h -eq "${{ matrix.mpv_sha256 }}") { $ok = $true } else { Start-Sleep 5 }
           }

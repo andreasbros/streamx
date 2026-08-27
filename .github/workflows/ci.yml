@@ -117,6 +117,14 @@ jobs:
           node-version: 22
       - name: Install Rust toolchain (from rust-toolchain.toml)
         run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache pinned libmpv + ffmpeg downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            mpv-dev.7z
+            ffmpeg.zip
+          key: windl-${{ matrix.mpv_dev }}-${{ matrix.ffmpeg_zip }}
       - name: Build web UI
         run: |
           cd web
@@ -128,7 +136,7 @@ jobs:
           $u = "https://master.dl.sourceforge.net/project/mpv-player-windows/libmpv/${{ matrix.mpv_dev }}?viasf=1"
           $ok = $false
           for ($i = 0; $i -lt 3 -and -not $ok; $i++) {
-            curl.exe -sfL -o mpv-dev.7z $u
+            if (-not (Test-Path mpv-dev.7z) -or $i -gt 0) { curl.exe -sfL -o mpv-dev.7z $u }
             $h = (Get-FileHash mpv-dev.7z -Algorithm SHA256).Hash.ToLower()
             if ($h -eq "${{ matrix.mpv_sha256 }}") { $ok = $true } else { Start-Sleep 5 }
           }
@@ -140,7 +148,9 @@ jobs:
           }
           @("LIBRARY libmpv-2.dll", "EXPORTS") + $names | Set-Content mpv-dev/mpv.def -Encoding ascii
           lib /def:mpv-dev/mpv.def /machine:${{ matrix.lib_machine }} /out:mpv-dev/mpv.lib
-          curl.exe -sfL -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/$env:FFMPEG_RELEASE/${{ matrix.ffmpeg_zip }}"
+          if (-not (Test-Path ffmpeg.zip)) {
+            curl.exe -sfL -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/$env:FFMPEG_RELEASE/${{ matrix.ffmpeg_zip }}"
+          }
           $h = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
           if ($h -ne "${{ matrix.ffmpeg_sha256 }}") { throw "ffmpeg checksum mismatch: $h" }
           7z x ffmpeg.zip -offmpeg-extract | Out-Null
