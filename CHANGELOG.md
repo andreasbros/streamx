@@ -4,6 +4,13 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.3.1] - 2026-08-27
+
+
+### Other
+
+- Merge branch 'main' into feat/windows (48e2d0f9)
+
 ## [0.3.0] - 2026-08-27
 
 
@@ -32,6 +39,7 @@ All notable changes to StreamX. The format follows
 - Retrigger after dropped workflow event (29fc4101)
 - Supply env-derived browser candidates in the override test (73f04b99)
 - Manual dispatch trigger for dropped pull_request events (eb1230cf)
+- Cargo build cache and pinned-download cache (0fdec8b5)
 
 ### Other
 
