@@ -66,10 +66,11 @@ pub fn install(_data_dir: &std::path::Path) -> std::io::Result<()> {
 /// layout `Contents/MacOS` + `Contents/Helpers`). Both must be present;
 /// resolution is all-or-nothing so versions can never mix.
 fn bundled_pair(exe_dir: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
+    let suffix = std::env::consts::EXE_SUFFIX;
     let candidates = [exe_dir.to_path_buf(), exe_dir.join("../Helpers")];
     for dir in candidates {
-        let ffmpeg = dir.join("ffmpeg");
-        let ffprobe = dir.join("ffprobe");
+        let ffmpeg = dir.join(format!("ffmpeg{suffix}"));
+        let ffprobe = dir.join(format!("ffprobe{suffix}"));
         if ffmpeg.is_file() && ffprobe.is_file() {
             return Some((ffmpeg, ffprobe));
         }
@@ -136,18 +137,20 @@ mod tests {
         std::fs::create_dir_all(&helpers).expect("mkdir helpers");
         assert!(bundled_pair(&dir).is_none());
 
-        std::fs::write(helpers.join("ffmpeg"), b"x").expect("write");
+        let sx = std::env::consts::EXE_SUFFIX;
+        let (ffmpeg_name, ffprobe_name) = (format!("ffmpeg{sx}"), format!("ffprobe{sx}"));
+        std::fs::write(helpers.join(&ffmpeg_name), b"x").expect("write");
         assert!(bundled_pair(&dir).is_none(), "ffprobe missing");
 
-        std::fs::write(helpers.join("ffprobe"), b"x").expect("write");
+        std::fs::write(helpers.join(&ffprobe_name), b"x").expect("write");
         let (f, p) = bundled_pair(&dir).expect("both present");
-        assert!(f.ends_with("Helpers/ffmpeg"));
-        assert!(p.ends_with("Helpers/ffprobe"));
+        assert!(f.ends_with(format!("Helpers/{ffmpeg_name}")));
+        assert!(p.ends_with(format!("Helpers/{ffprobe_name}")));
 
-        std::fs::write(dir.join("ffmpeg"), b"x").expect("write");
-        std::fs::write(dir.join("ffprobe"), b"x").expect("write");
+        std::fs::write(dir.join(&ffmpeg_name), b"x").expect("write");
+        std::fs::write(dir.join(&ffprobe_name), b"x").expect("write");
         let (f, _) = bundled_pair(&dir).expect("same-dir wins");
-        assert_eq!(f, dir.join("ffmpeg"));
+        assert_eq!(f, dir.join(&ffmpeg_name));
 
         let _ = std::fs::remove_dir_all(&root);
     }

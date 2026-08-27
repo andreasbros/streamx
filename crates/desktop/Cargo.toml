@@ -46,6 +46,12 @@ libmpv2 = "6"
 streamx-linkcheck = { path = "../linkcheck" }
 tempfile = "3"
 
+[target.'cfg(unix)'.dependencies]
+# libmpv requires LC_NUMERIC="C" at init; pinned via setlocale. The
+# Windows CRT locale is per-runtime and defaults to "C", so the fix
+# does not apply there.
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
 

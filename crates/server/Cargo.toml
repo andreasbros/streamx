@@ -58,9 +58,16 @@ urlencoding = "2"
 scraper = "0.22"
 dashmap = "6"
 futures = "0.3"
-libc = "0.2"
 lofty = "0.21"
 sha2 = { version = "0.10", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# FFmpeg shutdown signalling (SIGTERM/SIGKILL); Windows uses taskkill.
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Disk space for the admin monitor (GetDiskFreeSpaceExW).
+windows-sys = { version = "0.60", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 streamx-linkcheck = { path = "../linkcheck" }

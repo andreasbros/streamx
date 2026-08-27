@@ -37,8 +37,6 @@ pub fn trailer_overlay(
         .items_center()
         .justify_center()
         .bg(bg)
-        .text_color(gpui::white())
-        .text_size(px(diameter * 0.42))
         .cursor_pointer()
         .hover(|s| s.opacity(0.85))
         .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| {
@@ -48,7 +46,13 @@ pub fn trailer_overlay(
             cx.stop_propagation();
             on_click(ev, w, cx);
         })
-        .child("▶")
+        .child(
+            gpui::svg()
+                .path("video.svg")
+                .w(px(diameter * 0.5))
+                .h(px(diameter * 0.5))
+                .text_color(gpui::white()),
+        )
 }
 
 /// Movie poster tile dimensions. Sized for readability on desktop

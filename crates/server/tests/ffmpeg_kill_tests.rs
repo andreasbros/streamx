@@ -83,6 +83,7 @@ fn long_hevc_clip() -> PathBuf {
     path
 }
 
+#[cfg(unix)]
 fn count_ffmpeg(path_fragment: &str) -> usize {
     let output = std::process::Command::new("pgrep")
         .args(["-f", &format!("ffmpeg.*{path_fragment}")])
@@ -92,6 +93,25 @@ fn count_ffmpeg(path_fragment: &str) -> usize {
             let s = String::from_utf8_lossy(&o.stdout);
             s.lines().filter(|l| !l.is_empty()).count()
         }
+        Err(_) => 0,
+    }
+}
+
+/// No pgrep on Windows; match command lines via CIM. The fragment goes
+/// through an env var so path backslashes never meet shell quoting.
+#[cfg(windows)]
+fn count_ffmpeg(path_fragment: &str) -> usize {
+    let script = "@(Get-CimInstance Win32_Process -Filter \"Name='ffmpeg.exe'\" | \
+                  Where-Object { $_.CommandLine -like ('*' + $env:SX_FRAG + '*') }).Count";
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .env("SX_FRAG", path_fragment)
+        .output();
+    match output {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0),
         Err(_) => 0,
     }
 }
@@ -187,15 +207,21 @@ async fn watchdog_kills_idle() {
     }
     // The 60s clip transcodes to completion in a few seconds at
     // `ultrafast`, which would end FFmpeg before the 30s idle
-    // threshold and prove nothing. A single-threaded `veryslow` encode
-    // keeps FFmpeg busy well past the watchdog window.
+    // threshold and prove nothing. A single-threaded `placebo` encode
+    // keeps FFmpeg busy well past the watchdog window even on fast CI
+    // hardware (`veryslow` finished in 29s on a Windows runner).
     let mut config = test_config();
-    config.preset = "veryslow".to_string();
+    config.preset = "placebo".to_string();
     config.threads = Some(1);
     let (mgr, cache) = create_mgr_with("watchdog", config).await;
     let stream_id = "test_watchdog";
     let path_frag = cache.join(stream_id).to_string_lossy().to_string();
 
+    // Stamp before start_stream: the manager records last-access inside
+    // it, and the idle window is measured from that record. Stamping
+    // after process detection undercounts on Windows, where each
+    // count_ffmpeg poll shells out to PowerShell and lags by seconds.
+    let spawned_at = std::time::Instant::now();
     mgr.start_stream(stream_id, clip.to_str().unwrap(), "720p")
         .await
         .expect("start_stream");
@@ -203,7 +229,6 @@ async fn watchdog_kills_idle() {
     let before = wait_for_ffmpeg(&path_frag, SPAWN_DEADLINE, |n| n > 0).await;
     eprintln!("FFmpeg before idle: {before}");
     assert!(before > 0, "FFmpeg should be running");
-    let spawned_at = std::time::Instant::now();
 
     // Still alive well inside the idle window: the encode is genuinely
     // long-running, so a later exit can only be the watchdog.

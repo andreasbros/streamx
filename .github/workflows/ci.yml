@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Deterministic manual trigger: GitHub occasionally drops the
+  # pull_request event for a push, leaving a PR head with no run.
+  # `gh workflow run ci --ref <branch>` forces one.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -53,3 +57,110 @@ jobs:
             pnpm test
             pnpm build
           '
+
+  # Same test gate on the other desktop OSes. macOS runs the full nix
+  # gate; Windows has no Nix, so rustup + pinned runtime deps mirror
+  # the release job's environment (libmpv import lib for linking,
+  # ffmpeg on PATH for the transcode tests).
+  rust-macos:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: cachix/cachix-action@v15
+        with:
+          name: streamx
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+      - name: tests
+        run: |
+          nix develop --command bash -c '
+            set -euo pipefail
+            (cd web && pnpm install --frozen-lockfile && pnpm build)
+            export CARGO_TARGET_DIR=$PWD/target/nix
+            cargo test --workspace
+          '
+
+  rust-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            msvc_arch: x64
+            lib_machine: X64
+            mpv_dev: mpv-dev-x86_64-20260809-git-dd5d17d328.7z
+            mpv_sha256: c6aebf40bb722efe79090bfeb61e68625f0837770347e5a8b610aef78900cf12
+            ffmpeg_zip: ffmpeg-N-126277-ga8c7afa7d7-win64-gpl.zip
+            ffmpeg_sha256: 61f27cf0ea41eba2ccc8bbfd404d24925697725acca62f7af5f427f7ebb3e634
+          - runner: windows-11-arm
+            msvc_arch: arm64
+            lib_machine: ARM64
+            mpv_dev: mpv-dev-aarch64-20260809-git-dd5d17d328.7z
+            mpv_sha256: 0a56c6099ce988c2f79c07e93ae89213c2f27b87e166c002a2e1c2332336dcf2
+            ffmpeg_zip: ffmpeg-N-126277-ga8c7afa7d7-winarm64-gpl.zip
+            ffmpeg_sha256: 94b74956faf3ec56a3b6974a6d6acd35873266690b1b7514cad1a2cc42a52c8e
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    env:
+      FFMPEG_RELEASE: autobuild-2026-08-26-13-06
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        run: rustup show
+      - name: Build web UI
+        run: |
+          cd web
+          pnpm install --frozen-lockfile
+          pnpm build
+      - name: Fetch libmpv + ffmpeg (pinned, checksum-verified)
+        shell: pwsh
+        run: |
+          $u = "https://master.dl.sourceforge.net/project/mpv-player-windows/libmpv/${{ matrix.mpv_dev }}?viasf=1"
+          $ok = $false
+          for ($i = 0; $i -lt 3 -and -not $ok; $i++) {
+            curl.exe -sfL -o mpv-dev.7z $u
+            $h = (Get-FileHash mpv-dev.7z -Algorithm SHA256).Hash.ToLower()
+            if ($h -eq "${{ matrix.mpv_sha256 }}") { $ok = $true } else { Start-Sleep 5 }
+          }
+          if (-not $ok) { throw "libmpv checksum mismatch after retries: $h" }
+          7z x mpv-dev.7z -ompv-dev | Out-Null
+          $exports = dumpbin /exports mpv-dev/libmpv-2.dll
+          $names = $exports | ForEach-Object {
+            if ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(\S+)') { $Matches[1] }
+          }
+          @("LIBRARY libmpv-2.dll", "EXPORTS") + $names | Set-Content mpv-dev/mpv.def -Encoding ascii
+          lib /def:mpv-dev/mpv.def /machine:${{ matrix.lib_machine }} /out:mpv-dev/mpv.lib
+          curl.exe -sfL -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/$env:FFMPEG_RELEASE/${{ matrix.ffmpeg_zip }}"
+          $h = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
+          if ($h -ne "${{ matrix.ffmpeg_sha256 }}") { throw "ffmpeg checksum mismatch: $h" }
+          7z x ffmpeg.zip -offmpeg-extract | Out-Null
+      - name: tests
+        shell: pwsh
+        run: |
+          $env:STREAMX_MPV_LIB_DIR = "$PWD/mpv-dev"
+          # libmpv-2.dll and ffmpeg/ffprobe on PATH for test runtime.
+          $ffbin = (Get-ChildItem ffmpeg-extract -Recurse -Filter ffmpeg.exe | Select-Object -First 1).Directory
+          $env:PATH = "$PWD/mpv-dev;$ffbin;$env:PATH"
+          cargo test --workspace
+      - name: in-process mpv playback (real window on the runner desktop)
+        shell: pwsh
+        run: |
+          $env:STREAMX_MPV_LIB_DIR = "$PWD/mpv-dev"
+          $ffbin = (Get-ChildItem ffmpeg-extract -Recurse -Filter ffmpeg.exe | Select-Object -First 1).Directory
+          $env:PATH = "$PWD/mpv-dev;$ffbin;$env:PATH"
+          ffmpeg -y -hide_banner -loglevel error `
+            -f lavfi -i testsrc=duration=20:size=640x360:rate=25 `
+            -f lavfi -i sine=frequency=440:duration=20 `
+            -c:v libx264 -c:a aac clip.mp4
+          $env:STREAMX_TEST_CLIP = "$PWD/clip.mp4"
+          cargo test -p streamx-desktop --test embedded_mpv -- --ignored --nocapture

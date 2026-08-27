@@ -60,8 +60,8 @@ pub fn resolve_downloads_dir(download_dir: Option<&str>, data_dir: &Path) -> Pat
 
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest);
+        if let Some(home) = std::env::home_dir() {
+            return home.join(rest);
         }
     }
     PathBuf::from(path)
@@ -355,11 +355,13 @@ fn generate_jwt_secret() -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+// std::env::home_dir resolves $HOME on unix and the user profile on
+// Windows (un-deprecated with corrected behavior in modern Rust).
 fn default_data_dir() -> Result<PathBuf> {
-    let home = std::env::var("HOME").map_err(|_| Error::Config {
-        message: "HOME environment variable not set".to_string(),
+    let home = std::env::home_dir().ok_or_else(|| Error::Config {
+        message: "cannot determine the user home directory".to_string(),
     })?;
-    Ok(PathBuf::from(home).join(".streamx"))
+    Ok(home.join(".streamx"))
 }
 
 fn default_config_content() -> String {

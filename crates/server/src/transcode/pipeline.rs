@@ -32,37 +32,59 @@ pub struct TranscodeHandle {
     child_pids: Arc<std::sync::Mutex<Vec<u32>>>,
 }
 
+// FFmpeg shutdown. On unix SIGTERM first, so FFmpeg finalizes the
+// current segment and writes EXT-X-ENDLIST, escalating to SIGKILL.
+// Windows has no SIGTERM: taskkill /T /F terminates the tree
+// immediately (the partial segment is discarded on next start).
+#[cfg(unix)]
+fn stop_ffmpeg(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+}
+#[cfg(unix)]
+fn ffmpeg_exited(pid: u32) -> bool {
+    (unsafe { libc::kill(pid as i32, 0) }) != 0
+}
+#[cfg(unix)]
+fn force_kill_ffmpeg(pid: u32) {
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+}
+#[cfg(windows)]
+fn stop_ffmpeg(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output();
+}
+#[cfg(windows)]
+fn ffmpeg_exited(_pid: u32) -> bool {
+    true
+}
+#[cfg(windows)]
+fn force_kill_ffmpeg(pid: u32) {
+    stop_ffmpeg(pid);
+}
+
 impl Drop for TranscodeHandle {
     fn drop(&mut self) {
         if let Ok(pids) = self.child_pids.lock() {
             if pids.is_empty() {
                 return;
             }
-            // SIGTERM lets FFmpeg finalize the current segment and write EXT-X-ENDLIST
             for pid in pids.iter() {
-                tracing::info!(stream_id = %self.stream_id, pid, "Stopping FFmpeg (SIGTERM)");
-                unsafe {
-                    libc::kill(*pid as i32, libc::SIGTERM);
-                }
+                tracing::info!(stream_id = %self.stream_id, pid, "Stopping FFmpeg");
+                stop_ffmpeg(*pid);
             }
             // Wait up to 3 seconds for graceful exit
             for _ in 0..30 {
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                let all_dead = pids
-                    .iter()
-                    .all(|pid| unsafe { libc::kill(*pid as i32, 0) } != 0);
-                if all_dead {
+                if pids.iter().all(|pid| ffmpeg_exited(*pid)) {
                     return;
                 }
             }
             // Still alive after 3s - force kill
             for pid in pids.iter() {
-                let alive = unsafe { libc::kill(*pid as i32, 0) } == 0;
-                if alive {
-                    tracing::warn!(stream_id = %self.stream_id, pid, "FFmpeg did not exit in 3s, SIGKILL");
-                    unsafe {
-                        libc::kill(*pid as i32, libc::SIGKILL);
-                    }
+                if !ffmpeg_exited(*pid) {
+                    tracing::warn!(stream_id = %self.stream_id, pid, "FFmpeg did not exit in 3s, force kill");
+                    force_kill_ffmpeg(*pid);
                 }
             }
         }

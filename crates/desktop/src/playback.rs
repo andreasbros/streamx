@@ -17,15 +17,7 @@ use streamx_api::types::TorrentFile;
 #[derive(Debug, Clone)]
 pub enum PlayTarget {
     LocalFile(PathBuf),
-    Http {
-        url: String,
-        token: Option<String>,
-    },
-    /// A web page URL (e.g. a YouTube trailer) that mpv resolves via
-    /// its yt-dlp hook.
-    Web {
-        url: String,
-    },
+    Http { url: String, token: Option<String> },
 }
 
 impl PlayTarget {
@@ -33,7 +25,6 @@ impl PlayTarget {
         match self {
             PlayTarget::LocalFile(p) => p.display().to_string(),
             PlayTarget::Http { url, .. } => url.clone(),
-            PlayTarget::Web { url } => url.clone(),
         }
     }
 
@@ -49,7 +40,6 @@ impl PlayTarget {
                 }
                 args
             }
-            PlayTarget::Web { url } => vec![url.clone()],
         }
     }
 }
@@ -305,24 +295,6 @@ pub fn launch(target: &PlayTarget, theme: &Theme) -> Result<(Player, Option<Cont
     }
 }
 
-/// ytdl flags for a spawned mpv: web targets get the yt-dlp hook at the
-/// highest quality; everything else keeps it off (no probing overhead).
-fn ytdl_args(target: &PlayTarget) -> Vec<String> {
-    match target {
-        PlayTarget::Web { .. } => {
-            let mut args = vec![
-                "--ytdl=yes".to_string(),
-                format!("--ytdl-format={YTDL_FORMAT}"),
-            ];
-            if let Some(y) = resolve_ytdlp() {
-                args.push(format!("--script-opts=ytdl_hook-ytdl_path={}", y.display()));
-            }
-            args
-        }
-        _ => vec!["--ytdl=no".to_string()],
-    }
-}
-
 /// Launch mpv on a PlayTarget. Opens a JSON IPC socket so the desktop can
 /// pause/seek/query state while mpv renders the video.
 pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, String> {
@@ -348,7 +320,7 @@ pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, Str
         // horizontal / vertical / diagonal drags all work.
         .arg("--border=yes")
         .arg("--keepaspect-window=no")
-        .args(ytdl_args(target))
+        .arg("--ytdl=no")
         .arg("--cache=yes")
         .arg("--cache-secs=300")
         .arg("--demuxer-max-bytes=2G")
@@ -364,53 +336,6 @@ pub fn launch_mpv(target: &PlayTarget, theme: &Theme) -> Result<MpvInstance, Str
         .map_err(|e| format!("failed to spawn mpv at {}: {e}", mpv.display()))?;
 
     Ok(MpvInstance { child, socket_path })
-}
-
-/// Highest-quality yt-dlp selection: best video muxed with best audio,
-/// falling back to the best single stream.
-pub const YTDL_FORMAT: &str = "bestvideo+bestaudio/best";
-
-/// Well-known yt-dlp locations checked after PATH. mpv's ytdl hook needs
-/// the binary; when found we pass its path so playback works even when
-/// the app was launched from Finder with a minimal PATH.
-const YTDLP_KNOWN_LOCATIONS: &[&str] = &[
-    "/opt/homebrew/bin/yt-dlp",
-    "/usr/local/bin/yt-dlp",
-    "/usr/bin/yt-dlp",
-    "/run/current-system/sw/bin/yt-dlp",
-    "/nix/var/nix/profiles/default/bin/yt-dlp",
-];
-
-/// Build-time yt-dlp location from the Nix dev shell, if built there.
-const YTDLP_BUILD_PATH: Option<&str> = option_env!("STREAMX_YTDLP_BUILD_PATH");
-
-/// Locate yt-dlp: PATH first, then the build-time path, then well-known
-/// install locations.
-pub fn resolve_ytdlp() -> Option<PathBuf> {
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            let cand = dir.join("yt-dlp");
-            if cand.is_file() {
-                return Some(cand);
-            }
-        }
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        let cand = PathBuf::from(home).join(".local/bin/yt-dlp");
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    if let Some(built) = YTDLP_BUILD_PATH {
-        let cand = PathBuf::from(built);
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    YTDLP_KNOWN_LOCATIONS
-        .iter()
-        .map(PathBuf::from)
-        .find(|p| p.is_file())
 }
 
 /// Build-time mpv location from the Nix dev shell, if the binary was
@@ -486,13 +411,20 @@ pub fn resolve_mpv_from(
 }
 
 fn mpv_socket_path() -> PathBuf {
-    let tmp = std::env::temp_dir();
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    tmp.join(format!("streamx-mpv-{pid}-{nanos}.sock"))
+    #[cfg(unix)]
+    {
+        std::env::temp_dir().join(format!("streamx-mpv-{pid}-{nanos}.sock"))
+    }
+    #[cfg(not(unix))]
+    {
+        // mpv on Windows serves JSON IPC over a named pipe.
+        PathBuf::from(format!(r"\\.\pipe\streamx-mpv-{pid}-{nanos}"))
+    }
 }
 
 pub mod ipc {
@@ -506,8 +438,23 @@ pub mod ipc {
 
     use serde::{Deserialize, Serialize};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixStream;
     use tokio::sync::Mutex;
+
+    // Same JSON protocol on every OS; only the transport differs:
+    // Unix domain socket vs Windows named pipe.
+    #[cfg(unix)]
+    type IpcStream = tokio::net::UnixStream;
+    #[cfg(windows)]
+    type IpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
+
+    #[cfg(unix)]
+    async fn ipc_connect(path: &Path) -> std::io::Result<IpcStream> {
+        tokio::net::UnixStream::connect(path).await
+    }
+    #[cfg(windows)]
+    async fn ipc_connect(path: &Path) -> std::io::Result<IpcStream> {
+        tokio::net::windows::named_pipe::ClientOptions::new().open(path)
+    }
 
     #[derive(Debug, Serialize)]
     struct Request {
@@ -532,8 +479,8 @@ pub mod ipc {
     }
 
     struct Inner {
-        reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-        writer: tokio::net::unix::OwnedWriteHalf,
+        reader: BufReader<tokio::io::ReadHalf<IpcStream>>,
+        writer: tokio::io::WriteHalf<IpcStream>,
         next_id: u64,
     }
 
@@ -542,9 +489,9 @@ pub mod ipc {
         /// boots and creates the socket.
         pub async fn connect(path: &Path) -> Result<Self, String> {
             for _ in 0..40 {
-                match UnixStream::connect(path).await {
+                match ipc_connect(path).await {
                     Ok(stream) => {
-                        let (r, w) = stream.into_split();
+                        let (r, w) = tokio::io::split(stream);
                         return Ok(Self {
                             inner: Arc::new(Mutex::new(Inner {
                                 reader: BufReader::new(r),

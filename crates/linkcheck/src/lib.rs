@@ -60,6 +60,7 @@ pub struct Linkage {
 pub enum Format {
     Elf,
     MachO,
+    Pe,
 }
 
 /// Linkage rule to enforce.
@@ -93,6 +94,14 @@ pub enum Policy {
     /// RUNPATH may reference a build store. A Nix-built binary fails
     /// this until release packaging rewrites it.
     LinuxDist { allowed_sonames: Vec<String> },
+    /// Distributable Windows artifact: every imported DLL must be a
+    /// Windows system DLL or a library the release zip ships next to
+    /// the executable (libmpv). The CRT is static, so no vcruntime
+    /// redistributable may appear.
+    WindowsDist {
+        allowed_dlls: Vec<String>,
+        bundle_manifest: Vec<String>,
+    },
 }
 
 impl Policy {
@@ -104,6 +113,7 @@ impl Policy {
             Policy::MacosDevBundle { .. } => "macos-dev-bundle",
             Policy::LinuxDevBundle { .. } => "linux-dev-bundle",
             Policy::LinuxDist { .. } => "linux-dist",
+            Policy::WindowsDist { .. } => "windows-dist",
         }
     }
 }
@@ -171,6 +181,93 @@ pub fn linux_bundle_manifest() -> Vec<String> {
     ["libmpv"].iter().map(|s| s.to_string()).collect()
 }
 
+/// Windows system DLLs (and API-set families) every supported Windows
+/// installation provides. Compared case-insensitively.
+pub fn windows_system_dlls() -> Vec<String> {
+    [
+        "kernel32.dll",
+        "ntdll.dll",
+        // OS crypto primitives and COM base: core Windows components
+        // (Rust std uses bcryptprimitives for its RNG).
+        "bcryptprimitives.dll",
+        "combase.dll",
+        // ICU ships in System32 since Windows 10 1703 (our floor);
+        // gpui's text/locale stack links it.
+        "icu.dll",
+        "icuuc.dll",
+        "icuin.dll",
+        "user32.dll",
+        "shell32.dll",
+        "shlwapi.dll",
+        "advapi32.dll",
+        "bcrypt.dll",
+        "crypt32.dll",
+        "ncrypt.dll",
+        "secur32.dll",
+        "ws2_32.dll",
+        "iphlpapi.dll",
+        "gdi32.dll",
+        "ole32.dll",
+        "oleaut32.dll",
+        "comctl32.dll",
+        "comdlg32.dll",
+        "uxtheme.dll",
+        "dwmapi.dll",
+        "imm32.dll",
+        "userenv.dll",
+        "winmm.dll",
+        "version.dll",
+        "setupapi.dll",
+        "propsys.dll",
+        "runtimeobject.dll",
+        // Graphics/text stack used by GPUI's DirectX backend.
+        "d3d11.dll",
+        "d3dcompiler_47.dll",
+        "dxgi.dll",
+        "d2d1.dll",
+        "dwrite.dll",
+        "dcomp.dll",
+        "windowscodecs.dll",
+        // Media Foundation (hardware decode).
+        "mf.dll",
+        "mfplat.dll",
+        "mfreadwrite.dll",
+        // Universal CRT: part of Windows 10+ itself (the MSVC CRT is
+        // linked statically; ucrtbase is an OS component).
+        "ucrtbase.dll",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Libraries the Windows release zip ships next to the executable.
+pub fn windows_bundle_manifest() -> Vec<String> {
+    ["libmpv-2.dll", "mpv-2.dll"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// The dynamic MSVC runtime that dev builds link. Release builds use
+/// the static CRT (`+crt-static`), so `windows-dist` rejects these.
+pub fn windows_dev_crt_dlls() -> Vec<String> {
+    ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn windows_dll_allowed(dll: &str, allowed: &[String], manifest: &[String]) -> bool {
+    let d = dll.to_ascii_lowercase();
+    // API set schema DLLs (api-ms-win-*, ext-ms-*) are Windows OS
+    // forwarders, present on every supported Windows.
+    d.starts_with("api-ms-win-")
+        || d.starts_with("ext-ms-")
+        || allowed.iter().any(|a| a.eq_ignore_ascii_case(&d))
+        || manifest.iter().any(|m| m.eq_ignore_ascii_case(&d))
+}
+
 /// Third-party libraries the macOS .app bundles next to the binary.
 /// A dev build may reference these from the build environment; the
 /// release artifact must reference them via `@rpath`.
@@ -206,6 +303,21 @@ pub fn linkage(path: &Path) -> Result<Linkage> {
                 .map(|s| s.to_string())
                 .collect(),
         }),
+        Object::PE(pe) => {
+            let mut libraries: Vec<String> = Vec::new();
+            for import in &pe.imports {
+                let dll = import.dll.to_string();
+                if !libraries.contains(&dll) {
+                    libraries.push(dll);
+                }
+            }
+            Ok(Linkage {
+                format: Format::Pe,
+                interpreter: None,
+                libraries,
+                runpaths: Vec::new(),
+            })
+        }
         Object::Mach(Mach::Binary(macho)) => Ok(macho_linkage(&macho)),
         Object::Mach(Mach::Fat(fat)) => {
             let mut libraries: Vec<String> = Vec::new();
@@ -283,6 +395,18 @@ pub fn violations(linkage: &Linkage, policy: &Policy) -> Vec<String> {
                 }
             }
         }
+        Policy::WindowsDist {
+            allowed_dlls,
+            bundle_manifest,
+        } => {
+            for lib in &linkage.libraries {
+                if !windows_dll_allowed(lib, allowed_dlls, bundle_manifest) {
+                    problems.push(format!(
+                        "imports DLL that is neither a Windows system DLL nor bundled: {lib}"
+                    ));
+                }
+            }
+        }
         Policy::LinuxDist { allowed_sonames } => {
             match &linkage.interpreter {
                 Some(interp) if fhs_interpreters().iter().any(|i| i == interp) => {}
@@ -330,6 +454,16 @@ pub fn policy_for_current_target() -> Policy {
     if cfg!(target_os = "macos") {
         Policy::MacosDevBundle {
             bundle_manifest: macos_bundle_manifest(),
+        }
+    } else if cfg!(target_os = "windows") {
+        // Dev builds additionally link the dynamic MSVC CRT; release
+        // builds are checked with the strict windows-dist policy (CLI),
+        // where the CRT is static.
+        let mut allowed = windows_system_dlls();
+        allowed.extend(windows_dev_crt_dlls());
+        Policy::WindowsDist {
+            allowed_dlls: allowed,
+            bundle_manifest: windows_bundle_manifest(),
         }
     } else if cfg!(target_env = "musl") {
         Policy::FullyStatic
@@ -418,6 +552,28 @@ mod tests {
     }
 
     #[test]
+    fn windows_dist_accepts_system_and_bundled_dlls_only() {
+        let policy = Policy::WindowsDist {
+            allowed_dlls: windows_system_dlls(),
+            bundle_manifest: windows_bundle_manifest(),
+        };
+        let ok = lk(
+            None,
+            &[
+                "KERNEL32.dll",
+                "api-ms-win-crt-runtime-l1-1-0.dll",
+                "d3d11.dll",
+                "libmpv-2.dll",
+            ],
+        );
+        assert!(violations(&ok, &policy).is_empty());
+        // A dynamic CRT or a stray dependency DLL must fail: the CRT is
+        // static and everything else ships in the zip or not at all.
+        let bad = lk(None, &["vcruntime140.dll", "avcodec-61.dll"]);
+        assert_eq!(violations(&bad, &policy).len(), 2);
+    }
+
+    #[test]
     fn linux_dist_rejects_store_interpreter_and_runpath() {
         let policy = Policy::LinuxDist {
             allowed_sonames: linux_desktop_allowlist(),
@@ -476,6 +632,8 @@ mod tests {
         let l = linkage(&exe).expect("parse own binary");
         let expected = if cfg!(target_os = "macos") {
             Format::MachO
+        } else if cfg!(target_os = "windows") {
+            Format::Pe
         } else {
             Format::Elf
         };
