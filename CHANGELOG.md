@@ -4,6 +4,40 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.3.0] - 2026-08-27
+
+
+### Added
+
+- Windows desktop (60579a25)
+- Youtube trailers in native popup player; fix libmpv locale init; match web trailer icon (00d43550)
+- Youtube trailer popup on linux and windows (16b55528)
+
+### Fixed
+
+- Fix windows homedir resolution and ci build (93e0fd4e)
+- Portable signal handling and test file seeding (fb2392f8)
+- Mpv JSON IPC over named pipes (08017b1d)
+- Count ffmpeg via CIM in kill tests (2f5ea45d)
+- Allowlist bcryptprimitives/combase; tolerate dynamic CRT in dev builds (e8643144)
+- Allowlist the Windows ICU DLLs (40f3d7a8)
+
+### Internal
+
+- Placebo preset so the watchdog encode outlasts the idle window (8ecbc691)
+- Measure watchdog idle window from start_stream (c4109fb8)
+- Fetch libmpv from the master SourceForge mirror with checksum-verified retries (c4af3aef)
+- Run the in-process libmpv playback test on the runner desktop (6b6a062f)
+- Expect PE format when linkcheck parses its own test binary (6edcc35e)
+- Retrigger after dropped workflow event (29fc4101)
+- Supply env-derived browser candidates in the override test (73f04b99)
+- Manual dispatch trigger for dropped pull_request events (eb1230cf)
+
+### Other
+
+- Merge remote-tracking branch 'origin/fix/libmpv' into feat/windows (68ce5be5)
+- Merge pull request #4 from andreasbros/feat/windows (2f12673d)
+
 ## [0.2.6] - 2026-08-26
 
 
