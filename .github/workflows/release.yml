@@ -39,7 +39,7 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           mkdir -p dist
-          install -m755 out/bin/streamx dist/streamx-x86_64-linux-musl
+          install -m755 out/bin/streamx dist/streamx-server-x86_64-linux-musl
           gh release upload "${{ inputs.tag || github.ref_name }}" dist/* --clobber
 
   # Native ARM runner (free for public repos): no cross toolchain to
@@ -64,7 +64,7 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           mkdir -p dist
-          install -m755 out/bin/streamx dist/streamx-aarch64-linux-musl
+          install -m755 out/bin/streamx dist/streamx-server-aarch64-linux-musl
           gh release upload "${{ inputs.tag || github.ref_name }}" dist/* --clobber
 
   linux-desktop:
@@ -144,8 +144,8 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Build, sign, notarize dmgs (Apple Silicon + Intel via Rosetta)
         run: |
-          nix develop --command scripts/release.sh aarch64-apple-darwin dist/StreamX-aarch64.dmg
-          nix develop --command scripts/release.sh x86_64-apple-darwin dist/StreamX-x86_64.dmg
+          nix develop --command scripts/release.sh aarch64-apple-darwin dist/streamx-desktop-aarch64-macos.dmg
+          nix develop --command scripts/release.sh x86_64-apple-darwin dist/streamx-desktop-x86_64-macos.dmg
       - name: Upload
         env: { GH_TOKEN: "${{ github.token }}" }
         run: gh release upload "${{ inputs.tag || github.ref_name }}" dist/*.dmg --clobber

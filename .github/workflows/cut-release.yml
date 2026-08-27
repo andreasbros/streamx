@@ -77,13 +77,15 @@ jobs:
 
           | Platform | File |
           |---|---|
-          | macOS Apple Silicon | [StreamX-aarch64.dmg]($DL/StreamX-aarch64.dmg) |
-          | macOS Intel | [StreamX-x86_64.dmg]($DL/StreamX-x86_64.dmg) |
-          | Linux server x86_64 (static, any distro) | [streamx-x86_64-linux-musl]($DL/streamx-x86_64-linux-musl) |
-          | Linux server aarch64 (static, any distro) | [streamx-aarch64-linux-musl]($DL/streamx-aarch64-linux-musl) |
-          | Linux desktop x86_64 (glibc 2.39+) | [streamx-desktop-x86_64-linux.tar.gz]($DL/streamx-desktop-x86_64-linux.tar.gz) |
+          | macOS desktop, Apple Silicon | [streamx-desktop-aarch64-macos.dmg]($DL/streamx-desktop-aarch64-macos.dmg) |
+          | macOS desktop, Intel | [streamx-desktop-x86_64-macos.dmg]($DL/streamx-desktop-x86_64-macos.dmg) |
+          | Windows desktop, x86_64 | [streamx-desktop-x86_64-windows.zip]($DL/streamx-desktop-x86_64-windows.zip) |
+          | Windows desktop, arm64 | [streamx-desktop-aarch64-windows.zip]($DL/streamx-desktop-aarch64-windows.zip) |
+          | Linux desktop, x86_64 (glibc 2.39+) | [streamx-desktop-x86_64-linux.tar.gz]($DL/streamx-desktop-x86_64-linux.tar.gz) |
+          | Linux server, x86_64 (static, any distro) | [streamx-server-x86_64-linux-musl]($DL/streamx-server-x86_64-linux-musl) |
+          | Linux server, aarch64 (static, any distro) | [streamx-server-aarch64-linux-musl]($DL/streamx-server-aarch64-linux-musl) |
 
-          macOS first launch: System Settings > Privacy & Security > "Open Anyway".
+          Linux server: `chmod +x` and run. Windows: unzip and run streamx-desktop.exe.
           NOTES_EOF
           gh release create "$TAG" --title "StreamX $NEXT" --notes-file "$NOTES" \
             --target "$(git rev-parse HEAD)"

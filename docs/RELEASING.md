@@ -29,7 +29,7 @@ All commits on main must use Conventional Commit messages
 
 ```bash
 nix run .#build-all
-# -> dist/StreamX-aarch64.dmg  dist/StreamX-x86_64.dmg
+# -> dist/streamx-desktop-aarch64-macos.dmg  dist/streamx-desktop-x86_64-macos.dmg
 ```
 
 Mount one dmg, drag StreamX.app somewhere, launch it, play a movie.
@@ -91,7 +91,7 @@ Windows: download `streamx-desktop-<arch>-windows.zip` (arm64 for
 Windows on ARM, x86_64 otherwise), unzip, run `streamx-desktop.exe`.
 Everything the app needs is in the folder.
 
-Linux server: download `streamx-<arch>-linux-musl`, `chmod +x`, run.
+Linux server: download `streamx-server-<arch>-linux-musl`, `chmod +x`, run.
 Works on any distro, fully static.
 
 Linux desktop: download `streamx-desktop-x86_64-linux.tar.gz`, unpack,
@@ -118,7 +118,7 @@ just skips pushing.
 - CI job failed: fix, push to main, then re-run the job from the GitHub
   UI or `gh run rerun <id>`. The release and tag already exist; jobs
   only upload artifacts. In a pinch a locally built dmg can be attached
-  with `gh release upload vX.Y.Z dist/StreamX-*.dmg`, replaced by the
+  with `gh release upload vX.Y.Z dist/streamx-desktop-*-macos.dmg`, replaced by the
   CI build once the job is green.
 - Bad release entirely: `gh release delete vX.Y.Z`,
   `git push origin :refs/tags/vX.Y.Z`, `git tag -d vX.Y.Z`, revert the
@@ -170,7 +170,7 @@ Secrets and variables > Actions > New repository secret.
    signing exactly as before.
 
 6. Verify on the next release: download a dmg and run
-   `spctl -a -t open --context context:primary-signature -v StreamX-aarch64.dmg`
+   `spctl -a -t open --context context:primary-signature -v streamx-desktop-aarch64-macos.dmg`
    (expect "accepted"), or just open the app - no Gatekeeper prompt.
 
 Local signed builds work too:

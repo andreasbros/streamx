@@ -601,8 +601,8 @@
               text = ''
                 cd "$(git rev-parse --show-toplevel)"
                 if [ "$(uname -s)" = "Darwin" ]; then
-                  nix develop --command scripts/release.sh aarch64-apple-darwin dist/StreamX-aarch64.dmg
-                  nix develop --command scripts/release.sh x86_64-apple-darwin dist/StreamX-x86_64.dmg
+                  nix develop --command scripts/release.sh aarch64-apple-darwin dist/streamx-desktop-aarch64-macos.dmg
+                  nix develop --command scripts/release.sh x86_64-apple-darwin dist/streamx-desktop-x86_64-macos.dmg
                 else
                   scripts/verify-release.sh
                 fi

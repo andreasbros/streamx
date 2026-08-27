@@ -153,8 +153,8 @@ nix build .#checks.x86_64-linux.linkage-desktop-dist
 # bundled (Contents/Helpers), ad-hoc signed and policy-verified.
 # Intel builds work on Apple Silicon via Rosetta-backed Nix
 # (`extra-platforms = x86_64-darwin` in nix.conf).
-scripts/release.sh aarch64-apple-darwin dist/StreamX-aarch64.dmg
-scripts/release.sh x86_64-apple-darwin  dist/StreamX-x86_64.dmg
+scripts/release.sh aarch64-apple-darwin dist/streamx-desktop-aarch64-macos.dmg
+scripts/release.sh x86_64-apple-darwin  dist/streamx-desktop-x86_64-macos.dmg
 # .zip instead of .dmg produces a ditto zip; a bare path produces the .app.
 # Release builds are Developer ID signed and notarized in CI; set
 # CODESIGN_IDENTITY="Developer ID Application: ..." to sign local
