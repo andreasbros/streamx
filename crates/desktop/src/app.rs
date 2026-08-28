@@ -4543,9 +4543,6 @@ impl MainView {
     /// click opens the releases page.
     fn update_available_view(&self, latest: &str, slot: usize) -> impl IntoElement {
         use gpui::{Animation, AnimationExt as _};
-        // The version itself lives in the menu badge; the pill stays a
-        // two-line notice like the slow-provider one.
-        let _ = latest;
         let theme = self.theme;
         let top = theme.space_4() + slot as f32 * 60.0;
         div()
@@ -4597,7 +4594,9 @@ impl MainView {
                             .text_size(px(theme.fs_2()))
                             .text_color(theme.fg_primary())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("New version available"),
+                            .child(SharedString::from(format!(
+                                "New version v{latest} available"
+                            ))),
                     )
                     .child(
                         div()
