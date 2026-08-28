@@ -17,6 +17,9 @@ pub enum Error {
     #[snafu(display("Configuration error: {message}"))]
     Config { message: String },
 
+    #[snafu(display("Provider error: {message}"))]
+    Provider { message: String },
+
     #[snafu(display("Authentication error: {message}"))]
     Auth { message: String },
 
@@ -65,6 +68,7 @@ impl IntoResponse for Error {
                 "Database error".to_string(),
             ),
             Error::Config { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
+            Error::Provider { message } => (StatusCode::BAD_GATEWAY, message.clone()),
             Error::Auth { message } => (StatusCode::UNAUTHORIZED, message.clone()),
             Error::Torrent { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
             Error::Transcode { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),

@@ -439,11 +439,17 @@ impl MainView {
                 }
 
                 // A browse running longer than 3s marks the movie
-                // provider slow; cleared when the request settles.
+                // provider slow; cleared when the request settles. A
+                // 45s watchdog guarantees the pill can never outlive a
+                // request that was dropped without settling.
                 {
                     let started = *state.browse_started_at.read();
                     if let Some(t0) = started {
-                        if t0.elapsed() > std::time::Duration::from_secs(3)
+                        if t0.elapsed() > std::time::Duration::from_secs(45) {
+                            *state.browse_started_at.write() = None;
+                            *state.provider_slow.write() = None;
+                            state.mark_dirty();
+                        } else if t0.elapsed() > std::time::Duration::from_secs(3)
                             && state.provider_slow.read().is_none()
                         {
                             let url = state
@@ -5058,7 +5064,13 @@ pub async fn load_category_page(state: &Arc<AppState>) {
     params.limit = Some(20);
     params.page = Some(next);
     let client = state.client.read().clone();
-    match client.browse(&params).await {
+    // Same slow-provider detection as the home rows: the tick loop
+    // flags the provider after 3s pending.
+    *state.browse_started_at.write() = Some(std::time::Instant::now());
+    let outcome = client.browse(&params).await;
+    *state.browse_started_at.write() = None;
+    *state.provider_slow.write() = None;
+    match outcome {
         Ok(resp) if !resp.results.is_empty() => {
             let rows = resp.results;
             let mut items = state.category_items.write();
@@ -5308,7 +5320,10 @@ pub async fn run_search(state: Arc<AppState>, query: String) {
     *state.query.write() = query.clone();
 
     let client = state.client.read().clone();
+    *state.browse_started_at.write() = Some(std::time::Instant::now());
     let result = client.search(&query, 1).await;
+    *state.browse_started_at.write() = None;
+    *state.provider_slow.write() = None;
     // A newer search superseded this one while the request was in
     // flight; drop the stale response instead of replacing results.
     if state.search_generation.load(Ordering::SeqCst) != generation {
@@ -5316,6 +5331,9 @@ pub async fn run_search(state: Arc<AppState>, query: String) {
     }
     match result {
         Ok(resp) => {
+            if let Some(err) = resp.provider_errors.into_iter().next() {
+                *state.provider_error.write() = Some(err);
+            }
             *state.search_results.write() =
                 resp.results.into_iter().map(std::sync::Arc::new).collect();
             *state.connection_error.write() = None;

@@ -225,13 +225,21 @@ impl SearchProvider {
             .collect()
     }
 
-    pub async fn search(&self, query: &str, page: u32) -> Result<Vec<SearchResultGroup>> {
+    pub async fn search(
+        &self,
+        query: &str,
+        page: u32,
+    ) -> Result<streamx_api::types::SearchResponse> {
+        use streamx_api::types::{ProviderError, SearchResponse};
         let (prefix, actual_query) = Self::parse_provider_prefix(query);
         let providers = self.providers_by_kind_and_name("movies", prefix);
         if providers.is_empty() {
-            return Ok(Vec::new());
+            return Ok(SearchResponse::default());
         }
 
+        // Each provider gets a 15s budget so one slow upstream cannot
+        // hold everyone else's results hostage; a blown budget becomes
+        // a visible provider error instead of a silent stall.
         let futs: Vec<_> = providers
             .iter()
             .map(|p| {
@@ -239,24 +247,43 @@ impl SearchProvider {
                 let q = actual_query.to_string();
                 async move {
                     let fmt = p.format.as_deref().unwrap_or("yts");
-                    match fmt {
-                        "torrentio" => self.search_torrentio_movies(&q, &p).await,
-                        "apibay" => self.search_movies_apibay(&q, &p).await,
-                        _ => self.search_yts(&q, &p, page).await,
-                    }
+                    let url = p.url.clone();
+                    let res = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                        match fmt {
+                            "torrentio" => self.search_torrentio_movies(&q, &p).await,
+                            "apibay" => self.search_movies_apibay(&q, &p).await,
+                            _ => self.search_yts(&q, &p, page).await,
+                        }
+                    })
+                    .await;
+                    (url, res)
                 }
             })
             .collect();
 
         let all_results = futures::future::join_all(futs).await;
 
-        let mut groups: Vec<SearchResultGroup> = all_results
-            .into_iter()
-            .flat_map(|r| r.unwrap_or_default())
-            .collect();
+        let mut groups: Vec<SearchResultGroup> = Vec::new();
+        let mut provider_errors: Vec<ProviderError> = Vec::new();
+        for (url, res) in all_results {
+            match res {
+                Err(_elapsed) => provider_errors.push(ProviderError {
+                    url,
+                    message: "no response within 15 seconds".to_string(),
+                }),
+                Ok(Err(err)) => provider_errors.push(ProviderError {
+                    url,
+                    message: err.to_string(),
+                }),
+                Ok(Ok(rows)) => groups.extend(rows),
+            }
+        }
 
         merge_movie_groups(&mut groups);
-        Ok(groups)
+        Ok(SearchResponse {
+            results: groups,
+            provider_errors,
+        })
     }
 
     async fn search_yts(
@@ -285,16 +312,20 @@ impl SearchProvider {
         let response = match response {
             Ok(r) => r,
             Err(err) => {
-                tracing::warn!("YTS API request failed: {err}");
-                return Ok(Vec::new());
+                let chain = error_chain(&err);
+                tracing::warn!("YTS API request failed: {chain}");
+                return Err(crate::error::Error::Provider { message: chain });
             }
         };
 
         let yts: YtsResponse = match response.json().await {
             Ok(parsed) => parsed,
             Err(err) => {
-                tracing::warn!("Failed to parse YTS response: {err}");
-                return Ok(Vec::new());
+                let chain = error_chain(&err);
+                tracing::warn!("Failed to parse YTS response: {chain}");
+                return Err(crate::error::Error::Provider {
+                    message: format!("invalid response: {chain}"),
+                });
             }
         };
 

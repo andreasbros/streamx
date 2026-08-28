@@ -17,7 +17,7 @@ export function ProviderHealth() {
   const [slow, setSlow] = useState(false);
   const [error, setError] = useState<ProviderError | null>(null);
   const providerHost = useRef<string>("content provider");
-  const pending = useRef(0);
+  const slowIds = useRef(new Set<number>());
 
   useEffect(() => {
     apiClient
@@ -28,13 +28,22 @@ export function ProviderHealth() {
       })
       .catch(() => {});
 
-    const onSlow = () => {
-      pending.current += 1;
+    const onSlow = (e: Event) => {
+      const id = (e as CustomEvent<{ id: number }>).detail?.id;
+      if (id === undefined) return;
+      slowIds.current.add(id);
       setSlow(true);
+      // Hard ceiling: a request that never settles (dropped on
+      // navigation, dead connection) cannot pin the pill forever.
+      window.setTimeout(() => {
+        slowIds.current.delete(id);
+        if (slowIds.current.size === 0) setSlow(false);
+      }, 60000);
     };
-    const onSettled = () => {
-      pending.current = Math.max(0, pending.current - 1);
-      if (pending.current === 0) setSlow(false);
+    const onSettled = (e: Event) => {
+      const id = (e as CustomEvent<{ id: number }>).detail?.id;
+      if (id !== undefined) slowIds.current.delete(id);
+      if (slowIds.current.size === 0) setSlow(false);
     };
     const onError = (e: Event) => {
       const detail = (e as CustomEvent<ProviderError>).detail;

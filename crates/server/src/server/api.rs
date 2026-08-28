@@ -35,16 +35,16 @@ pub async fn search(
     }
 
     let page = body.page.max(1);
-    let mut results = state.search_provider.search(query, page).await?;
-    filter_web_only(&state, &mut results).await;
-    let result_count = results.len() as i32;
+    let mut sr = state.search_provider.search(query, page).await?;
+    filter_web_only(&state, &mut sr.results).await;
+    let result_count = sr.results.len() as i32;
 
     state
         .db
         .add_search(&claims.user_id, query, result_count)
         .await?;
 
-    Ok(Json(SearchResponse { results }))
+    Ok(Json(sr))
 }
 
 pub async fn browse(

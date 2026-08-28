@@ -228,9 +228,11 @@ pub struct SearchResultGroup {
 }
 
 ts! {
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct SearchResponse {
     pub results: Vec<SearchResultGroup>,
+    #[serde(default)]
+    pub provider_errors: Vec<ProviderError>,
 }
 }
 

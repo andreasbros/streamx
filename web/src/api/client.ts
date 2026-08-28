@@ -103,10 +103,12 @@ class ApiClient {
   }
 
   async search(data: SearchRequest): Promise<SearchResponse> {
-    return this.request<SearchResponse>("/api/search", {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
+    return this.watchProviders(
+      this.request<SearchResponse>("/api/search", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    );
   }
 
   async searchProviders(): Promise<{ providers: import("./types").ProviderInfo[] }> {
@@ -117,11 +119,16 @@ class ApiClient {
   /// "streamx:provider-slow" after 3s pending, "streamx:provider-settled"
   /// when it finishes, "streamx:provider-error" for provider failures
   /// carried in the response.
+  private watchSeq = 0;
+
   private async watchProviders<T extends { provider_errors?: import("./types").ProviderError[] }>(
     p: Promise<T>,
   ): Promise<T> {
+    // Ids (not counters) pair each slow signal with its own settle, so
+    // interleaved fast and slow requests can never strand the pill.
+    const id = ++this.watchSeq;
     const slowTimer = window.setTimeout(() => {
-      window.dispatchEvent(new CustomEvent("streamx:provider-slow"));
+      window.dispatchEvent(new CustomEvent("streamx:provider-slow", { detail: { id } }));
     }, 3000);
     try {
       const resp = await p;
@@ -133,7 +140,7 @@ class ApiClient {
       return resp;
     } finally {
       window.clearTimeout(slowTimer);
-      window.dispatchEvent(new CustomEvent("streamx:provider-settled"));
+      window.dispatchEvent(new CustomEvent("streamx:provider-settled", { detail: { id } }));
     }
   }
 

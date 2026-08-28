@@ -295,7 +295,7 @@ impl Api for LocalApi {
             if q.is_empty() {
                 return Err(ClientError::Backend("Query must not be empty".into()));
             }
-            let results = components
+            let sr = components
                 .search_provider
                 .search(&q, page.max(1))
                 .await
@@ -303,10 +303,10 @@ impl Api for LocalApi {
             if let Some(uid) = uid {
                 let _ = components
                     .database
-                    .add_search(&uid, &q, results.len() as i32)
+                    .add_search(&uid, &q, sr.results.len() as i32)
                     .await;
             }
-            Ok(SearchResponse { results })
+            Ok(sr)
         })
         .await
     }
