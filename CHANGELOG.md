@@ -4,6 +4,20 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.3.4] - 2026-08-28
+
+
+### Added
+
+- Providers_version in config.toml refreshes default providers (0a7588f6)
+- Hourly update check with version badges (d6fe0b77)
+- Show the version number in the update popup (72652892)
+
+### Fixed
+
+- Stamp the app version and refresh providers on upgrade (f66ed8e0)
+- Notice pills truncate gracefully instead of overflowing (6c9a74c4)
+
 ## [0.3.3] - 2026-08-28
 
 
