@@ -4522,17 +4522,21 @@ impl MainView {
                 div()
                     .flex()
                     .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .child(
                         div()
                             .text_size(px(theme.fs_2()))
                             .text_color(theme.fg_primary())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .truncate()
                             .child("Provider is slow to respond"),
                     )
                     .child(
                         div()
                             .text_size(px(theme.fs_1()))
                             .text_color(theme.fg_secondary())
+                            .truncate()
                             .child(SharedString::from(host)),
                     ),
             )
@@ -4589,11 +4593,14 @@ impl MainView {
                 div()
                     .flex()
                     .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
                     .child(
                         div()
                             .text_size(px(theme.fs_2()))
                             .text_color(theme.fg_primary())
                             .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .truncate()
                             .child(SharedString::from(format!(
                                 "New version v{latest} available"
                             ))),
@@ -4602,6 +4609,7 @@ impl MainView {
                         div()
                             .text_size(px(theme.fs_1()))
                             .text_color(theme.fg_secondary())
+                            .truncate()
                             .child("Download latest release"),
                     ),
             )
