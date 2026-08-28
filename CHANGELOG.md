@@ -4,6 +4,13 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.3.3] - 2026-08-28
+
+
+### Fixed
+
+- Consistent provider health on category and search; unstick slow pill (e005bf98)
+
 ## [0.3.2] - 2026-08-28
 
 
