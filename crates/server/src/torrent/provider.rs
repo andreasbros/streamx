@@ -140,10 +140,27 @@ impl Default for SearchProvider {
     }
 }
 
+/// reqwest errors hide the interesting part ("operation timed out",
+/// "connection refused") in their source chain; flatten it for logs
+/// and for messages surfaced to the UIs.
+pub fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut out = err.to_string();
+    let mut cur = err.source();
+    while let Some(src) = cur {
+        out.push_str(": ");
+        out.push_str(&src.to_string());
+        cur = src.source();
+    }
+    out
+}
+
 impl SearchProvider {
     pub fn new(providers: Vec<ProviderConfig>, socks5: Option<String>) -> Self {
+        // Dead hosts fail fast at connect; slow-but-alive origins get
+        // room to answer (the YTS mirror has been seen taking ~20s).
         let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(30))
             .user_agent("Mozilla/5.0 (X11; Linux x86_64) StreamX/0.1");
         if let Some(ref url) = socks5 {
             if let Ok(proxy) = reqwest::Proxy::all(url) {
@@ -360,6 +377,18 @@ impl SearchProvider {
         Ok(groups)
     }
 
+    /// Public descriptions of the configured providers (no secrets).
+    pub fn provider_infos(&self) -> Vec<streamx_api::types::ProviderInfo> {
+        self.providers
+            .iter()
+            .map(|p| streamx_api::types::ProviderInfo {
+                name: p.name.clone().unwrap_or_else(|| p.url.clone()),
+                kind: p.kind.clone(),
+                url: p.url.clone(),
+            })
+            .collect()
+    }
+
     pub async fn browse(
         &self,
         sort_by: &str,
@@ -368,7 +397,8 @@ impl SearchProvider {
         minimum_rating: Option<u32>,
         limit: u32,
         page: u32,
-    ) -> Result<Vec<SearchResultGroup>> {
+    ) -> Result<streamx_api::types::BrowseResponse> {
+        use streamx_api::types::{BrowseResponse, ProviderError};
         // Browse only works with catalog-based providers (not torrentio)
         let provider = match self
             .providers_by_kind("movies")
@@ -376,7 +406,7 @@ impl SearchProvider {
             .find(|p| p.format.as_deref().unwrap_or("yts") != "torrentio")
         {
             Some(p) => p,
-            None => return Ok(Vec::new()),
+            None => return Ok(BrowseResponse::default()),
         };
         let api_url = provider
             .api_url
@@ -402,29 +432,41 @@ impl SearchProvider {
             params.push(("genre", g));
         }
 
+        let provider_url = provider.url.clone();
+        let fail = |message: String| {
+            Ok(BrowseResponse {
+                results: Vec::new(),
+                provider_errors: vec![ProviderError {
+                    url: provider_url.clone(),
+                    message,
+                }],
+            })
+        };
         let response = match self.client.get(&api_url).query(&params).send().await {
             Ok(r) => r,
             Err(err) => {
-                tracing::warn!("YTS browse request failed: {err}");
-                return Ok(Vec::new());
+                let chain = error_chain(&err);
+                tracing::warn!("YTS browse request failed: {chain}");
+                return fail(chain);
             }
         };
 
         let yts: YtsResponse = match response.json().await {
             Ok(parsed) => parsed,
             Err(err) => {
-                tracing::warn!("Failed to parse YTS browse response: {err}");
-                return Ok(Vec::new());
+                let chain = error_chain(&err);
+                tracing::warn!("Failed to parse YTS browse response: {chain}");
+                return fail(format!("invalid response: {chain}"));
             }
         };
 
         if yts.status != "ok" {
-            return Ok(Vec::new());
+            return fail(format!("provider status: {}", yts.status));
         }
 
         let movies = match yts.data.and_then(|d| d.movies) {
             Some(m) => m,
-            None => return Ok(Vec::new()),
+            None => return Ok(BrowseResponse::default()),
         };
 
         let groups: Vec<SearchResultGroup> = movies
@@ -484,7 +526,10 @@ impl SearchProvider {
             proxy_posters(group, provider.id);
         }
 
-        Ok(groups)
+        Ok(BrowseResponse {
+            results: groups,
+            provider_errors: Vec::new(),
+        })
     }
 
     async fn search_movies_apibay(

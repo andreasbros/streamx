@@ -20,6 +20,7 @@ import { SurroundSound } from "./pages/SurroundSound";
 import { Admin } from "./pages/Admin";
 import { Downloads } from "./pages/Downloads";
 import { MusicPlayer } from "./pages/MusicPlayer";
+import { ProviderHealth } from "./components/ProviderHealth";
 import type { ReactNode } from "react";
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -47,6 +48,7 @@ function AppRoutes({
           <RequireAuth>
             <FavouritesProvider>
               <AudioPlayerProvider>
+                <ProviderHealth />
                 <Layout />
               </AudioPlayerProvider>
             </FavouritesProvider>

@@ -109,6 +109,34 @@ class ApiClient {
     });
   }
 
+  async searchProviders(): Promise<{ providers: import("./types").ProviderInfo[] }> {
+    return this.request<{ providers: import("./types").ProviderInfo[] }>("/api/search/providers");
+  }
+
+  /// Emits provider-health window events around a content request:
+  /// "streamx:provider-slow" after 3s pending, "streamx:provider-settled"
+  /// when it finishes, "streamx:provider-error" for provider failures
+  /// carried in the response.
+  private async watchProviders<T extends { provider_errors?: import("./types").ProviderError[] }>(
+    p: Promise<T>,
+  ): Promise<T> {
+    const slowTimer = window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("streamx:provider-slow"));
+    }, 3000);
+    try {
+      const resp = await p;
+      if (resp.provider_errors && resp.provider_errors.length > 0) {
+        window.dispatchEvent(
+          new CustomEvent("streamx:provider-error", { detail: resp.provider_errors[0] }),
+        );
+      }
+      return resp;
+    } finally {
+      window.clearTimeout(slowTimer);
+      window.dispatchEvent(new CustomEvent("streamx:provider-settled"));
+    }
+  }
+
   async browse(params: { sort_by?: string; query_term?: string; genre?: string; minimum_rating?: number; limit?: number; page?: number }): Promise<SearchResponse> {
     const q = new URLSearchParams();
     if (params.sort_by) q.set("sort_by", params.sort_by);
@@ -117,7 +145,7 @@ class ApiClient {
     if (params.minimum_rating) q.set("minimum_rating", String(params.minimum_rating));
     if (params.limit) q.set("limit", String(params.limit));
     if (params.page) q.set("page", String(params.page));
-    return this.request<SearchResponse>(`/api/search/browse?${q.toString()}`);
+    return this.watchProviders(this.request<SearchResponse>(`/api/search/browse?${q.toString()}`));
   }
 
   async searchHistory(): Promise<SearchHistoryResponse> {

@@ -56,8 +56,20 @@ export interface SearchResult {
   source_type?: string;
 }
 
+export interface ProviderError {
+  url: string;
+  message: string;
+}
+
+export interface ProviderInfo {
+  name: string;
+  kind: string;
+  url: string;
+}
+
 export interface SearchResponse {
   results: SearchResultGroup[];
+  provider_errors?: ProviderError[];
 }
 
 export interface StreamRequest {

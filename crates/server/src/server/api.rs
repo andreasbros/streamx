@@ -69,13 +69,26 @@ pub async fn browse(
         .and_then(|s| s.parse().ok())
         .unwrap_or(1u32);
 
-    let mut results = state
+    let mut browse = state
         .search_provider
         .browse(sort_by, query_term, genre, minimum_rating, limit, page)
         .await?;
-    filter_web_only(&state, &mut results).await;
+    filter_web_only(&state, &mut browse.results).await;
 
-    Ok(Json(serde_json::json!({ "results": results })))
+    Ok(Json(serde_json::json!({
+        "results": browse.results,
+        "provider_errors": browse.provider_errors,
+    })))
+}
+
+/// Configured providers (name, kind, url only) so the UIs can label
+/// slow-provider indicators before a request settles.
+pub async fn search_providers(
+    State(state): State<AppState>,
+    _claims: AuthenticatedUser,
+) -> std::result::Result<impl IntoResponse, Error> {
+    let providers: Vec<streamx_api::types::ProviderInfo> = state.search_provider.provider_infos();
+    Ok(Json(serde_json::json!({ "providers": providers })))
 }
 
 /// When the `web_only` server setting is on, keep only WEB source

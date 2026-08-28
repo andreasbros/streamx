@@ -131,6 +131,14 @@ pub struct AppState {
     pub category_need_more: std::sync::atomic::AtomicBool,
     pub toast: RwLock<Option<Toast>>,
 
+    /// Provider health surfaced to the UI: a request running longer
+    /// than 3s marks the provider slow (url); a failed provider sets a
+    /// dismissible error shown centered.
+    pub provider_slow: RwLock<Option<String>>,
+    pub provider_error: RwLock<Option<streamx_api::types::ProviderError>>,
+    pub browse_started_at: RwLock<Option<Instant>>,
+    pub provider_infos: RwLock<Vec<streamx_api::types::ProviderInfo>>,
+
     pub history: RwLock<Vec<WatchHistoryItem>>,
     pub history_loading: RwLock<bool>,
     pub downloads: RwLock<Vec<DownloadItem>>,
@@ -291,6 +299,10 @@ impl AppState {
             category_done: RwLock::new(false),
             category_need_more: std::sync::atomic::AtomicBool::new(false),
             toast: RwLock::new(None),
+            provider_slow: RwLock::new(None),
+            provider_error: RwLock::new(None),
+            browse_started_at: RwLock::new(None),
+            provider_infos: RwLock::new(Vec::new()),
             history: RwLock::new(Vec::new()),
             history_loading: RwLock::new(false),
             downloads: RwLock::new(Vec::new()),

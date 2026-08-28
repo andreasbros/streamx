@@ -438,6 +438,27 @@ impl MainView {
                     }
                 }
 
+                // A browse running longer than 3s marks the movie
+                // provider slow; cleared when the request settles.
+                {
+                    let started = *state.browse_started_at.read();
+                    if let Some(t0) = started {
+                        if t0.elapsed() > std::time::Duration::from_secs(3)
+                            && state.provider_slow.read().is_none()
+                        {
+                            let url = state
+                                .provider_infos
+                                .read()
+                                .iter()
+                                .find(|p| p.kind == "movies")
+                                .map(|p| p.url.clone())
+                                .unwrap_or_else(|| "content provider".to_string());
+                            *state.provider_slow.write() = Some(url);
+                            state.mark_dirty();
+                        }
+                    }
+                }
+
                 // Auto-dismiss toasts after 3 seconds.
                 {
                     let clear = state
@@ -4394,14 +4415,193 @@ impl MainView {
             .text_color(theme.fg_primary())
             .child(SharedString::from(toast.message.clone()))
     }
+
+    /// Top-right pill: a provider is taking longer than 3s. Pulsing
+    /// dots give a calm "still working" heartbeat next to the host.
+    fn provider_slow_view(&self, url: &str, below_toast: bool) -> impl IntoElement {
+        use gpui::{Animation, AnimationExt as _};
+        let theme = self.theme;
+        let host = url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        let top = if below_toast {
+            theme.space_4() * 2.0 + 56.0
+        } else {
+            theme.space_4()
+        };
+        let dot = |i: usize| {
+            div()
+                .size(px(6.0))
+                .rounded_full()
+                .bg(theme.accent())
+                .with_animation(
+                    ("provider-slow-dot", i),
+                    Animation::new(std::time::Duration::from_millis(900)).repeat(),
+                    move |el, delta| {
+                        let phase = (delta + i as f32 * 0.2) % 1.0;
+                        let pulse = 1.0 - (phase - 0.5).abs() * 1.6;
+                        el.opacity(pulse.clamp(0.25, 1.0))
+                    },
+                )
+        };
+        div()
+            .absolute()
+            .top(px(top))
+            .right(px(theme.space_4()))
+            .max_w(px(380.0))
+            .p(px(theme.space_3()))
+            .rounded(px(theme.radius_lg()))
+            .bg(theme.bg_surface())
+            .border_1()
+            .border_color(theme.accent())
+            .flex()
+            .items_center()
+            .gap(px(theme.space_3()))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .child(dot(0))
+                    .child(dot(1))
+                    .child(dot(2)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(theme.fs_2()))
+                            .text_color(theme.fg_primary())
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Provider is slow to respond"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme.fs_1()))
+                            .text_color(theme.fg_secondary())
+                            .child(SharedString::from(host)),
+                    ),
+            )
+    }
+
+    /// Centered card for a failed provider: what broke, where, and a
+    /// single dismiss action.
+    fn provider_error_view(
+        &self,
+        err: &streamx_api::types::ProviderError,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = self.theme;
+        let host = err
+            .url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        let message = err.message.clone();
+        let state = self.state.clone();
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000088))
+            .occlude()
+            .child(
+                div()
+                    .max_w(px(440.0))
+                    .p(px(theme.space_5()))
+                    .rounded(px(theme.radius_lg()))
+                    .bg(theme.bg_surface())
+                    .border_1()
+                    .border_color(theme.error())
+                    .shadow_lg()
+                    .flex()
+                    .flex_col()
+                    .gap(px(theme.space_3()))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(theme.space_3()))
+                            .child(
+                                div()
+                                    .size(px(36.0))
+                                    .rounded_full()
+                                    .bg(theme.error())
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(px(theme.fs_3()))
+                                    .text_color(theme.fg_on_accent())
+                                    .child("!"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(theme.fs_3()))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(theme.fg_primary())
+                                    .child("Provider unavailable"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px(px(theme.space_3()))
+                            .py(px(theme.space_2()))
+                            .rounded(px(theme.radius_md()))
+                            .bg(theme.bg_elevated())
+                            .text_size(px(theme.fs_1()))
+                            .text_color(theme.fg_secondary())
+                            .child(SharedString::from(host)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme.fs_2()))
+                            .text_color(theme.fg_primary())
+                            .child(SharedString::from(message)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme.fs_1()))
+                            .text_color(theme.fg_secondary())
+                            .child("Titles from this source are hidden until it recovers."),
+                    )
+                    .child(
+                        crate::components::primary_button(
+                            "provider-error-dismiss",
+                            "Got it",
+                            &theme,
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            *state.provider_error.write() = None;
+                            state.mark_dirty();
+                            cx.notify();
+                        })),
+                    ),
+            )
+    }
 }
 
 async fn load_browse(state: &Arc<AppState>) {
     use streamx_api::client::BrowseParams;
 
     *state.browse_loading.write() = true;
+    *state.browse_started_at.write() = Some(std::time::Instant::now());
     state.mark_dirty();
     let client: Client = state.client.read().clone();
+
+    // Provider list fetched once; labels the slow-provider indicator.
+    if state.provider_infos.read().is_empty() {
+        let c = client.clone();
+        if let Ok(infos) = runtime::spawn(async move { c.search_providers().await }).await {
+            *state.provider_infos.write() = infos;
+        }
+    }
     let sections: [(&str, BrowseParams); 9] = [
         (
             "this_year",
@@ -4492,10 +4692,16 @@ async fn load_browse(state: &Arc<AppState>) {
         handles.push((name, runtime::spawn(async move { c.browse(&p).await })));
     }
     let mut out = BrowseData::default();
+    let mut provider_errors: Vec<streamx_api::types::ProviderError> = Vec::new();
     for (name, fut) in handles {
-        if let Ok(rows) = fut.await {
+        if let Ok(resp) = fut.await {
+            for e in resp.provider_errors {
+                if !provider_errors.iter().any(|p| p.url == e.url) {
+                    provider_errors.push(e);
+                }
+            }
             let rows: Vec<std::sync::Arc<streamx_api::types::SearchResultGroup>> =
-                rows.into_iter().map(std::sync::Arc::new).collect();
+                resp.results.into_iter().map(std::sync::Arc::new).collect();
             match name {
                 "this_year" => out.this_year = rows,
                 "latest" => out.latest = rows,
@@ -4512,6 +4718,11 @@ async fn load_browse(state: &Arc<AppState>) {
     }
     *state.browse.write() = out;
     *state.browse_loading.write() = false;
+    *state.browse_started_at.write() = None;
+    *state.provider_slow.write() = None;
+    if let Some(err) = provider_errors.into_iter().next() {
+        *state.provider_error.write() = Some(err);
+    }
     state.mark_dirty();
 }
 
@@ -4848,7 +5059,8 @@ pub async fn load_category_page(state: &Arc<AppState>) {
     params.page = Some(next);
     let client = state.client.read().clone();
     match client.browse(&params).await {
-        Ok(rows) if !rows.is_empty() => {
+        Ok(resp) if !resp.results.is_empty() => {
+            let rows = resp.results;
             let mut items = state.category_items.write();
             let existing: std::collections::HashSet<String> = items
                 .iter()
@@ -4872,7 +5084,10 @@ pub async fn load_category_page(state: &Arc<AppState>) {
                 *state.category_done.write() = true;
             }
         }
-        Ok(_) => {
+        Ok(resp) => {
+            if let Some(err) = resp.provider_errors.into_iter().next() {
+                *state.provider_error.write() = Some(err);
+            }
             *state.category_done.write() = true;
         }
         Err(e) => {
@@ -5185,6 +5400,7 @@ impl Render for MainView {
         }
         let drawer_open = *self.state.drawer_open.read();
         let toast = self.state.toast.read().clone();
+        let toast_visible = toast.is_some();
 
         let content = match page {
             Page::Login => div()
@@ -5291,6 +5507,17 @@ impl Render for MainView {
 
         if let Some(t) = toast {
             root = root.child(self.toast_view(&t));
+        }
+        {
+            let slow = self.state.provider_slow.read().clone();
+            if let Some(url) = slow {
+                let below_toast = toast_visible;
+                root = root.child(self.provider_slow_view(&url, below_toast));
+            }
+            let perr = self.state.provider_error.read().clone();
+            if let Some(err) = perr {
+                root = root.child(self.provider_error_view(&err, cx));
+            }
         }
         if drawer_open {
             root = root.child(self.drawer_view(cx));

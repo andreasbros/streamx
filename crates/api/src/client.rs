@@ -8,10 +8,10 @@
 
 use crate::routes;
 use crate::types::{
-    CreateStreamRequest, CreateStreamResponse, FavouritesResponse, LoginRequest, LoginResponse,
-    MusicVideoSearchResponse, Playlist, PlaylistTrack, ResolveMagnetResponse, SearchRequest,
-    SearchResponse, SearchResultGroup, StreamStatus, TvSearchResponse, User, VersionResponse,
-    WatchHistoryResponse,
+    BrowseResponse, CreateStreamRequest, CreateStreamResponse, FavouritesResponse, LoginRequest,
+    LoginResponse, MusicVideoSearchResponse, Playlist, PlaylistTrack, ProviderInfo,
+    ResolveMagnetResponse, SearchRequest, SearchResponse, StreamStatus, TvSearchResponse, User,
+    VersionResponse, WatchHistoryResponse,
 };
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -63,7 +63,10 @@ pub trait Api: Send + Sync {
     }
     async fn me(&self) -> ClientResult<User>;
     async fn search(&self, query: &str, page: u32) -> ClientResult<SearchResponse>;
-    async fn browse(&self, params: &BrowseParams) -> ClientResult<Vec<SearchResultGroup>>;
+    async fn browse(&self, params: &BrowseParams) -> ClientResult<BrowseResponse>;
+
+    /// Configured content providers, for labeling provider status UI.
+    async fn search_providers(&self) -> ClientResult<Vec<ProviderInfo>>;
     async fn create_stream(&self, req: &CreateStreamRequest) -> ClientResult<CreateStreamResponse>;
     async fn stream_files(
         &self,
@@ -167,7 +170,8 @@ impl Client {
     delegate!(needs_setup(&self) -> ClientResult<bool>);
     delegate!(me(&self) -> ClientResult<User>);
     delegate!(search(&self, query: &str, page: u32) -> ClientResult<SearchResponse>);
-    delegate!(browse(&self, params: &BrowseParams) -> ClientResult<Vec<SearchResultGroup>>);
+    delegate!(browse(&self, params: &BrowseParams) -> ClientResult<BrowseResponse>);
+    delegate!(search_providers(&self) -> ClientResult<Vec<ProviderInfo>>);
     delegate!(create_stream(&self, req: &CreateStreamRequest) -> ClientResult<CreateStreamResponse>);
     delegate!(stream_files(&self, stream_id: &str) -> ClientResult<(Vec<crate::types::TorrentFile>, Option<String>)>);
     delegate!(stream_status(&self, stream_id: &str) -> ClientResult<StreamStatus>);
@@ -192,12 +196,6 @@ impl Client {
 }
 
 // ===================== HttpClient =====================
-
-#[derive(Deserialize, Debug)]
-struct BrowseEnvelope {
-    #[serde(default)]
-    results: Vec<SearchResultGroup>,
-}
 
 #[derive(Deserialize, Debug)]
 struct FilesEnvelope {
@@ -364,7 +362,21 @@ impl Api for HttpClient {
         .await
     }
 
-    async fn browse(&self, p: &BrowseParams) -> ClientResult<Vec<SearchResultGroup>> {
+    async fn search_providers(&self) -> ClientResult<Vec<ProviderInfo>> {
+        #[derive(serde::Deserialize)]
+        struct Envelope {
+            providers: Vec<ProviderInfo>,
+        }
+        let env: Envelope = Self::decode(
+            self.authed(self.http.get(self.url("/api/search/providers")))
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(env.providers)
+    }
+
+    async fn browse(&self, p: &BrowseParams) -> ClientResult<BrowseResponse> {
         let mut params: Vec<(&str, String)> = Vec::new();
         if let Some(ref v) = p.sort_by {
             params.push(("sort_by", v.clone()));
@@ -384,13 +396,13 @@ impl Api for HttpClient {
         if let Some(v) = p.page {
             params.push(("page", v.to_string()));
         }
-        let env: BrowseEnvelope = Self::decode(
+        let env: BrowseResponse = Self::decode(
             self.authed(self.http.get(self.url(routes::BROWSE)).query(&params))
                 .send()
                 .await?,
         )
         .await?;
-        Ok(env.results)
+        Ok(env)
     }
 
     async fn create_stream(&self, req: &CreateStreamRequest) -> ClientResult<CreateStreamResponse> {

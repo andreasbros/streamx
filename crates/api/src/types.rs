@@ -22,6 +22,40 @@ macro_rules! ts {
     };
 }
 
+// ===================== Providers =====================
+
+ts! {
+/// A content provider that failed while serving a request. Surfaced to
+/// the UIs so users see which upstream is unavailable and why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderError {
+    pub url: String,
+    pub message: String,
+}
+}
+
+ts! {
+/// Movie browse results plus any provider failures encountered while
+/// producing them.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BrowseResponse {
+    pub results: Vec<SearchResultGroup>,
+    #[serde(default)]
+    pub provider_errors: Vec<ProviderError>,
+}
+}
+
+ts! {
+/// Public description of a configured provider (no credentials), used
+/// by the UIs to label slow-provider indicators.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderInfo {
+    pub name: String,
+    pub kind: String,
+    pub url: String,
+}
+}
+
 // ===================== Torrent =====================
 
 ts! {

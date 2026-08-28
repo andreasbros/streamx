@@ -121,6 +121,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
     let search_routes = Router::new()
         .route("/", post(api::search))
         .route("/browse", get(api::browse))
+        .route("/providers", get(api::search_providers))
         .route("/history", get(api::search_history));
 
     let stream_routes = Router::new()

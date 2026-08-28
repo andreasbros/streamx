@@ -12,8 +12,8 @@ use streamx_api::client::{Api, BrowseParams, ClientError, ClientResult, HttpClie
 use streamx_api::types::{
     CreateStreamRequest, CreateStreamResponse, FavouritesResponse, LoginResponse,
     MusicVideoResult as WireMusic, MusicVideoSearchResponse, Playlist, PlaylistTrack,
-    ResolveMagnetResponse, SearchResponse, SearchResultGroup, StreamStatus, TorrentFile,
-    TvSearchResponse, User, VersionResponse, WatchHistoryItem, WatchHistoryResponse,
+    ResolveMagnetResponse, SearchResponse, StreamStatus, TorrentFile, TvSearchResponse, User,
+    VersionResponse, WatchHistoryItem, WatchHistoryResponse,
 };
 
 use crate::error::Error as ServerError;
@@ -311,7 +311,7 @@ impl Api for LocalApi {
         .await
     }
 
-    async fn browse(&self, p: &BrowseParams) -> ClientResult<Vec<SearchResultGroup>> {
+    async fn browse(&self, p: &BrowseParams) -> ClientResult<streamx_api::types::BrowseResponse> {
         let components = self.components.clone();
         let sort_by = p.sort_by.clone().unwrap_or_else(|| "date_added".into());
         let query_term = p.query_term.clone();
@@ -334,6 +334,10 @@ impl Api for LocalApi {
                 .map_err(err_to_client)
         })
         .await
+    }
+
+    async fn search_providers(&self) -> ClientResult<Vec<streamx_api::types::ProviderInfo>> {
+        Ok(self.components.search_provider.provider_infos())
     }
 
     // -------- streams --------
