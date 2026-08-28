@@ -5,19 +5,19 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use std::path::{Path, PathBuf};
 
-/// Version of the built-in provider set. Bump when the default
-/// providers change (new domains, new sources): on startup a
-/// config.toml with a different or missing `providers_version` gets
-/// its `[[providers]]` replaced with the current defaults, every other
-/// setting untouched. Users persist custom providers in providers.toml
-/// (always appended) or by overriding config.toml providers within a
-/// version.
-pub const PROVIDERS_VERSION: u32 = 2;
+/// The running binary's version. Stamped into config.toml: on startup
+/// a config recording a different (or no) app version gets its
+/// `[[providers]]` replaced with this binary's defaults and the stamp
+/// updated, every other setting untouched. Users persist custom
+/// providers in providers.toml (always appended) or by overriding
+/// config.toml providers until the next upgrade.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    /// App version that last wrote the provider set (see APP_VERSION).
     #[serde(default)]
-    pub providers_version: u32,
+    pub version: String,
     #[serde(default = "default_server")]
     pub server: ServerConfig,
     #[serde(default = "default_torrent")]
@@ -375,7 +375,7 @@ fn default_data_dir() -> Result<PathBuf> {
     Ok(home.join(".streamx"))
 }
 
-/// The built-in provider set, version `PROVIDERS_VERSION`. Source of
+/// The built-in provider set shipped with this binary. Source of
 /// truth for provider refreshes; the config template must stay in sync
 /// (guarded by a unit test).
 pub fn default_providers() -> Vec<ProviderConfig> {
@@ -426,13 +426,16 @@ pub fn default_providers() -> Vec<ProviderConfig> {
 }
 
 fn default_config_content() -> String {
-    r#"# Built-in provider set version; managed by StreamX. When a new
-# release ships updated default providers, a mismatch here replaces
-# the [[providers]] below and nothing else. Keep custom providers in
-# providers.toml to persist them across provider updates.
-providers_version = 2
-
-[server]
+    let header = format!(
+        "# App version that wrote this provider set; managed by StreamX.\n\
+         # After an upgrade the version differs, so the [[providers]] below\n\
+         # are replaced with the new build's defaults and nothing else.\n\
+         # Keep custom providers in providers.toml to persist them across\n\
+         # upgrades.\n\
+         version = \"{APP_VERSION}\"\n\n"
+    );
+    header
+        + r#"[server]
 port = 8999
 bind = "127.0.0.1"
 open_browser = false
@@ -503,7 +506,6 @@ url = "https://apibay.org"
 format = "apibay"
 category = "101"
 "#
-    .to_string()
 }
 
 /// Provider entry in providers.toml (no id required)
@@ -646,22 +648,21 @@ pub fn load_config(cli: &Cli) -> Result<AppConfig> {
     Ok(config)
 }
 
-/// Replace the config's providers with the current defaults when its
-/// providers_version is missing or different, bumping the version. The
-/// file edit goes through toml_edit so every other setting, comment,
-/// and unknown key survives byte-for-byte. A failed write is logged
-/// and the in-memory refresh still applies.
+/// Replace the config's providers with this binary's defaults when the
+/// recorded app version is missing or different, stamping the current
+/// version. The file edit goes through toml_edit so every other
+/// setting, comment, and unknown key survives byte-for-byte. A failed
+/// write is logged and the in-memory refresh still applies.
 fn ensure_providers_version(path: &Path, config: &mut AppConfig) {
-    if config.providers_version == PROVIDERS_VERSION {
+    if config.version == APP_VERSION {
         return;
     }
-    let old = config.providers_version;
+    let old = std::mem::replace(&mut config.version, APP_VERSION.to_string());
     config.providers = default_providers();
-    config.providers_version = PROVIDERS_VERSION;
     tracing::info!(
-        from = old,
-        to = PROVIDERS_VERSION,
-        "provider set out of date; replaced with current defaults"
+        from = %if old.is_empty() { "<none>".to_string() } else { old },
+        to = APP_VERSION,
+        "app version changed; providers replaced with this build's defaults"
     );
     if let Err(e) = rewrite_providers(path) {
         tracing::warn!("could not update providers in {}: {e}", path.display());
@@ -680,7 +681,7 @@ fn rewrite_providers(path: &Path) -> std::result::Result<(), String> {
     })
     .map_err(|e| e.to_string())?;
     let rendered_doc: toml_edit::DocumentMut = rendered.parse().map_err(|e| format!("{e}"))?;
-    doc["providers_version"] = toml_edit::value(PROVIDERS_VERSION as i64);
+    doc["version"] = toml_edit::value(APP_VERSION);
     doc["providers"] = rendered_doc["providers"].clone();
     std::fs::write(path, doc.to_string()).map_err(|e| e.to_string())?;
     Ok(())
@@ -754,13 +755,13 @@ mod provider_version_tests {
         config
     }
 
-    /// The template written on first run must carry the current version
-    /// and exactly the default provider set, or fresh installs and
-    /// refreshed installs would diverge.
+    /// The template written on first run must carry the current app
+    /// version and exactly the default provider set, or fresh installs
+    /// and refreshed installs would diverge.
     #[test]
     fn template_is_in_sync_with_default_providers() {
         let parsed: AppConfig = toml::from_str(&default_config_content()).expect("template parses");
-        assert_eq!(parsed.providers_version, PROVIDERS_VERSION);
+        assert_eq!(parsed.version, APP_VERSION);
         let defaults = default_providers();
         assert_eq!(parsed.providers.len(), defaults.len());
         for (a, b) in parsed.providers.iter().zip(defaults.iter()) {
@@ -796,7 +797,7 @@ api_url = "https://movies-api.accel.li/api/v2/list_movies.json"
         );
         let config = load_and_refresh(&path);
 
-        assert_eq!(config.providers_version, PROVIDERS_VERSION);
+        assert_eq!(config.version, APP_VERSION);
         assert!(config.providers.iter().any(|p| p.url == "https://yts.gg"));
         assert!(!config.providers.iter().any(|p| p.url.contains("accel.li")));
         assert_eq!(config.server.port, 12345);
@@ -811,7 +812,7 @@ api_url = "https://movies-api.accel.li/api/v2/list_movies.json"
             "unknown keys survive"
         );
         assert!(on_disk.contains("port = 12345"));
-        assert!(on_disk.contains(&format!("providers_version = {PROVIDERS_VERSION}")));
+        assert!(on_disk.contains(&format!("version = \"{APP_VERSION}\"")));
         assert!(on_disk.contains("https://yts.gg"));
         assert!(!on_disk.contains("accel.li"));
         let reparsed: AppConfig = toml::from_str(&on_disk).expect("rewritten file parses");
@@ -822,7 +823,7 @@ api_url = "https://movies-api.accel.li/api/v2/list_movies.json"
     fn matching_version_leaves_file_and_custom_providers_alone() {
         let tmp = tempfile::tempdir().expect("tmpdir");
         let content = format!(
-            r#"providers_version = {PROVIDERS_VERSION}
+            r#"version = "{APP_VERSION}"
 
 [server]
 port = 9000
@@ -847,7 +848,7 @@ url = "https://my-private-mirror.example"
         let tmp = tempfile::tempdir().expect("tmpdir");
         let path = write(
             tmp.path(),
-            r#"providers_version = 1
+            r#"version = "0.0.1"
 
 [[providers]]
 id = 9
@@ -856,7 +857,7 @@ url = "https://stale-mirror.example"
 "#,
         );
         let config = load_and_refresh(&path);
-        assert_eq!(config.providers_version, PROVIDERS_VERSION);
+        assert_eq!(config.version, APP_VERSION);
         assert!(config.providers.iter().any(|p| p.url == "https://yts.gg"));
         assert!(!config
             .providers
@@ -869,13 +870,10 @@ url = "https://stale-mirror.example"
         let tmp = tempfile::tempdir().expect("tmpdir");
         let path = write(
             tmp.path(),
-            &format!(
-                "providers_version = {}\n\n[[providers]]\nid = 9\nkind = \"movies\"\nurl = \"https://x.example\"\n",
-                PROVIDERS_VERSION + 10
-            ),
+            "version = \"99.0.0\"\n\n[[providers]]\nid = 9\nkind = \"movies\"\nurl = \"https://x.example\"\n",
         );
         let config = load_and_refresh(&path);
-        assert_eq!(config.providers_version, PROVIDERS_VERSION);
+        assert_eq!(config.version, APP_VERSION);
         assert!(config.providers.iter().any(|p| p.url == "https://yts.gg"));
     }
 
@@ -884,7 +882,7 @@ url = "https://stale-mirror.example"
         let tmp = tempfile::tempdir().expect("tmpdir");
         let path = tmp.path().join("config.toml");
         let config = load_from_file(&path).expect("creates default");
-        assert_eq!(config.providers_version, PROVIDERS_VERSION);
+        assert_eq!(config.version, APP_VERSION);
         assert!(path.exists());
     }
 
@@ -907,7 +905,7 @@ url = "https://stale-mirror.example"
         );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("chmod");
         let config = load_and_refresh(&path);
-        assert_eq!(config.providers_version, PROVIDERS_VERSION);
+        assert_eq!(config.version, APP_VERSION);
         assert!(config.providers.iter().any(|p| p.url == "https://yts.gg"));
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).ok();
     }

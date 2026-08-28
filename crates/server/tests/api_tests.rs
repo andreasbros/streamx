@@ -19,6 +19,7 @@ async fn start_test_server() -> TestServer {
     let port = portpicker::pick_unused_port().unwrap();
 
     let config = streamx::config::AppConfig {
+        version: streamx::config::APP_VERSION.to_string(),
         server: streamx::config::ServerConfig {
             port,
             bind: "127.0.0.1".to_string(),
@@ -691,6 +692,7 @@ async fn admin_user_creation_via_config() {
     let port = portpicker::pick_unused_port().unwrap();
 
     let config = streamx::config::AppConfig {
+        version: streamx::config::APP_VERSION.to_string(),
         server: streamx::config::ServerConfig {
             port,
             bind: "127.0.0.1".to_string(),

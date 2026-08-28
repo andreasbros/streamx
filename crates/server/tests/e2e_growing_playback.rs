@@ -40,6 +40,7 @@ async fn start_server() -> GrowingServer {
     let port = portpicker::pick_unused_port().expect("port");
 
     let config = streamx::config::AppConfig {
+        version: streamx::config::APP_VERSION.to_string(),
         server: streamx::config::ServerConfig {
             port,
             bind: "127.0.0.1".to_string(),
