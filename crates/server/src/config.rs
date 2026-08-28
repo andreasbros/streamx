@@ -5,8 +5,19 @@ use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use std::path::{Path, PathBuf};
 
+/// Version of the built-in provider set. Bump when the default
+/// providers change (new domains, new sources): on startup a
+/// config.toml with a different or missing `providers_version` gets
+/// its `[[providers]]` replaced with the current defaults, every other
+/// setting untouched. Users persist custom providers in providers.toml
+/// (always appended) or by overriding config.toml providers within a
+/// version.
+pub const PROVIDERS_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub providers_version: u32,
     #[serde(default = "default_server")]
     pub server: ServerConfig,
     #[serde(default = "default_torrent")]
@@ -364,8 +375,64 @@ fn default_data_dir() -> Result<PathBuf> {
     Ok(home.join(".streamx"))
 }
 
+/// The built-in provider set, version `PROVIDERS_VERSION`. Source of
+/// truth for provider refreshes; the config template must stay in sync
+/// (guarded by a unit test).
+pub fn default_providers() -> Vec<ProviderConfig> {
+    let p = |id: u32, name: &str, kind: &str, url: &str| ProviderConfig {
+        id,
+        kind: kind.to_string(),
+        url: url.to_string(),
+        name: Some(name.to_string()),
+        api_url: None,
+        format: None,
+        category: None,
+        trackers: Vec::new(),
+    };
+    vec![
+        ProviderConfig {
+            api_url: Some("https://yts.gg/api/v2/list_movies.json".to_string()),
+            ..p(1, "yts", "movies", "https://yts.gg")
+        },
+        ProviderConfig {
+            format: Some("torrentio".to_string()),
+            ..p(
+                5,
+                "torrentio",
+                "movies",
+                "https://torrentio.strem.fun/providers=yts,1337x,thepiratebay",
+            )
+        },
+        ProviderConfig {
+            format: Some("torrentio".to_string()),
+            ..p(
+                2,
+                "torrentio",
+                "tv",
+                "https://torrentio.strem.fun/providers=eztv,1337x,thepiratebay",
+            )
+        },
+        ProviderConfig {
+            format: Some("apibay".to_string()),
+            category: Some("601".to_string()),
+            ..p(3, "tpb", "music-videos", "https://apibay.org")
+        },
+        ProviderConfig {
+            format: Some("apibay".to_string()),
+            category: Some("101".to_string()),
+            ..p(4, "tpb", "music", "https://apibay.org")
+        },
+    ]
+}
+
 fn default_config_content() -> String {
-    r#"[server]
+    r#"# Built-in provider set version; managed by StreamX. When a new
+# release ships updated default providers, a mismatch here replaces
+# the [[providers]] below and nothing else. Keep custom providers in
+# providers.toml to persist them across provider updates.
+providers_version = 2
+
+[server]
 port = 8999
 bind = "127.0.0.1"
 open_browser = false
@@ -403,8 +470,8 @@ default_theme = "dark"
 id = 1
 name = "yts"
 kind = "movies"
-url = "https://yts.bz"
-api_url = "https://movies-api.accel.li/api/v2/list_movies.json"
+url = "https://yts.gg"
+api_url = "https://yts.gg/api/v2/list_movies.json"
 
 [[providers]]
 id = 5
@@ -535,6 +602,7 @@ pub fn load_config(cli: &Cli) -> Result<AppConfig> {
     };
 
     let mut config = load_from_file(&config_path)?;
+    ensure_providers_version(&config_path, &mut config);
 
     if config.auth.jwt_secret.is_empty() {
         config.auth.jwt_secret = generate_jwt_secret();
@@ -576,6 +644,46 @@ pub fn load_config(cli: &Cli) -> Result<AppConfig> {
     ensure_directories(&config)?;
 
     Ok(config)
+}
+
+/// Replace the config's providers with the current defaults when its
+/// providers_version is missing or different, bumping the version. The
+/// file edit goes through toml_edit so every other setting, comment,
+/// and unknown key survives byte-for-byte. A failed write is logged
+/// and the in-memory refresh still applies.
+fn ensure_providers_version(path: &Path, config: &mut AppConfig) {
+    if config.providers_version == PROVIDERS_VERSION {
+        return;
+    }
+    let old = config.providers_version;
+    config.providers = default_providers();
+    config.providers_version = PROVIDERS_VERSION;
+    tracing::info!(
+        from = old,
+        to = PROVIDERS_VERSION,
+        "provider set out of date; replaced with current defaults"
+    );
+    if let Err(e) = rewrite_providers(path) {
+        tracing::warn!("could not update providers in {}: {e}", path.display());
+    }
+}
+
+fn rewrite_providers(path: &Path) -> std::result::Result<(), String> {
+    #[derive(Serialize)]
+    struct ProvidersOnly {
+        providers: Vec<ProviderConfig>,
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|e| format!("{e}"))?;
+    let rendered = toml_edit::ser::to_string_pretty(&ProvidersOnly {
+        providers: default_providers(),
+    })
+    .map_err(|e| e.to_string())?;
+    let rendered_doc: toml_edit::DocumentMut = rendered.parse().map_err(|e| format!("{e}"))?;
+    doc["providers_version"] = toml_edit::value(PROVIDERS_VERSION as i64);
+    doc["providers"] = rendered_doc["providers"].clone();
+    std::fs::write(path, doc.to_string()).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn load_from_file(path: &Path) -> Result<AppConfig> {
@@ -628,4 +736,179 @@ fn ensure_directories(config: &AppConfig) -> Result<()> {
     std::fs::create_dir_all(&dht_dir).context(error::IoSnafu)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod provider_version_tests {
+    use super::*;
+
+    fn write(dir: &std::path::Path, content: &str) -> PathBuf {
+        let p = dir.join("config.toml");
+        std::fs::write(&p, content).expect("write config");
+        p
+    }
+
+    fn load_and_refresh(path: &Path) -> AppConfig {
+        let mut config = load_from_file(path).expect("load");
+        ensure_providers_version(path, &mut config);
+        config
+    }
+
+    /// The template written on first run must carry the current version
+    /// and exactly the default provider set, or fresh installs and
+    /// refreshed installs would diverge.
+    #[test]
+    fn template_is_in_sync_with_default_providers() {
+        let parsed: AppConfig = toml::from_str(&default_config_content()).expect("template parses");
+        assert_eq!(parsed.providers_version, PROVIDERS_VERSION);
+        let defaults = default_providers();
+        assert_eq!(parsed.providers.len(), defaults.len());
+        for (a, b) in parsed.providers.iter().zip(defaults.iter()) {
+            assert_eq!((a.id, &a.kind, &a.url), (b.id, &b.kind, &b.url));
+            assert_eq!(a.api_url, b.api_url);
+            assert_eq!(a.format, b.format);
+            assert_eq!(a.category, b.category);
+        }
+    }
+
+    #[test]
+    fn missing_version_replaces_providers_and_keeps_everything_else() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write(
+            tmp.path(),
+            r#"# my precious comment
+[server]
+port = 12345
+bind = "0.0.0.0"
+
+[torrent]
+max_connections = 33
+
+[custom_section]
+keep_me = "yes"
+
+[[providers]]
+id = 1
+kind = "movies"
+url = "https://old.example"
+api_url = "https://movies-api.accel.li/api/v2/list_movies.json"
+"#,
+        );
+        let config = load_and_refresh(&path);
+
+        assert_eq!(config.providers_version, PROVIDERS_VERSION);
+        assert!(config.providers.iter().any(|p| p.url == "https://yts.gg"));
+        assert!(!config.providers.iter().any(|p| p.url.contains("accel.li")));
+        assert_eq!(config.server.port, 12345);
+
+        let on_disk = std::fs::read_to_string(&path).expect("read back");
+        assert!(
+            on_disk.contains("# my precious comment"),
+            "comments survive"
+        );
+        assert!(
+            on_disk.contains("keep_me = \"yes\""),
+            "unknown keys survive"
+        );
+        assert!(on_disk.contains("port = 12345"));
+        assert!(on_disk.contains(&format!("providers_version = {PROVIDERS_VERSION}")));
+        assert!(on_disk.contains("https://yts.gg"));
+        assert!(!on_disk.contains("accel.li"));
+        let reparsed: AppConfig = toml::from_str(&on_disk).expect("rewritten file parses");
+        assert_eq!(reparsed.providers.len(), default_providers().len());
+    }
+
+    #[test]
+    fn matching_version_leaves_file_and_custom_providers_alone() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let content = format!(
+            r#"providers_version = {PROVIDERS_VERSION}
+
+[server]
+port = 9000
+
+[[providers]]
+id = 9
+kind = "movies"
+url = "https://my-private-mirror.example"
+"#
+        );
+        let path = write(tmp.path(), &content);
+        let config = load_and_refresh(&path);
+
+        assert_eq!(config.providers.len(), 1, "user override respected");
+        assert_eq!(config.providers[0].url, "https://my-private-mirror.example");
+        let on_disk = std::fs::read_to_string(&path).expect("read back");
+        assert_eq!(on_disk, content, "file untouched byte-for-byte");
+    }
+
+    #[test]
+    fn outdated_version_replaces_custom_providers() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write(
+            tmp.path(),
+            r#"providers_version = 1
+
+[[providers]]
+id = 9
+kind = "movies"
+url = "https://stale-mirror.example"
+"#,
+        );
+        let config = load_and_refresh(&path);
+        assert_eq!(config.providers_version, PROVIDERS_VERSION);
+        assert!(config.providers.iter().any(|p| p.url == "https://yts.gg"));
+        assert!(!config
+            .providers
+            .iter()
+            .any(|p| p.url.contains("stale-mirror")));
+    }
+
+    #[test]
+    fn future_version_is_also_replaced() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write(
+            tmp.path(),
+            &format!(
+                "providers_version = {}\n\n[[providers]]\nid = 9\nkind = \"movies\"\nurl = \"https://x.example\"\n",
+                PROVIDERS_VERSION + 10
+            ),
+        );
+        let config = load_and_refresh(&path);
+        assert_eq!(config.providers_version, PROVIDERS_VERSION);
+        assert!(config.providers.iter().any(|p| p.url == "https://yts.gg"));
+    }
+
+    #[test]
+    fn fresh_file_carries_current_version() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = tmp.path().join("config.toml");
+        let config = load_from_file(&path).expect("creates default");
+        assert_eq!(config.providers_version, PROVIDERS_VERSION);
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn invalid_toml_is_a_config_error() {
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write(tmp.path(), "this is [not toml");
+        let err = load_from_file(&path).expect_err("must fail");
+        assert!(matches!(err, Error::Config { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unwritable_file_still_refreshes_in_memory() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let path = write(
+            tmp.path(),
+            "[[providers]]\nid = 1\nkind = \"movies\"\nurl = \"https://old.example\"\n",
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+        let config = load_and_refresh(&path);
+        assert_eq!(config.providers_version, PROVIDERS_VERSION);
+        assert!(config.providers.iter().any(|p| p.url == "https://yts.gg"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).ok();
+    }
 }

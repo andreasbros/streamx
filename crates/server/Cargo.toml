@@ -60,6 +60,7 @@ dashmap = "6"
 futures = "0.3"
 lofty = "0.21"
 sha2 = { version = "0.10", optional = true }
+toml_edit = { version = "0.25.13", features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 # FFmpeg shutdown signalling (SIGTERM/SIGKILL); Windows uses taskkill.
