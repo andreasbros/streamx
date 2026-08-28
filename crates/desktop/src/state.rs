@@ -138,6 +138,8 @@ pub struct AppState {
     pub provider_error: RwLock<Option<streamx_api::types::ProviderError>>,
     pub browse_started_at: RwLock<Option<Instant>>,
     pub provider_infos: RwLock<Vec<streamx_api::types::ProviderInfo>>,
+    /// Newer released version, when the hourly update check found one.
+    pub latest_version: RwLock<Option<String>>,
 
     pub history: RwLock<Vec<WatchHistoryItem>>,
     pub history_loading: RwLock<bool>,
@@ -303,6 +305,7 @@ impl AppState {
             provider_error: RwLock::new(None),
             browse_started_at: RwLock::new(None),
             provider_infos: RwLock::new(Vec::new()),
+            latest_version: RwLock::new(None),
             history: RwLock::new(Vec::new()),
             history_loading: RwLock::new(false),
             downloads: RwLock::new(Vec::new()),

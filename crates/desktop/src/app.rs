@@ -4042,16 +4042,60 @@ impl MainView {
                     )
                     .child(items)
                     .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(theme.fs_1()))
-                            .text_color(theme.fg_muted())
-                            .child(SharedString::from(format!(
-                                "v{} \u{b7} {}",
-                                streamx::server::static_files::VERSION,
-                                streamx::server::static_files::BUILD_HASH
-                            ))),
-                    ),
+                    .child({
+                        let latest = self.state.latest_version.read().clone();
+                        let mut row = div().flex().flex_col().gap(px(theme.space_2())).child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(theme.space_2()))
+                                .child(
+                                    div()
+                                        .px(px(theme.space_2()))
+                                        .py(px(2.0))
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(theme.fg_muted())
+                                        .text_size(px(theme.fs_1()))
+                                        .text_color(theme.fg_secondary())
+                                        .child(SharedString::from(format!(
+                                            "v{}",
+                                            crate::update_check::APP_VERSION
+                                        ))),
+                                )
+                                .when_some(latest, |el, v| {
+                                    el.child(
+                                        div()
+                                            .id("drawer-update-badge")
+                                            .px(px(theme.space_2()))
+                                            .py(px(2.0))
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(theme.success())
+                                            .text_size(px(theme.fs_1()))
+                                            .text_color(theme.success())
+                                            .cursor_pointer()
+                                            .hover(move |s| s.bg(theme.bg_elevated()))
+                                            .on_click(|_ev, _window, cx| {
+                                                cx.open_url(crate::update_check::RELEASES_PAGE);
+                                            })
+                                            .child(SharedString::from(format!(
+                                                "\u{2191} v{v} available"
+                                            ))),
+                                    )
+                                }),
+                        );
+                        row = row.child(
+                            div()
+                                .text_size(px(theme.fs_1()))
+                                .text_color(theme.fg_muted())
+                                .child(SharedString::from(format!(
+                                    "build {}",
+                                    streamx::server::static_files::BUILD_HASH
+                                ))),
+                        );
+                        row
+                    }),
             )
             // Clicking outside closes the drawer.
             .child(
@@ -4490,6 +4534,76 @@ impl MainView {
                             .text_size(px(theme.fs_1()))
                             .text_color(theme.fg_secondary())
                             .child(SharedString::from(host)),
+                    ),
+            )
+    }
+
+    /// Top-right notice in the provider-pill style: a newer release is
+    /// out. Persistent while the hourly check keeps finding one, and a
+    /// click opens the releases page.
+    fn update_available_view(&self, latest: &str, slot: usize) -> impl IntoElement {
+        use gpui::{Animation, AnimationExt as _};
+        // The version itself lives in the menu badge; the pill stays a
+        // two-line notice like the slow-provider one.
+        let _ = latest;
+        let theme = self.theme;
+        let top = theme.space_4() + slot as f32 * 60.0;
+        div()
+            .id("update-available-pill")
+            .absolute()
+            .top(px(top))
+            .right(px(theme.space_4()))
+            .max_w(px(380.0))
+            .p(px(theme.space_3()))
+            .rounded(px(theme.radius_lg()))
+            .bg(theme.bg_surface())
+            .border_1()
+            .border_color(theme.success())
+            .flex()
+            .items_center()
+            .gap(px(theme.space_3()))
+            .cursor_pointer()
+            .hover(move |s| s.bg(theme.bg_elevated()))
+            .on_click(|_ev, _window, cx| {
+                cx.open_url(crate::update_check::RELEASES_PAGE);
+            })
+            .child(
+                div()
+                    .size(px(22.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.success())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(theme.fs_1()))
+                    .text_color(theme.success())
+                    .child("\u{2191}")
+                    .with_animation(
+                        "update-pill-glow",
+                        Animation::new(std::time::Duration::from_millis(2200)).repeat(),
+                        |el, delta| {
+                            let pulse = 1.0 - (delta - 0.5).abs() * 0.9;
+                            el.opacity(pulse.clamp(0.55, 1.0))
+                        },
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(theme.fs_2()))
+                            .text_color(theme.fg_primary())
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("New version available"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme.fs_1()))
+                            .text_color(theme.fg_secondary())
+                            .child("Download latest release"),
                     ),
             )
     }
@@ -5527,10 +5641,15 @@ impl Render for MainView {
             root = root.child(self.toast_view(&t));
         }
         {
+            let mut pill_slot = usize::from(toast_visible);
             let slow = self.state.provider_slow.read().clone();
             if let Some(url) = slow {
-                let below_toast = toast_visible;
-                root = root.child(self.provider_slow_view(&url, below_toast));
+                root = root.child(self.provider_slow_view(&url, pill_slot > 0));
+                pill_slot += 1;
+            }
+            let latest = self.state.latest_version.read().clone();
+            if let Some(v) = latest {
+                root = root.child(self.update_available_view(&v, pill_slot));
             }
             let perr = self.state.provider_error.read().clone();
             if let Some(err) = perr {

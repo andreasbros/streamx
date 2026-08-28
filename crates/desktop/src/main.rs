@@ -94,6 +94,8 @@ fn main() {
         spawn_embedded(&state, log_tx.clone(), log_history.clone());
     }
 
+    streamx_desktop::update_check::spawn(state.clone());
+
     #[cfg(feature = "ui-test")]
     streamx_desktop::test_driver::maybe_start(&state);
 
