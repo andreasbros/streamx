@@ -4,6 +4,13 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.3.2] - 2026-08-28
+
+
+### Added
+
+- Provider health surfaces - split timeouts, error chains, slow/error UI on web and desktop (7ca7d9c5)
+
 ## [0.3.1] - 2026-08-27
 
 
