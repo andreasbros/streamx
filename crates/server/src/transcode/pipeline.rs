@@ -209,6 +209,7 @@ impl TranscodePipeline {
         input_path: &str,
         media_info: &MediaInfo,
         quality: &str,
+        resume_offset_secs: Option<f64>,
     ) -> Result<TranscodeHandle> {
         let permit =
             self.semaphore
@@ -249,6 +250,7 @@ impl TranscodePipeline {
         tracing::info!(
             stream_id,
             tiers = tiers.iter().map(|t| t.label).collect::<Vec<_>>().join(","),
+            resume_offset_secs,
             "Starting multi-variant transcode (GPU)"
         );
 
@@ -260,13 +262,18 @@ impl TranscodePipeline {
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
         for tier in &tiers {
-            let mut cmd =
-                match self.build_variant_command_gpu(input_path, media_info, tier, &output_dir) {
-                    Ok(c) => c,
-                    Err(msg) => {
-                        return Err(Error::Transcode { message: msg });
-                    }
-                };
+            let mut cmd = match self.build_variant_command_gpu(
+                input_path,
+                media_info,
+                tier,
+                &output_dir,
+                resume_offset_secs,
+            ) {
+                Ok(c) => c,
+                Err(msg) => {
+                    return Err(Error::Transcode { message: msg });
+                }
+            };
 
             let mut child = cmd.spawn().map_err(|e| Error::Transcode {
                 message: format!("Failed to spawn ffmpeg (GPU): {e}"),
@@ -348,6 +355,7 @@ impl TranscodePipeline {
         input_path: &str,
         media_info: &MediaInfo,
         quality: &str,
+        resume_offset_secs: Option<f64>,
     ) -> Result<TranscodeHandle> {
         let permit =
             self.semaphore
@@ -388,6 +396,7 @@ impl TranscodePipeline {
         tracing::info!(
             stream_id,
             tiers = tiers.iter().map(|t| t.label).collect::<Vec<_>>().join(","),
+            resume_offset_secs,
             "Starting multi-variant transcode (CPU)"
         );
 
@@ -399,7 +408,13 @@ impl TranscodePipeline {
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
         for tier in &tiers {
-            let mut cmd = self.build_variant_command_cpu(input_path, media_info, tier, &output_dir);
+            let mut cmd = self.build_variant_command_cpu(
+                input_path,
+                media_info,
+                tier,
+                &output_dir,
+                resume_offset_secs,
+            );
             let sid = stream_id.to_string();
             let label = tier.label.to_string();
             let tx = results_tx.clone();
@@ -467,6 +482,7 @@ impl TranscodePipeline {
         &self,
         stream_id: &str,
         input_path: &str,
+        resume_offset_secs: Option<f64>,
     ) -> Result<TranscodeHandle> {
         let permit =
             self.semaphore
@@ -497,16 +513,22 @@ impl TranscodePipeline {
             .arg("-analyzeduration")
             .arg("3000000")
             .arg("-fflags")
-            .arg("+genpts+igndts+discardcorrupt")
-            .arg("-i")
+            .arg("+genpts+igndts+discardcorrupt");
+        if let Some(off) = resume_offset_secs {
+            cmd.arg("-ss").arg(format!("{off:.3}"));
+        }
+        cmd.arg("-i")
             .arg(input_path)
             .arg("-c")
             .arg("copy")
             .arg("-avoid_negative_ts")
             .arg("make_zero")
             .arg("-max_muxing_queue_size")
-            .arg("4096")
-            .arg("-f")
+            .arg("4096");
+        if let Some(off) = resume_offset_secs {
+            cmd.arg("-output_ts_offset").arg(format!("{off:.3}"));
+        }
+        cmd.arg("-f")
             .arg("hls")
             .arg("-hls_time")
             .arg("2")
@@ -659,8 +681,13 @@ impl TranscodePipeline {
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
         for tier in &tiers {
-            let mut cmd =
-                self.build_variant_command_cpu(&input_path_str, media_info, tier, &output_dir);
+            let mut cmd = self.build_variant_command_cpu(
+                &input_path_str,
+                media_info,
+                tier,
+                &output_dir,
+                None,
+            );
             let sid = stream_id.to_string();
             let label = tier.label.to_string();
             let tx = results_tx.clone();
@@ -839,6 +866,7 @@ impl TranscodePipeline {
         media_info: &MediaInfo,
         tier: &QualityTier,
         output_dir: &Path,
+        resume_offset_secs: Option<f64>,
     ) -> std::result::Result<Command, String> {
         // Always transcode to H.264 for MPEG-TS HLS (browsers can't play HEVC in TS)
 
@@ -866,6 +894,9 @@ impl TranscodePipeline {
             }
         }
 
+        if let Some(off) = resume_offset_secs {
+            cmd.arg("-ss").arg(format!("{off:.3}"));
+        }
         cmd.arg("-i").arg(input_path);
         cmd.arg("-c:v").arg(gpu::encoder_for_hw(&self.hw_accel));
 
@@ -924,6 +955,9 @@ impl TranscodePipeline {
         cmd.arg("-sn");
         cmd.arg("-avoid_negative_ts").arg("make_zero");
         cmd.arg("-max_muxing_queue_size").arg("4096");
+        if let Some(off) = resume_offset_secs {
+            cmd.arg("-output_ts_offset").arg(format!("{off:.3}"));
+        }
 
         let tier_dir = output_dir.join(tier.label);
         let playlist_path = tier_dir.join("playlist.m3u8");
@@ -952,6 +986,7 @@ impl TranscodePipeline {
         media_info: &MediaInfo,
         tier: &QualityTier,
         output_dir: &Path,
+        resume_offset_secs: Option<f64>,
     ) -> Command {
         let mut cmd = tokio::process::Command::new(crate::ffmpeg_bin::ffmpeg());
         cmd.arg("-y")
@@ -961,6 +996,9 @@ impl TranscodePipeline {
         cmd.arg("-probesize").arg("5000000");
         cmd.arg("-analyzeduration").arg("3000000");
         cmd.arg("-fflags").arg("+genpts+igndts+discardcorrupt");
+        if let Some(off) = resume_offset_secs {
+            cmd.arg("-ss").arg(format!("{off:.3}"));
+        }
         cmd.arg("-i").arg(input_path);
 
         // Always transcode to H.264 for MPEG-TS HLS
@@ -1011,6 +1049,9 @@ impl TranscodePipeline {
         cmd.arg("-sn");
         cmd.arg("-avoid_negative_ts").arg("make_zero");
         cmd.arg("-max_muxing_queue_size").arg("4096");
+        if let Some(off) = resume_offset_secs {
+            cmd.arg("-output_ts_offset").arg(format!("{off:.3}"));
+        }
 
         let tier_dir = output_dir.join(tier.label);
         let playlist_path = tier_dir.join("playlist.m3u8");

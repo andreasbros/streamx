@@ -20,6 +20,21 @@ use super::probe;
 const DEMO_HLS_URL: &str = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
 const SEGMENT_CACHE_MAX: usize = 50;
 const TRANSCODE_HISTORY_MAX: usize = 100;
+/// Minimum cached segments worth resuming from; below this a clean restart
+/// is cheaper than a seek-accurate resume.
+const RESUME_MIN_SEGMENTS: usize = 10;
+/// Minimum wait between resume attempts for the same stream/quality, so a
+/// transcode that dies instantly (source still downloading, broken input)
+/// doesn't respawn FFmpeg on every playlist poll.
+const RESUME_RETRY_SECS: u64 = 15;
+/// After this many consecutive failures, hardware transcode falls back to
+/// CPU for the affected stream/quality.
+const GPU_FAILURE_LIMIT: u32 = 3;
+/// A playlist counts as complete when its summed segment duration reaches
+/// the probed source duration minus this slack. ENDLIST alone is not proof
+/// of completeness: stopping FFmpeg with SIGTERM (idle watchdog) finalizes
+/// the playlist with ENDLIST wherever it happens to be.
+const COMPLETE_TOLERANCE_SECS: f64 = 30.0;
 
 #[derive(Clone)]
 pub struct TranscodeHistoryEntry {
@@ -68,6 +83,9 @@ pub struct HlsManager {
     segment_cache: Arc<RwLock<SegmentCache>>,
     transcode_history: Arc<std::sync::Mutex<VecDeque<TranscodeHistoryEntry>>>,
     last_access: Arc<dashmap::DashMap<String, std::time::Instant>>,
+    resume_attempts: Arc<dashmap::DashMap<String, std::time::Instant>>,
+    transcode_failures: Arc<dashmap::DashMap<String, u32>>,
+    source_durations: Arc<dashmap::DashMap<String, f64>>,
     cache_dir: PathBuf,
 }
 
@@ -103,6 +121,9 @@ impl HlsManager {
             active: Arc::new(RwLock::new(HashMap::new())),
             segment_cache: Arc::new(RwLock::new(SegmentCache::new(SEGMENT_CACHE_MAX))),
             last_access: Arc::new(dashmap::DashMap::new()),
+            resume_attempts: Arc::new(dashmap::DashMap::new()),
+            transcode_failures: Arc::new(dashmap::DashMap::new()),
+            source_durations: Arc::new(dashmap::DashMap::new()),
             cache_dir,
         };
 
@@ -181,6 +202,7 @@ impl HlsManager {
                     crate::transcode::pipeline::TranscodeStatus::Failed(_) => {
                         drop(active);
                         self.active.write().await.remove(&active_key);
+                        self.note_transcode_failure(&active_key);
                         tracing::info!(stream_id, quality, "Removed failed transcode, will retry");
                     }
                     _ => return Ok(()),
@@ -213,14 +235,18 @@ impl HlsManager {
         // Check for cached variant playlist with valid segments
         let tier_dir = stream_dir.join(quality);
         let variant_playlist = tier_dir.join("playlist.m3u8");
+        let mut resume_offset: Option<f64> = None;
         if variant_playlist.exists() {
             let content = tokio::fs::read_to_string(&variant_playlist)
                 .await
                 .unwrap_or_default();
             let has_endlist = content.contains("EXT-X-ENDLIST");
             let seg_count = content.matches("EXTINF:").count();
+            let complete = has_endlist
+                && seg_count > 0
+                && self.covers_source(stream_id, file_path, &content).await;
 
-            if has_endlist && seg_count > 0 {
+            if complete {
                 // Completed transcode - verify first and last segments are valid
                 let segments: Vec<&str> = content
                     .lines()
@@ -239,6 +265,8 @@ impl HlsManager {
                     });
                 if all_valid {
                     tracing::info!(stream_id, quality, seg_count, "Valid completed cache found");
+                    self.resume_attempts.remove(&active_key);
+                    self.transcode_failures.remove(&active_key);
                     return Ok(());
                 }
                 // Cache has corrupt segments - delete and re-transcode
@@ -249,27 +277,78 @@ impl HlsManager {
                 );
                 let _ = tokio::fs::remove_dir_all(&tier_dir).await;
                 let _ = tokio::fs::create_dir_all(&tier_dir).await;
-            } else if !has_endlist && seg_count > 10 {
-                // Incomplete transcode with enough segments to start playback
-                tracing::info!(
-                    stream_id,
-                    quality,
-                    seg_count,
-                    "Partial cache found, skipping"
-                );
-                return Ok(());
+            } else if seg_count > RESUME_MIN_SEGMENTS {
+                // No running transcode owns this cache (checked above), so
+                // it is an interrupted run: the idle watchdog stopped it
+                // (SIGTERM finalizes with a premature ENDLIST) or FFmpeg
+                // died mid-run. Resume from the last completed segment
+                // instead of serving a forever truncated playlist.
+                if self.recently_attempted(&active_key) {
+                    return Ok(());
+                }
+                match prepare_resume(&tier_dir, &content).await {
+                    Some(offset) => {
+                        tracing::info!(
+                            stream_id,
+                            quality,
+                            seg_count,
+                            offset,
+                            "Resuming interrupted transcode"
+                        );
+                        resume_offset = Some(offset);
+                    }
+                    None => {
+                        tracing::warn!(
+                            stream_id,
+                            quality,
+                            "Unusable partial cache, re-transcoding"
+                        );
+                        let _ = tokio::fs::remove_dir_all(&tier_dir).await;
+                        let _ = tokio::fs::create_dir_all(&tier_dir).await;
+                    }
+                }
+            } else {
+                // Too little cached to resume; start clean so append_list
+                // doesn't duplicate the head of the movie.
+                let _ = tokio::fs::remove_dir_all(&tier_dir).await;
+                let _ = tokio::fs::create_dir_all(&tier_dir).await;
             }
         }
 
         // Check for passthrough (flat playlist.m3u8)
         let flat_playlist = stream_dir.join("playlist.m3u8");
+        let mut flat_resume_offset: Option<f64> = None;
         if flat_playlist.exists() {
             let content = tokio::fs::read_to_string(&flat_playlist)
                 .await
                 .unwrap_or_default();
-            if content.matches("EXTINF:").count() > 10 {
+            let has_endlist = content.contains("EXT-X-ENDLIST");
+            let seg_count = content.matches("EXTINF:").count();
+            let complete = has_endlist
+                && seg_count > 0
+                && self.covers_source(stream_id, file_path, &content).await;
+            if complete {
                 tracing::info!(stream_id, "Valid cached passthrough found, skipping");
+                self.resume_attempts.remove(&active_key);
                 return Ok(());
+            } else if seg_count > RESUME_MIN_SEGMENTS {
+                if self.recently_attempted(&active_key) {
+                    return Ok(());
+                }
+                match prepare_resume(&stream_dir, &content).await {
+                    Some(offset) => {
+                        tracing::info!(
+                            stream_id,
+                            seg_count,
+                            offset,
+                            "Resuming interrupted passthrough"
+                        );
+                        flat_resume_offset = Some(offset);
+                    }
+                    None => wipe_flat_cache(&stream_dir).await,
+                }
+            } else if seg_count > 0 {
+                wipe_flat_cache(&stream_dir).await;
             }
         }
 
@@ -278,7 +357,7 @@ impl HlsManager {
         let handle = if probe::is_browser_compatible(&info) {
             tracing::info!(stream_id, "Source is browser-compatible, using passthrough");
             self.pipeline
-                .start_passthrough(stream_id, file_path)
+                .start_passthrough(stream_id, file_path, flat_resume_offset)
                 .await?
         } else {
             tracing::info!(
@@ -288,10 +367,10 @@ impl HlsManager {
                 audio_codec = ?info.audio_codec,
                 "Transcoding at requested quality"
             );
-            if self.pipeline.gpu_enabled() {
+            if self.pipeline.gpu_enabled() && !self.gpu_exhausted(&active_key) {
                 match self
                     .pipeline
-                    .start_transcode(stream_id, file_path, &info, quality)
+                    .start_transcode(stream_id, file_path, &info, quality, resume_offset)
                     .await
                 {
                     Ok(h) => h,
@@ -300,16 +379,21 @@ impl HlsManager {
                         let qdir = self.cache_dir.join(stream_id).join(quality);
                         let _ = tokio::fs::remove_dir_all(&qdir).await;
                         self.pipeline
-                            .start_transcode_cpu(stream_id, file_path, &info, quality)
+                            .start_transcode_cpu(stream_id, file_path, &info, quality, None)
                             .await?
                     }
                 }
             } else {
                 self.pipeline
-                    .start_transcode_cpu(stream_id, file_path, &info, quality)
+                    .start_transcode_cpu(stream_id, file_path, &info, quality, resume_offset)
                     .await?
             }
         };
+
+        // Throttle marker: if this transcode dies immediately, the next
+        // playlist poll must not respawn FFmpeg until the retry window passes.
+        self.resume_attempts
+            .insert(active_key.clone(), std::time::Instant::now());
 
         // A fresh transcode starts its idle clock now; without this the
         // watchdog treated "never accessed yet" as already idle and reaped
@@ -319,6 +403,55 @@ impl HlsManager {
         self.active.write().await.insert(active_key, handle);
 
         Ok(())
+    }
+
+    /// Whether the cached playlist covers the whole source. Probes the
+    /// source once per stream (cached) and compares against the summed
+    /// segment durations; an unprobeable source counts as covered so odd
+    /// inputs keep the pre-existing skip behavior.
+    async fn covers_source(&self, stream_id: &str, input: &str, playlist: &str) -> bool {
+        let total = match self.source_durations.get(stream_id).map(|d| *d) {
+            Some(d) => Some(d),
+            None => match probe::probe(input).await {
+                Ok(info) => {
+                    if let Some(d) = info.duration_seconds {
+                        self.source_durations.insert(stream_id.to_string(), d);
+                    }
+                    info.duration_seconds
+                }
+                Err(_) => None,
+            },
+        };
+        match total {
+            Some(total) => extinf_sum(playlist) + COMPLETE_TOLERANCE_SECS >= total,
+            None => true,
+        }
+    }
+
+    fn recently_attempted(&self, key: &str) -> bool {
+        self.resume_attempts
+            .get(key)
+            .map(|t| t.elapsed() < std::time::Duration::from_secs(RESUME_RETRY_SECS))
+            .unwrap_or(false)
+    }
+
+    fn note_transcode_failure(&self, key: &str) {
+        *self.transcode_failures.entry(key.to_string()).or_insert(0) += 1;
+    }
+
+    /// After repeated hardware transcode failures for a stream, stop
+    /// retrying the GPU and use the CPU path (it tone-maps HDR and is far
+    /// more tolerant of exotic sources).
+    fn gpu_exhausted(&self, key: &str) -> bool {
+        let exhausted = self
+            .transcode_failures
+            .get(key)
+            .map(|c| *c >= GPU_FAILURE_LIMIT)
+            .unwrap_or(false);
+        if exhausted {
+            tracing::warn!(stream_key = %key, "Repeated GPU transcode failures, using CPU");
+        }
+        exhausted
     }
 
     /// Start HLS transcoding from an async reader (torrent stream).
@@ -353,19 +486,32 @@ impl HlsManager {
 
         let stream_dir = self.cache_dir.join(stream_id);
 
-        // Check cached variant
-        let variant_playlist = stream_dir.join(quality).join("playlist.m3u8");
+        // Check cached variant. A piped input cannot seek, so an
+        // interrupted cache is wiped for a clean restart instead of resumed.
+        let tier_dir = stream_dir.join(quality);
+        let variant_playlist = tier_dir.join("playlist.m3u8");
         if variant_playlist.exists() {
             let content = tokio::fs::read_to_string(&variant_playlist)
                 .await
                 .unwrap_or_default();
-            if content.matches("EXTINF:").count() > 10 {
+            let has_endlist = content.contains("EXT-X-ENDLIST");
+            let seg_count = content.matches("EXTINF:").count();
+            if has_endlist && seg_count > 0 {
                 tracing::info!(
                     stream_id,
                     quality,
                     "Valid cached quality found, skipping piped"
                 );
                 return Ok(());
+            } else if seg_count > 0 {
+                tracing::info!(
+                    stream_id,
+                    quality,
+                    seg_count,
+                    "Restarting interrupted piped transcode"
+                );
+                let _ = tokio::fs::remove_dir_all(&tier_dir).await;
+                let _ = tokio::fs::create_dir_all(&tier_dir).await;
             }
         }
 
@@ -375,9 +521,13 @@ impl HlsManager {
             let content = tokio::fs::read_to_string(&flat_playlist)
                 .await
                 .unwrap_or_default();
-            if content.matches("EXTINF:").count() > 10 {
+            let has_endlist = content.contains("EXT-X-ENDLIST");
+            let seg_count = content.matches("EXTINF:").count();
+            if has_endlist && seg_count > 0 {
                 tracing::info!(stream_id, "Valid cached passthrough found, skipping piped");
                 return Ok(());
+            } else if seg_count > 0 {
+                wipe_flat_cache(&stream_dir).await;
             }
         }
 
@@ -423,6 +573,7 @@ impl HlsManager {
                     crate::transcode::pipeline::TranscodeStatus::Failed(_) => {
                         drop(active);
                         self.active.write().await.remove(&active_key);
+                        self.note_transcode_failure(&active_key);
                     }
                     _ => return Ok(()),
                 }
@@ -430,14 +581,46 @@ impl HlsManager {
         }
 
         let stream_dir = self.cache_dir.join(stream_id);
-        let variant_playlist = stream_dir.join(quality).join("playlist.m3u8");
+        let tier_dir = stream_dir.join(quality);
+        let variant_playlist = tier_dir.join("playlist.m3u8");
+        let mut resume_offset: Option<f64> = None;
         if variant_playlist.exists() {
             let content = tokio::fs::read_to_string(&variant_playlist)
                 .await
                 .unwrap_or_default();
-            if content.matches("EXTINF:").count() > 10 {
+            let has_endlist = content.contains("EXT-X-ENDLIST");
+            let seg_count = content.matches("EXTINF:").count();
+            let complete =
+                has_endlist && seg_count > 0 && self.covers_source(stream_id, url, &content).await;
+            if complete {
                 tracing::info!(stream_id, quality, "Valid cached URL transcode found");
+                self.resume_attempts.remove(&active_key);
+                self.transcode_failures.remove(&active_key);
                 return Ok(());
+            } else if seg_count > RESUME_MIN_SEGMENTS {
+                // HTTP inputs seek fine, so resume like the file path does
+                if self.recently_attempted(&active_key) {
+                    return Ok(());
+                }
+                match prepare_resume(&tier_dir, &content).await {
+                    Some(offset) => {
+                        tracing::info!(
+                            stream_id,
+                            quality,
+                            seg_count,
+                            offset,
+                            "Resuming interrupted URL transcode"
+                        );
+                        resume_offset = Some(offset);
+                    }
+                    None => {
+                        let _ = tokio::fs::remove_dir_all(&tier_dir).await;
+                        let _ = tokio::fs::create_dir_all(&tier_dir).await;
+                    }
+                }
+            } else if seg_count > 0 {
+                let _ = tokio::fs::remove_dir_all(&tier_dir).await;
+                let _ = tokio::fs::create_dir_all(&tier_dir).await;
             }
         }
 
@@ -446,7 +629,9 @@ impl HlsManager {
 
         let handle = if probe::is_browser_compatible(&info) {
             tracing::info!(stream_id, "URL source is browser-compatible, passthrough");
-            self.pipeline.start_passthrough(stream_id, url).await?
+            self.pipeline
+                .start_passthrough(stream_id, url, None)
+                .await?
         } else {
             tracing::info!(
                 stream_id,
@@ -454,10 +639,10 @@ impl HlsManager {
                 video_codec = ?info.video_codec,
                 "Transcoding URL source"
             );
-            if self.pipeline.gpu_enabled() {
+            if self.pipeline.gpu_enabled() && !self.gpu_exhausted(&active_key) {
                 match self
                     .pipeline
-                    .start_transcode(stream_id, url, &info, quality)
+                    .start_transcode(stream_id, url, &info, quality, resume_offset)
                     .await
                 {
                     Ok(h) => h,
@@ -466,17 +651,22 @@ impl HlsManager {
                             stream_id,
                             "GPU transcode failed for URL, CPU fallback: {e}"
                         );
+                        let _ = tokio::fs::remove_dir_all(&tier_dir).await;
+                        let _ = tokio::fs::create_dir_all(&tier_dir).await;
                         self.pipeline
-                            .start_transcode_cpu(stream_id, url, &info, quality)
+                            .start_transcode_cpu(stream_id, url, &info, quality, None)
                             .await?
                     }
                 }
             } else {
                 self.pipeline
-                    .start_transcode_cpu(stream_id, url, &info, quality)
+                    .start_transcode_cpu(stream_id, url, &info, quality, resume_offset)
                     .await?
             }
         };
+
+        self.resume_attempts
+            .insert(active_key.clone(), std::time::Instant::now());
 
         // A fresh transcode starts its idle clock now; without this the
         // watchdog treated "never accessed yet" as already idle and reaped
@@ -944,4 +1134,173 @@ fn tier_dir_size(path: &std::path::Path) -> u64 {
         }
     }
     total
+}
+
+fn extinf_sum(playlist: &str) -> f64 {
+    playlist
+        .lines()
+        .filter_map(|l| l.strip_prefix("#EXTINF:"))
+        .filter_map(|l| l.split(',').next())
+        .filter_map(|d| d.trim().parse::<f64>().ok())
+        .sum()
+}
+
+/// Prepare an interrupted playlist for resumption: drop the last segment
+/// (FFmpeg may have died while writing it), rewrite the playlist without it,
+/// and return the summed duration of the remaining segments. FFmpeg is then
+/// relaunched with `-ss <sum>` plus `append_list`, which parses the trimmed
+/// playlist and continues seamlessly after its last entry.
+/// Returns None when the playlist is too small or cannot be parsed; callers
+/// wipe the cache and restart from scratch in that case.
+async fn prepare_resume(seg_dir: &std::path::Path, playlist: &str) -> Option<f64> {
+    let lines: Vec<&str> = playlist.lines().collect();
+    // (line index of #EXTINF, duration, segment uri)
+    let mut segments: Vec<(usize, f64, &str)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if let Some(rest) = lines[i].strip_prefix("#EXTINF:") {
+            let dur: f64 = rest.split(',').next()?.trim().parse().ok()?;
+            let mut j = i + 1;
+            while j < lines.len() && (lines[j].starts_with('#') || lines[j].is_empty()) {
+                j += 1;
+            }
+            if j >= lines.len() {
+                // EXTINF with no uri: truncated tail, drop it with the rewrite
+                break;
+            }
+            segments.push((i, dur, lines[j]));
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    if segments.len() < 2 {
+        return None;
+    }
+    let (last_idx, _, last_uri) = segments.pop()?;
+    let offset: f64 = segments.iter().map(|(_, d, _)| *d).sum();
+
+    let mut truncated = lines[..last_idx].join("\n");
+    truncated.push('\n');
+    tokio::fs::write(seg_dir.join("playlist.m3u8"), truncated)
+        .await
+        .ok()?;
+    if !last_uri.contains('/') && !last_uri.contains("..") {
+        let _ = tokio::fs::remove_file(seg_dir.join(last_uri)).await;
+    }
+    Some(offset)
+}
+
+/// Remove a passthrough cache (flat playlist plus its root-level segments)
+/// without touching variant tier directories or the master playlist.
+async fn wipe_flat_cache(stream_dir: &std::path::Path) {
+    let _ = tokio::fs::remove_file(stream_dir.join("playlist.m3u8")).await;
+    if let Ok(mut rd) = tokio::fs::read_dir(stream_dir).await {
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("segment_") && name.ends_with(".ts") {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::{prepare_resume, wipe_flat_cache};
+
+    fn playlist_with(segments: usize) -> String {
+        let mut p = String::from(
+            "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n",
+        );
+        for i in 0..segments {
+            p.push_str(&format!("#EXTINF:2.002000,\nsegment_{i:04}.ts\n"));
+        }
+        p
+    }
+
+    async fn seed_dir(dir: &std::path::Path, segments: usize) -> String {
+        let playlist = playlist_with(segments);
+        tokio::fs::write(dir.join("playlist.m3u8"), &playlist)
+            .await
+            .unwrap_or_else(|e| panic!("write playlist: {e}"));
+        for i in 0..segments {
+            tokio::fs::write(dir.join(format!("segment_{i:04}.ts")), b"x")
+                .await
+                .unwrap_or_else(|e| panic!("write segment: {e}"));
+        }
+        playlist
+    }
+
+    #[tokio::test]
+    async fn drops_last_segment_and_returns_offset() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let playlist = seed_dir(tmp.path(), 12).await;
+
+        let offset = prepare_resume(tmp.path(), &playlist).await;
+        let expected = 2.002 * 11.0;
+        let got = offset.unwrap_or_else(|| panic!("expected resume offset"));
+        assert!((got - expected).abs() < 0.01, "offset {got} != {expected}");
+
+        let rewritten = std::fs::read_to_string(tmp.path().join("playlist.m3u8"))
+            .unwrap_or_else(|e| panic!("read playlist: {e}"));
+        assert_eq!(rewritten.matches("EXTINF:").count(), 11);
+        assert!(!rewritten.contains("segment_0011.ts"));
+        assert!(!tmp.path().join("segment_0011.ts").exists());
+        assert!(tmp.path().join("segment_0010.ts").exists());
+    }
+
+    #[tokio::test]
+    async fn too_few_segments_returns_none() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let playlist = seed_dir(tmp.path(), 1).await;
+        assert!(prepare_resume(tmp.path(), &playlist).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn truncated_extinf_tail_is_dropped() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let mut playlist = seed_dir(tmp.path(), 12).await;
+        playlist.push_str("#EXTINF:2.002000,\n");
+
+        let offset = prepare_resume(tmp.path(), &playlist).await;
+        let got = offset.unwrap_or_else(|| panic!("expected resume offset"));
+        assert!((got - 2.002 * 11.0).abs() < 0.01);
+        let rewritten = std::fs::read_to_string(tmp.path().join("playlist.m3u8"))
+            .unwrap_or_else(|e| panic!("read playlist: {e}"));
+        assert_eq!(rewritten.matches("EXTINF:").count(), 11);
+    }
+
+    #[tokio::test]
+    async fn unparseable_playlist_returns_none() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        assert!(
+            prepare_resume(tmp.path(), "#EXTM3U\n#EXTINF:notanumber,\nseg.ts\n")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn wipe_flat_cache_keeps_tiers_and_master() {
+        let tmp = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        seed_dir(tmp.path(), 3).await;
+        tokio::fs::write(tmp.path().join("master.m3u8"), b"m")
+            .await
+            .unwrap_or_else(|e| panic!("write master: {e}"));
+        let tier = tmp.path().join("1080p");
+        tokio::fs::create_dir_all(&tier)
+            .await
+            .unwrap_or_else(|e| panic!("mkdir tier: {e}"));
+        tokio::fs::write(tier.join("segment_0000.ts"), b"t")
+            .await
+            .unwrap_or_else(|e| panic!("write tier seg: {e}"));
+
+        wipe_flat_cache(tmp.path()).await;
+
+        assert!(!tmp.path().join("playlist.m3u8").exists());
+        assert!(!tmp.path().join("segment_0000.ts").exists());
+        assert!(tmp.path().join("master.m3u8").exists());
+        assert!(tier.join("segment_0000.ts").exists());
+    }
 }
