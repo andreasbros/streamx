@@ -4,6 +4,13 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.3.5] - 2026-08-30
+
+
+### Fixed
+
+- Resume interrupted HLS transcodes instead of serving truncated cache (3dcfa678)
+
 ## [0.3.4] - 2026-08-28
 
 
