@@ -4,6 +4,13 @@ All notable changes to StreamX. The format follows
 [Keep a Changelog](https://keepachangelog.com), versions follow
 [SemVer](https://semver.org).
 
+## [0.3.6] - 2026-09-03
+
+
+### Added
+
+- Survive a stalling downloads volume and surface it to the user (96ec5053)
+
 ## [0.3.5] - 2026-08-30
 
 
