@@ -29,6 +29,9 @@ pub enum Error {
     #[snafu(display("Transcode error: {message}"))]
     Transcode { message: String },
 
+    #[snafu(display("Storage error: {message}"))]
+    Storage { message: String },
+
     #[snafu(display("Not found: {message}"))]
     NotFound { message: String },
 
@@ -72,6 +75,7 @@ impl IntoResponse for Error {
             Error::Auth { message } => (StatusCode::UNAUTHORIZED, message.clone()),
             Error::Torrent { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
             Error::Transcode { message } => (StatusCode::INTERNAL_SERVER_ERROR, message.clone()),
+            Error::Storage { message } => (StatusCode::SERVICE_UNAVAILABLE, message.clone()),
             Error::NotFound { message } => (StatusCode::NOT_FOUND, message.clone()),
             Error::BadRequest { message } => (StatusCode::BAD_REQUEST, message.clone()),
             Error::Unauthorized { message } => (StatusCode::UNAUTHORIZED, message.clone()),

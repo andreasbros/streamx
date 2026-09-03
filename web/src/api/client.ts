@@ -115,6 +115,10 @@ class ApiClient {
     return this.request<{ providers: import("./types").ProviderInfo[] }>("/api/search/providers");
   }
 
+  async health(): Promise<import("./types").HealthStatus> {
+    return this.request<import("./types").HealthStatus>("/api/health");
+  }
+
   /// Emits provider-health window events around a content request:
   /// "streamx:provider-slow" after 3s pending, "streamx:provider-settled"
   /// when it finishes, "streamx:provider-error" for provider failures

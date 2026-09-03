@@ -140,6 +140,9 @@ pub struct AppState {
     pub provider_infos: RwLock<Vec<streamx_api::types::ProviderInfo>>,
     /// Newer released version, when the hourly update check found one.
     pub latest_version: RwLock<Option<String>>,
+    /// True while the backend reports the downloads volume unresponsive
+    /// (dying or disconnected external disk); shows a warning pill.
+    pub storage_stalled: RwLock<bool>,
 
     pub history: RwLock<Vec<WatchHistoryItem>>,
     pub history_loading: RwLock<bool>,
@@ -306,6 +309,7 @@ impl AppState {
             browse_started_at: RwLock::new(None),
             provider_infos: RwLock::new(Vec::new()),
             latest_version: RwLock::new(None),
+            storage_stalled: RwLock::new(false),
             history: RwLock::new(Vec::new()),
             history_loading: RwLock::new(false),
             downloads: RwLock::new(Vec::new()),

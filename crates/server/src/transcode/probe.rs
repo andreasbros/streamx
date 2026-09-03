@@ -108,22 +108,36 @@ struct FfprobeFormat {
     format_name: Option<String>,
 }
 
+/// ffprobe of a local file finishes in well under a second; a probe that
+/// runs longer is stuck on unresponsive storage. Without this bound, hung
+/// ffprobe processes accumulated for days against a stalled USB disk.
+const PROBE_TIMEOUT_SECS: u64 = 20;
+
 pub async fn probe(file_path: &str) -> Result<MediaInfo> {
-    let output = Command::new(crate::ffmpeg_bin::ffprobe())
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-            file_path,
-        ])
-        .output()
-        .await
-        .map_err(|e| Error::Transcode {
-            message: format!("Failed to run ffprobe: {e}"),
-        })?;
+    let mut cmd = Command::new(crate::ffmpeg_bin::ffprobe());
+    cmd.args([
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
+        "-show_format",
+        "-show_streams",
+        file_path,
+    ])
+    .kill_on_drop(true);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(PROBE_TIMEOUT_SECS),
+        cmd.output(),
+    )
+    .await
+    .map_err(|_| Error::Storage {
+        message: format!(
+            "ffprobe timed out after {PROBE_TIMEOUT_SECS}s probing {file_path}; storage may not be responding"
+        ),
+    })?
+    .map_err(|e| Error::Transcode {
+        message: format!("Failed to run ffprobe: {e}"),
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

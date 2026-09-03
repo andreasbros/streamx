@@ -4468,7 +4468,7 @@ impl MainView {
 
     /// Top-right pill: a provider is taking longer than 3s. Pulsing
     /// dots give a calm "still working" heartbeat next to the host.
-    fn provider_slow_view(&self, url: &str, below_toast: bool) -> impl IntoElement {
+    fn provider_slow_view(&self, url: &str, slot: usize) -> impl IntoElement {
         use gpui::{Animation, AnimationExt as _};
         let theme = self.theme;
         let host = url
@@ -4476,11 +4476,7 @@ impl MainView {
             .trim_start_matches("http://")
             .trim_end_matches('/')
             .to_string();
-        let top = if below_toast {
-            theme.space_4() * 2.0 + 56.0
-        } else {
-            theme.space_4()
-        };
+        let top = theme.space_4() + slot as f32 * 60.0;
         let dot = |i: usize| {
             div()
                 .size(px(6.0))
@@ -4611,6 +4607,72 @@ impl MainView {
                             .text_color(theme.fg_secondary())
                             .truncate()
                             .child("Download latest release"),
+                    ),
+            )
+    }
+
+    /// Persistent warning pill while the downloads volume is not
+    /// responding (dying or disconnected external disk): downloads and
+    /// non-cached playback are unavailable until it recovers.
+    fn storage_alert_view(&self, slot: usize) -> impl IntoElement {
+        use gpui::{Animation, AnimationExt as _};
+        let theme = self.theme;
+        let top = theme.space_4() + slot as f32 * 60.0;
+        div()
+            .id("storage-alert-pill")
+            .absolute()
+            .top(px(top))
+            .right(px(theme.space_4()))
+            .max_w(px(380.0))
+            .p(px(theme.space_3()))
+            .rounded(px(theme.radius_lg()))
+            .bg(theme.bg_surface())
+            .border_1()
+            .border_color(theme.error())
+            .flex()
+            .items_center()
+            .gap(px(theme.space_3()))
+            .child(
+                div()
+                    .size(px(22.0))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.error())
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(theme.fs_1()))
+                    .text_color(theme.error())
+                    .child("!")
+                    .with_animation(
+                        "storage-pill-glow",
+                        Animation::new(std::time::Duration::from_millis(1400)).repeat(),
+                        |el, delta| {
+                            let pulse = 1.0 - (delta - 0.5).abs() * 0.9;
+                            el.opacity(pulse.clamp(0.5, 1.0))
+                        },
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .text_size(px(theme.fs_2()))
+                            .text_color(theme.fg_primary())
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child("Storage not responding"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme.fs_1()))
+                            .text_color(theme.fg_secondary())
+                            .truncate()
+                            .child("Downloads paused, check the download disk"),
                     ),
             )
     }
@@ -5649,9 +5711,13 @@ impl Render for MainView {
         }
         {
             let mut pill_slot = usize::from(toast_visible);
+            if *self.state.storage_stalled.read() {
+                root = root.child(self.storage_alert_view(pill_slot));
+                pill_slot += 1;
+            }
             let slow = self.state.provider_slow.read().clone();
             if let Some(url) = slow {
-                root = root.child(self.provider_slow_view(&url, pill_slot > 0));
+                root = root.child(self.provider_slow_view(&url, pill_slot));
                 pill_slot += 1;
             }
             let latest = self.state.latest_version.read().clone();

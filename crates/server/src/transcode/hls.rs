@@ -428,6 +428,19 @@ impl HlsManager {
         }
     }
 
+    /// Whether any playlist (variant tier or flat passthrough) is cached
+    /// for this stream. Lets callers keep serving cached playback while
+    /// the source volume is unresponsive.
+    pub async fn has_cached_playlist(&self, stream_id: &str, quality: &str) -> bool {
+        let stream_dir = self.cache_dir.join(stream_id);
+        tokio::fs::metadata(stream_dir.join(quality).join("playlist.m3u8"))
+            .await
+            .is_ok()
+            || tokio::fs::metadata(stream_dir.join("playlist.m3u8"))
+                .await
+                .is_ok()
+    }
+
     fn recently_attempted(&self, key: &str) -> bool {
         self.resume_attempts
             .get(key)

@@ -274,11 +274,42 @@ pub async fn playlist(
         .as_deref()
         .or(download.partial_path.as_deref());
 
+    // With the downloads volume unresponsive, touching the source file
+    // would hang this request. Cached playback still works; anything else
+    // gets a clear 503 instead of a spinner.
+    let storage_stalled = state.torrent_engine.storage_health().is_stalled();
+    if storage_stalled {
+        if state.hls_pipeline.has_cached_playlist(&id, quality).await {
+            let response = state.hls_pipeline.generate_playlist(&id, quality).await?;
+            return match response {
+                PlaylistResponse::Redirect(url) => Ok(Redirect::temporary(&url).into_response()),
+                PlaylistResponse::Content(content) => Ok((
+                    [
+                        (header::CONTENT_TYPE, "application/vnd.apple.mpegurl"),
+                        (header::CACHE_CONTROL, "no-cache, no-store"),
+                    ],
+                    content,
+                )
+                    .into_response()),
+            };
+        }
+        return Err(Error::Storage {
+            message: "Download storage is not responding; playback is unavailable until the drive recovers".to_string(),
+        });
+    }
+
     // Always try file-based transcode first (works for both complete and partial/sequential downloads)
     // FFmpeg handles growing files naturally - it reads what's available and waits for more
     let mut started = false;
     if let Some(path) = file_path {
-        if tokio::fs::metadata(path).await.is_ok() {
+        // Bounded stat: a disk that just started stalling (before the
+        // monitor notices) must not hang the playlist request.
+        let path_owned = path.to_string();
+        let exists =
+            crate::storage_health::bounded_fs_op(5, move || std::fs::metadata(path_owned).is_ok())
+                .await
+                .unwrap_or(false);
+        if exists {
             if let Err(e) = state.hls_pipeline.start_stream(&id, path, quality).await {
                 tracing::warn!(stream_id = %id, quality, "Failed to start HLS transcode: {e}");
             } else {

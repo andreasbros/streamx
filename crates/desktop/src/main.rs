@@ -95,6 +95,7 @@ fn main() {
     }
 
     streamx_desktop::update_check::spawn(state.clone());
+    streamx_desktop::health_check::spawn(state.clone());
 
     #[cfg(feature = "ui-test")]
     streamx_desktop::test_driver::maybe_start(&state);

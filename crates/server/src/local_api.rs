@@ -340,6 +340,15 @@ impl Api for LocalApi {
         Ok(self.components.search_provider.provider_infos())
     }
 
+    async fn health(&self) -> ClientResult<streamx_api::types::HealthStatus> {
+        let (storage_ok, storage_message) =
+            self.components.torrent_engine.storage_health().status();
+        Ok(streamx_api::types::HealthStatus {
+            storage_ok,
+            storage_message,
+        })
+    }
+
     // -------- streams --------
 
     async fn create_stream(&self, req: &CreateStreamRequest) -> ClientResult<CreateStreamResponse> {

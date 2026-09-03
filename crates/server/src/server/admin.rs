@@ -98,15 +98,20 @@ async fn handle_admin_ws(mut socket: WebSocket, state: AppState) {
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                // Disk stats: recompute dir sizes every 10 seconds (expensive)
-                if tick_count % 5 == 0 {
+                // Disk stats: recompute dir sizes every 10 seconds (expensive).
+                // Bounded and skipped while storage stalls: a scan stuck on a
+                // dying disk must not pile up threads (one per admin WS) or
+                // hang this loop.
+                if tick_count % 5 == 0 && !state.torrent_engine.storage_health().is_stalled() {
                     let data_dir = state.config.data_dir.clone();
                     let downloads_dir = state.config.downloads_dir();
-                    cached_disk = tokio::task::spawn_blocking(move || {
+                    if let Some(stats) = crate::storage_health::bounded_fs_op(10, move || {
                         collect_disk_stats(&data_dir, &downloads_dir)
                     })
                     .await
-                    .unwrap_or(cached_disk);
+                    {
+                        cached_disk = stats;
+                    }
                 }
 
                 let (rss, cpu, prev) = collect_process_stats(prev_cpu_ticks);

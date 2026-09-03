@@ -8,6 +8,7 @@
 pub mod app;
 pub mod asset_source;
 pub mod components;
+pub mod health_check;
 pub mod keybindings;
 pub mod pages;
 pub mod playback;

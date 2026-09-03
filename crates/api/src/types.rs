@@ -56,6 +56,17 @@ pub struct ProviderInfo {
 }
 }
 
+ts! {
+/// Server liveness + downloads-volume status. Polled by the UIs so a
+/// dying disk is reported to the user instead of freezing playback.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HealthStatus {
+    pub storage_ok: bool,
+    #[serde(default)]
+    pub storage_message: Option<String>,
+}
+}
+
 // ===================== Torrent =====================
 
 ts! {

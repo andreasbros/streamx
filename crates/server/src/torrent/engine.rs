@@ -147,6 +147,7 @@ pub struct TorrentEngine {
     /// with a recent watcher must not be deleted or paused out from
     /// under them.
     watch_activity: std::sync::Mutex<HashMap<String, std::time::Instant>>,
+    storage_health: Arc<crate::storage_health::StorageHealth>,
 }
 
 impl TorrentEngine {
@@ -179,6 +180,9 @@ impl TorrentEngine {
             librqbit::version()
         );
 
+        let storage_health = crate::storage_health::StorageHealth::new();
+        storage_health.spawn_monitor(downloads_dir.clone());
+
         let engine = Self {
             session: std::sync::RwLock::new(session),
             torrent_config: config.clone(),
@@ -190,6 +194,7 @@ impl TorrentEngine {
             partial_dir,
             complete_dir,
             watch_activity: std::sync::Mutex::new(HashMap::new()),
+            storage_health,
         };
 
         engine.spawn_progress_updater();
@@ -407,12 +412,20 @@ impl TorrentEngine {
         // the expected on-disk path exists before trusting the row;
         // otherwise re-activate and let librqbit re-download.
         if dl.status == "complete" {
+            if self.storage_health.is_stalled() {
+                return Err(Error::Storage {
+                    message: "Download storage is not responding; check the drive".to_string(),
+                });
+            }
             let complete = self.complete_dir.join(&dl.title).join(&dl.file_name);
             let flat = self.complete_dir.join(&dl.file_name);
-            if !dl.file_name.is_empty()
-                && (tokio::fs::metadata(&complete).await.is_ok()
-                    || tokio::fs::metadata(&flat).await.is_ok())
-            {
+            let on_disk = !dl.file_name.is_empty()
+                && crate::storage_health::bounded_fs_op(5, move || {
+                    complete.exists() || flat.exists()
+                })
+                .await
+                .unwrap_or(false);
+            if on_disk {
                 info!(
                     info_hash = %info_hash,
                     download_all = dl.download_all,
@@ -420,7 +433,7 @@ impl TorrentEngine {
                 );
                 return Ok(());
             }
-            if !self.downloads_root_available() {
+            if !self.downloads_root_available().await {
                 tracing::warn!(
                     info_hash = %info_hash,
                     title = %dl.title,
@@ -675,11 +688,26 @@ impl TorrentEngine {
     /// False when the downloads root itself is gone — e.g. an external
     /// volume that unmounted. Callers must then treat missing files as
     /// "volume offline", never as "user deleted them".
-    pub fn downloads_root_available(&self) -> bool {
-        self.complete_dir
-            .parent()
-            .map(|p| p.exists())
+    /// A stalling (mounted but unresponsive) volume also counts as
+    /// unavailable; the live `exists()` check runs off the runtime with a
+    /// timeout so a dying disk cannot hang the caller.
+    pub async fn downloads_root_available(&self) -> bool {
+        if self.storage_health.is_stalled() {
+            return false;
+        }
+        let root = match self.complete_dir.parent() {
+            Some(p) => p.to_path_buf(),
+            None => return false,
+        };
+        crate::storage_health::bounded_fs_op(5, move || root.exists())
+            .await
             .unwrap_or(false)
+    }
+
+    /// Health of the volume downloads are written to, surfaced to both
+    /// UIs so a dying disk is reported instead of freezing playback.
+    pub fn storage_health(&self) -> Arc<crate::storage_health::StorageHealth> {
+        self.storage_health.clone()
     }
 
     fn spawn_add_torrent(
@@ -705,6 +733,7 @@ impl TorrentEngine {
         let db = self.db.clone();
         let partial_dir = self.partial_dir.clone();
         let complete_dir = self.complete_dir.clone();
+        let storage_health = self.storage_health.clone();
         let info_hash_for_cleanup = info_hash.clone();
 
         tokio::spawn(async move {
@@ -727,6 +756,11 @@ impl TorrentEngine {
                 only_files = ?if download_all { None } else { file_index.map(|i| vec![i]) },
                 "spawn_add_torrent: adding to librqbit session"
             );
+            if storage_health.is_stalled() {
+                warn!(info_hash = %info_hash, "not adding torrent: download storage is not responding");
+                let _ = db.update_download_status(&info_hash, "error").await;
+                return;
+            }
             // Adaptive timeout: start at 30s, double on each retry up to 3 attempts
             let _ = db.update_download_status(&info_hash, "initializing").await;
             let mut resp = None;
@@ -741,19 +775,35 @@ impl TorrentEngine {
                     ..Default::default()
                 };
                 let timeout_secs = 30u64 << attempt; // 30s, 60s, 120s
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(timeout_secs),
-                    session.add_torrent(AddTorrent::from_url(&magnet_uri), Some(opts)),
-                )
-                .await;
+                                                     // librqbit's storage init opens the torrent's files with
+                                                     // blocking I/O inside this future. On a stalled disk that
+                                                     // open never returns and a timeout cannot preempt a
+                                                     // blocked poll, so drive the future on the blocking pool:
+                                                     // a wedged attempt costs one abandoned pool thread instead
+                                                     // of a core runtime worker (which froze the whole server).
+                let session_cl = session.clone();
+                let magnet = magnet_uri.clone();
+                let rt = tokio::runtime::Handle::current();
+                let join = tokio::task::spawn_blocking(move || {
+                    rt.block_on(session_cl.add_torrent(AddTorrent::from_url(&magnet), Some(opts)))
+                });
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), join).await;
 
                 match result {
-                    Ok(Ok(r)) => {
+                    Ok(Ok(Ok(r))) => {
                         resp = Some(r);
                         break;
                     }
-                    Ok(Err(e)) => {
+                    Ok(Ok(Err(e))) => {
                         warn!(info_hash = %info_hash, attempt, "Failed to add torrent: {e}");
+                        if attempt == 2 {
+                            let _ = db.update_download_status(&info_hash, "error").await;
+                            return;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        warn!(info_hash = %info_hash, attempt, "Add torrent task failed: {e}");
                         if attempt == 2 {
                             let _ = db.update_download_status(&info_hash, "error").await;
                             return;

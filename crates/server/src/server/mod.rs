@@ -224,6 +224,7 @@ pub fn build_router_with_state(state: AppState) -> Router {
 
     let api_routes = Router::new()
         .route("/version", get(version_handler))
+        .route("/health", get(api::health))
         .route("/downloads", get(api::list_downloads))
         .nest("/admin", admin_routes)
         .nest("/auth", auth_routes)

@@ -67,6 +67,11 @@ export interface ProviderInfo {
   url: string;
 }
 
+export interface HealthStatus {
+  storage_ok: boolean;
+  storage_message?: string | null;
+}
+
 export interface SearchResponse {
   results: SearchResultGroup[];
   provider_errors?: ProviderError[];

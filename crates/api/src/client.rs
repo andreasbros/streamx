@@ -67,6 +67,9 @@ pub trait Api: Send + Sync {
 
     /// Configured content providers, for labeling provider status UI.
     async fn search_providers(&self) -> ClientResult<Vec<ProviderInfo>>;
+
+    /// Server liveness + downloads-volume status, for storage alerts.
+    async fn health(&self) -> ClientResult<crate::types::HealthStatus>;
     async fn create_stream(&self, req: &CreateStreamRequest) -> ClientResult<CreateStreamResponse>;
     async fn stream_files(
         &self,
@@ -172,6 +175,7 @@ impl Client {
     delegate!(search(&self, query: &str, page: u32) -> ClientResult<SearchResponse>);
     delegate!(browse(&self, params: &BrowseParams) -> ClientResult<BrowseResponse>);
     delegate!(search_providers(&self) -> ClientResult<Vec<ProviderInfo>>);
+    delegate!(health(&self) -> ClientResult<crate::types::HealthStatus>);
     delegate!(create_stream(&self, req: &CreateStreamRequest) -> ClientResult<CreateStreamResponse>);
     delegate!(stream_files(&self, stream_id: &str) -> ClientResult<(Vec<crate::types::TorrentFile>, Option<String>)>);
     delegate!(stream_status(&self, stream_id: &str) -> ClientResult<StreamStatus>);
@@ -374,6 +378,10 @@ impl Api for HttpClient {
         )
         .await?;
         Ok(env.providers)
+    }
+
+    async fn health(&self) -> ClientResult<crate::types::HealthStatus> {
+        Self::decode(self.http.get(self.url("/api/health")).send().await?).await
     }
 
     async fn browse(&self, p: &BrowseParams) -> ClientResult<BrowseResponse> {

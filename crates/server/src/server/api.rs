@@ -91,6 +91,18 @@ pub async fn search_providers(
     Ok(Json(serde_json::json!({ "providers": providers })))
 }
 
+/// Unauthenticated liveness + storage status. Both UIs poll this to warn
+/// the user when the downloads volume stops responding instead of
+/// freezing on it.
+pub async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    let (storage_ok, storage_message) = state.torrent_engine.storage_health().status();
+    Json(serde_json::json!({
+        "status": "ok",
+        "storage_ok": storage_ok,
+        "storage_message": storage_message,
+    }))
+}
+
 /// When the `web_only` server setting is on, keep only WEB source
 /// variants and drop titles that have none.
 async fn filter_web_only(
@@ -390,7 +402,7 @@ pub async fn delete_stream(
 pub async fn cleanup_stream(state: &AppState, id: &str) -> std::result::Result<(), Error> {
     // With the downloads volume offline, deleting would drop DB rows
     // while the files survive on the unmounted drive — orphaning them.
-    if !state.torrent_engine.downloads_root_available() {
+    if !state.torrent_engine.downloads_root_available().await {
         return Err(Error::BadRequest {
             message: "Downloads volume is unavailable; mount the drive before deleting".to_string(),
         });

@@ -12,14 +12,29 @@ import type { ProviderError } from "../api/types";
  *
  * Error: a provider failure carried in a response shows a centered,
  * dismissible card with the provider host and the exact error.
+ *
+ * Storage: /api/health is polled every 10s; while the downloads volume
+ * is unresponsive (dying USB disk) a persistent red pill warns the user
+ * that downloads and non-cached playback are unavailable.
  */
 export function ProviderHealth() {
   const [slow, setSlow] = useState(false);
   const [error, setError] = useState<ProviderError | null>(null);
+  const [storageDown, setStorageDown] = useState(false);
   const providerHost = useRef<string>("content provider");
   const slowIds = useRef(new Set<number>());
 
   useEffect(() => {
+    const pollHealth = () => {
+      apiClient
+        .health()
+        .then((h) => setStorageDown(!h.storage_ok))
+        .catch(() => {
+          // Server unreachable: the connection-lost UI covers that case.
+        });
+    };
+    pollHealth();
+    const healthTimer = window.setInterval(pollHealth, 10000);
     apiClient
       .searchProviders()
       .then((r) => {
@@ -53,6 +68,7 @@ export function ProviderHealth() {
     window.addEventListener("streamx:provider-settled", onSettled);
     window.addEventListener("streamx:provider-error", onError);
     return () => {
+      window.clearInterval(healthTimer);
       window.removeEventListener("streamx:provider-slow", onSlow);
       window.removeEventListener("streamx:provider-settled", onSettled);
       window.removeEventListener("streamx:provider-error", onError);
@@ -61,6 +77,59 @@ export function ProviderHealth() {
 
   return (
     <>
+      <AnimatePresence>
+        {storageDown && (
+          <motion.div
+            key="storage-down"
+            initial={{ opacity: 0, y: -12, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -8, scale: 0.98 }}
+            transition={{ type: "spring", stiffness: 420, damping: 30 }}
+            style={{
+              position: "fixed",
+              top: 16,
+              right: 16,
+              zIndex: 1210,
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: "10px 16px",
+              borderRadius: 14,
+              background: "color-mix(in srgb, var(--color-panel-solid, #16181c) 82%, transparent)",
+              backdropFilter: "blur(12px)",
+              border: "1px solid var(--red-9, #e5484d)",
+              boxShadow: "0 8px 30px rgba(0,0,0,0.35)",
+            }}
+          >
+            <motion.span
+              animate={{ opacity: [0.5, 1, 0.5] }}
+              transition={{ duration: 1.4, repeat: Infinity }}
+              style={{
+                width: 22,
+                height: 22,
+                borderRadius: 999,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 13,
+                fontWeight: 700,
+                color: "white",
+                background:
+                  "linear-gradient(135deg, var(--red-9, #e5484d), var(--orange-9, #f76b15))",
+              }}
+            >
+              !
+            </motion.span>
+            <span style={{ display: "flex", flexDirection: "column", lineHeight: 1.25 }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>Storage not responding</span>
+              <span style={{ fontSize: 12, opacity: 0.7 }}>
+                Downloads paused, check the download disk
+              </span>
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <AnimatePresence>
         {slow && (
           <motion.div
@@ -71,7 +140,7 @@ export function ProviderHealth() {
             transition={{ type: "spring", stiffness: 420, damping: 30 }}
             style={{
               position: "fixed",
-              top: 16,
+              top: storageDown ? 78 : 16,
               right: 16,
               zIndex: 1200,
               display: "flex",

@@ -9,6 +9,7 @@ pub mod logging;
 pub mod maintenance;
 pub mod runner;
 pub mod server;
+pub mod storage_health;
 pub mod torrent;
 pub mod transcode;
 
